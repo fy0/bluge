@@ -49,7 +49,10 @@ func (b *BM25Similarity) ComputeNorm(numTerms int) float32 {
 }
 
 func (b *BM25Similarity) Idf(docFreq, docCount uint64) float64 {
-	return math.Log(1.0 + (float64(docCount)-float64(docFreq)+0.5)/(float64(docFreq)+0.5))
+	if docFreq > docCount {
+		return 0
+	}
+	return math.Log(1.0 + (float64(docCount-docFreq)+0.5)/(float64(docFreq)+0.5))
 }
 
 func (b *BM25Similarity) IdfExplainTerm(collectionStats segment.CollectionStats, termStats segment.TermStats) *search.Explanation {
