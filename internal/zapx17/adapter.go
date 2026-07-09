@@ -425,8 +425,9 @@ func (p *postingsListAdapter) Count() uint64 {
 }
 
 type postingsIteratorAdapter struct {
-	inner scorchseg.PostingsIterator
-	count uint64
+	inner   scorchseg.PostingsIterator
+	current postingAdapter
+	count   uint64
 }
 
 func (p *postingsIteratorAdapter) Next() (blugeseg.Posting, error) {
@@ -434,7 +435,9 @@ func (p *postingsIteratorAdapter) Next() (blugeseg.Posting, error) {
 	if err != nil || posting == nil {
 		return nil, err
 	}
-	return &postingAdapter{inner: posting}, nil
+	p.current.inner = posting
+	p.current.hasNumber = false
+	return &p.current, nil
 }
 
 func (p *postingsIteratorAdapter) Advance(docNum uint64) (blugeseg.Posting, error) {
@@ -442,7 +445,9 @@ func (p *postingsIteratorAdapter) Advance(docNum uint64) (blugeseg.Posting, erro
 	if err != nil || posting == nil {
 		return nil, err
 	}
-	return &postingAdapter{inner: posting}, nil
+	p.current.inner = posting
+	p.current.hasNumber = false
+	return &p.current, nil
 }
 
 func (p *postingsIteratorAdapter) Size() int {

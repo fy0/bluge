@@ -963,6 +963,13 @@ func (q *MatchQuery) Searcher(i search.Reader, options search.SearcherOptions) (
 	}
 
 	if len(tokens) > 0 {
+		if len(tokens) == 1 && q.fuzziness == 0 {
+			tq := NewTermQuery(string(tokens[0].Term))
+			tq.SetField(field)
+			tq.SetBoost(q.boost.Value())
+			return tq.Searcher(i, options)
+		}
+
 		tqs := make([]Query, len(tokens))
 		if q.fuzziness != 0 {
 			for i, token := range tokens {
