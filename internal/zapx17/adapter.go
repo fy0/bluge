@@ -514,6 +514,13 @@ func (p *postingAdapter) Norm() float64 {
 	return p.inner.Norm()
 }
 
+func (p *postingAdapter) NormUint64() uint64 {
+	if normBits, ok := p.inner.(interface{ NormUint64() uint64 }); ok {
+		return normBits.NormUint64()
+	}
+	return uint64(math.Float32bits(float32(p.inner.Norm())))
+}
+
 func (p *postingAdapter) Locations() []blugeseg.Location {
 	innerLocs := p.inner.Locations()
 	if len(innerLocs) == 0 {

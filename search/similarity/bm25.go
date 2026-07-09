@@ -101,6 +101,11 @@ func NewBM25Scorer(boost, k1, b, avgDocLen float64, idf *search.Explanation) *BM
 
 func (b *BM25Scorer) Score(freq int, norm float64) float64 {
 	docLen := math.Float32bits(float32(norm))
+	return b.ScoreRawNorm(freq, uint64(docLen))
+}
+
+func (b *BM25Scorer) ScoreRawNorm(freq int, normBits uint64) float64 {
+	docLen := normBits
 	normInverse := 1 / (b.k1 * ((1 - b.b) + b.b*float64(docLen)/b.avgDocLen))
 	return b.weight - b.weight/(1+float64(freq)*normInverse)
 }

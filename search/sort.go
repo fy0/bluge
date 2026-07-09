@@ -42,11 +42,25 @@ func (o SortOrder) Reverse() {
 }
 
 func (o SortOrder) Compute(match *DocumentMatch) {
-	for _, sort := range o {
+	if cap(match.SortValue) < len(o) {
+		match.SortValue = make([][]byte, len(o))
+	} else {
+		match.SortValue = match.SortValue[:len(o)]
+	}
+	for i, sort := range o {
+		prealloc := match.SortValue[i]
+		if source, ok := sort.source.(textValueSourcePrealloc); ok {
+			match.SortValue[i] = source.ValuePrealloc(match, prealloc)
+			continue
+		}
 		sortVal := sort.Value(match)
-		sortValCopy := make([]byte, len(sortVal))
-		copy(sortValCopy, sortVal)
-		match.SortValue = append(match.SortValue, sortValCopy)
+		if cap(prealloc) < len(sortVal) {
+			prealloc = make([]byte, len(sortVal))
+		} else {
+			prealloc = prealloc[:len(sortVal)]
+		}
+		copy(prealloc, sortVal)
+		match.SortValue[i] = prealloc
 	}
 }
 
