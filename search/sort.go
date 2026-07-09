@@ -64,6 +64,31 @@ func (o SortOrder) Compute(match *DocumentMatch) {
 	}
 }
 
+func (o SortOrder) IsScoreDescending() bool {
+	if len(o) != 1 {
+		return false
+	}
+	if !o[0].desc {
+		return false
+	}
+	missing, ok := o[0].source.(*MissingTextValueSource)
+	if !ok {
+		return false
+	}
+	_, ok = missing.primary.(*ScoreSource)
+	return ok
+}
+
+func (o SortOrder) CompareScore(i, j *DocumentMatch) int {
+	if i.Score > j.Score {
+		return -1
+	}
+	if i.Score < j.Score {
+		return 1
+	}
+	return compareHitNumber(i, j)
+}
+
 func (o SortOrder) Compare(i, j *DocumentMatch) int {
 	// compare the documents on all search sorts until a differences is found
 	for x := range o {
@@ -80,6 +105,10 @@ func (o SortOrder) Compare(i, j *DocumentMatch) int {
 		}
 		return c
 	}
+	return compareHitNumber(i, j)
+}
+
+func compareHitNumber(i, j *DocumentMatch) int {
 	// if they are the same at this point, impose order based on index natural sort order
 	if i.HitNumber == j.HitNumber {
 		return 0
