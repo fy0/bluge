@@ -27,6 +27,8 @@ const (
 	Version = zapxtext.Version
 )
 
+const approximateAverageFieldLength = 32
+
 func New(results []blugeseg.Document, normCalc func(string, int) float32) (blugeseg.Segment, uint64, error) {
 	zapDocs := make([]bleveindex.Document, len(results))
 	for i, doc := range results {
@@ -278,41 +280,12 @@ func (s *segmentAdapter) Fields() []string {
 }
 
 func (s *segmentAdapter) CollectionStats(field string) (blugeseg.CollectionStats, error) {
-	dict, err := s.inner.Dictionary(field)
-	if err != nil {
-		return nil, err
-	}
-
-	stats := &collectionStats{totalDocCount: s.inner.Count()}
-	docsWithField := roaringv1.NewBitmap()
-	itr := dict.AutomatonIterator(nil, nil, nil)
-	for {
-		entry, err := itr.Next()
-		if err != nil {
-			return nil, err
-		}
-		if entry == nil {
-			break
-		}
-		postings, err := dict.PostingsList([]byte(entry.Term), nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		postingsItr := postings.Iterator(true, false, false, nil)
-		for {
-			posting, err := postingsItr.Next()
-			if err != nil {
-				return nil, err
-			}
-			if posting == nil {
-				break
-			}
-			docsWithField.Add(uint32(posting.Number()))
-			stats.sumTotalTermFreq += posting.Frequency()
-		}
-	}
-	stats.docCount = docsWithField.GetCardinality()
-	return stats, nil
+	count := s.inner.Count()
+	return &collectionStats{
+		totalDocCount:    count,
+		docCount:         count,
+		sumTotalTermFreq: count * approximateAverageFieldLength,
+	}, nil
 }
 
 func (s *segmentAdapter) Size() int {
