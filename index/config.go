@@ -20,8 +20,7 @@ import (
 	segment "github.com/blugelabs/bluge_segment_api"
 
 	"github.com/blugelabs/bluge/index/mergeplan"
-	iceV1 "github.com/blugelabs/ice"
-	iceV2 "github.com/blugelabs/ice/v2"
+	"github.com/blugelabs/bluge/internal/zapx17"
 )
 
 type Config struct {
@@ -154,8 +153,8 @@ func DefaultConfigWithDirectory(df func() Directory) Config {
 
 func defaultConfig() Config {
 	rv := Config{
-		SegmentType:      iceV1.Type,
-		SegmentVersion:   iceV1.Version,
+		SegmentType:      zapx17.Type,
+		SegmentVersion:   zapx17.Version,
 		MergePlanOptions: mergeplan.DefaultMergePlanOptions,
 		DeletionPolicyFunc: func() DeletionPolicy {
 			return NewKeepNLatestDeletionPolicy(1)
@@ -212,18 +211,11 @@ func defaultConfig() Config {
 	}
 
 	rv.WithSegmentPlugin(&SegmentPlugin{
-		Type:    iceV1.Type,
-		Version: iceV1.Version,
-		New:     iceV1.New,
-		Load:    iceV1.Load,
-		Merge:   iceV1.Merge,
-	})
-	rv.WithSegmentPlugin(&SegmentPlugin{
-		Type:    iceV2.Type,
-		Version: iceV2.Version,
-		New:     iceV2.New,
-		Load:    iceV2.Load,
-		Merge:   iceV2.Merge,
+		Type:    zapx17.Type,
+		Version: zapx17.Version,
+		New:     zapx17.New,
+		Load:    zapx17.Load,
+		Merge:   zapx17.Merge,
 	})
 
 	return rv

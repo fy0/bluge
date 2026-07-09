@@ -35,6 +35,7 @@ type Config struct {
 	DefaultSearchAnalyzer *analysis.Analyzer
 	DefaultSimilarity     search.Similarity
 	PerFieldSimilarity    map[string]search.Similarity
+	VectorBackend         VectorBackend
 
 	SearchStartFunc func(size uint64) error
 	SearchEndFunc   func(size uint64)
@@ -101,6 +102,7 @@ func defaultConfig(indexConfig index.Config) Config {
 		DefaultSearchAnalyzer: analyzer.NewStandardAnalyzer(),
 		DefaultSimilarity:     similarity.NewBM25Similarity(),
 		PerFieldSimilarity:    map[string]search.Similarity{},
+		VectorBackend:         unsupportedVectorBackend{},
 	}
 
 	allDocsFields := NewKeywordField("", "")
