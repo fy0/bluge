@@ -73,6 +73,7 @@ func (s *Writer) newSegment(results []segment.Document) (*segmentWrapper, uint64
 	return &segmentWrapper{
 		Segment:    seg,
 		refCounter: noOpRefCounter{},
+		inMemory:   true,
 	}, count, err
 }
 
@@ -80,6 +81,7 @@ type segmentWrapper struct {
 	segment.Segment
 	refCounter
 	persisted bool
+	inMemory  bool
 }
 
 func (s segmentWrapper) Persisted() bool {
@@ -88,6 +90,18 @@ func (s segmentWrapper) Persisted() bool {
 
 func (s segmentWrapper) Close() error {
 	return s.DecRef()
+}
+
+// persistedView returns a persisted wrapper over the same read-only segment.
+// The caller owns the returned reference.
+func (s *segmentWrapper) persistedView() *segmentWrapper {
+	s.AddRef()
+	return &segmentWrapper{
+		Segment:    s.Segment,
+		refCounter: s.refCounter,
+		persisted:  true,
+		inMemory:   s.inMemory,
+	}
 }
 
 type refCounter interface {

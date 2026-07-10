@@ -508,10 +508,12 @@ func (s *Writer) loadSnapshot(epoch uint64) (*Snapshot, error) {
 	for _, segSnapshot := range snapshot.segment {
 		segPlugin, err := loadSegmentPlugin(s.config.supportedSegmentPlugins, segSnapshot.segmentType, segSnapshot.segmentVersion)
 		if err != nil {
+			_ = snapshot.Close()
 			return nil, fmt.Errorf("error loading required segment plugin: %v", err)
 		}
 		segSnapshot.segment, err = s.loadSegment(segSnapshot.id, segPlugin)
 		if err != nil {
+			_ = snapshot.Close()
 			return nil, fmt.Errorf("error opening segment %d: %w", segSnapshot.id, err)
 		}
 

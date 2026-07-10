@@ -73,7 +73,7 @@ func (i *Snapshot) decRef() (err error) {
 	i.refs--
 	if i.refs == 0 {
 		for _, s := range i.segment {
-			if s != nil {
+			if s != nil && s.segment != nil {
 				err2 := s.segment.DecRef()
 				if err == nil {
 					err = err2

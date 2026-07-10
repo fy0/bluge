@@ -23,6 +23,13 @@ import (
 	segment "github.com/blugelabs/bluge_segment_api"
 )
 
+// Keep direct-persist reuse bounded so disk-backed roots do not retain an
+// unbounded number of batch segments on the Go heap.
+const (
+	maxPersistedInMemorySegments = 4
+	maxPersistedInMemoryBytes    = 8 * 1024 * 1024
+)
+
 func (s *Writer) persisterLoop(merges chan *segmentMerge, persists chan *persistIntroduction,
 	introducerNotifier, persisterNotifier watcherChan, lastPersistedEpoch uint64) {
 	defer s.asyncTasks.Done()
@@ -310,19 +317,47 @@ func (s *Writer) persistSnapshotMaybeMerge(merges chan *segmentMerge, persists c
 
 func (s *Writer) persistSnapshotDirect(persists chan *persistIntroduction, snapshot *Snapshot) (err error) {
 	// first ensure that each segment in this snapshot has been persisted
-	var newSegmentIds []uint64
+	newSegments := make(map[uint64]*segmentWrapper)
+	var persistedInMemorySegments int
+	var persistedInMemoryBytes uint64
 	for _, segmentSnapshot := range snapshot.segment {
+		if segmentSnapshot.segment.Persisted() && segmentSnapshot.segment.inMemory {
+			persistedInMemorySegments++
+			persistedInMemoryBytes += uint64(segmentSnapshot.segment.Size())
+		}
 		if !segmentSnapshot.segment.Persisted() {
 			err = s.directory.Persist(ItemKindSegment, segmentSnapshot.id, segmentSnapshot.segment.Segment, s.closeCh)
 			if err != nil {
 				return fmt.Errorf("error persisting segment: %v", err)
 			}
-			newSegmentIds = append(newSegmentIds, segmentSnapshot.id)
+			newSegments[segmentSnapshot.id] = segmentSnapshot.segment
 		}
 	}
 
-	if len(newSegmentIds) > 0 {
-		err = s.prepareIntroducePersist(persists, newSegmentIds)
+	if len(newSegments) > 0 {
+		persistedSegments := make(map[uint64]*segmentWrapper, len(newSegments))
+		for segmentID, newSegment := range newSegments {
+			segmentSize := uint64(newSegment.Size())
+			if persistedInMemorySegments < maxPersistedInMemorySegments &&
+				persistedInMemoryBytes+segmentSize <= maxPersistedInMemoryBytes {
+				persistedSegments[segmentID] = newSegment.persistedView()
+				persistedInMemorySegments++
+				persistedInMemoryBytes += segmentSize
+				continue
+			}
+
+			persistedSegments[segmentID], err = s.loadSegment(segmentID, s.segPlugin)
+			if err != nil {
+				for _, persistedSegment := range persistedSegments {
+					if persistedSegment != nil {
+						_ = persistedSegment.Close()
+					}
+				}
+				return fmt.Errorf("error opening new segment %d, %v", segmentID, err)
+			}
+		}
+
+		err = s.prepareIntroducePersist(persists, persistedSegments)
 		if err != nil {
 			return err
 		}
@@ -338,28 +373,20 @@ func (s *Writer) persistSnapshotDirect(persists chan *persistIntroduction, snaps
 	return nil
 }
 
-func (s *Writer) prepareIntroducePersist(persists chan *persistIntroduction, newSegmentIds []uint64) error {
-	// now try to open all the new snapshots
-	newSegments := make(map[uint64]*segmentWrapper)
+func (s *Writer) prepareIntroducePersist(persists chan *persistIntroduction,
+	persistedSegments map[uint64]*segmentWrapper) error {
 	defer func() {
-		for _, s := range newSegments {
+		for _, s := range persistedSegments {
 			if s != nil {
-				// cleanup segments that were opened but not
+				// cleanup segments that were prepared but not
 				// swapped into the new root
 				_ = s.Close()
 			}
 		}
 	}()
-	var err error
-	for _, segmentID := range newSegmentIds {
-		newSegments[segmentID], err = s.loadSegment(segmentID, s.segPlugin)
-		if err != nil {
-			return fmt.Errorf("error opening new segment %d, %v", segmentID, err)
-		}
-	}
 
 	persist := &persistIntroduction{
-		persisted: newSegments,
+		persisted: persistedSegments,
 		applied:   make(notificationChan),
 	}
 
