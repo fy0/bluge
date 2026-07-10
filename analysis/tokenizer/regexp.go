@@ -18,7 +18,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 var IdeographRegexp = regexp.MustCompile(`\p{Han}|\p{Hangul}|\p{Hiragana}|\p{Katakana}`)

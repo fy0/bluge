@@ -17,7 +17,7 @@ package hu
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/hungarian"
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 type HungarianStemmerFilter struct {

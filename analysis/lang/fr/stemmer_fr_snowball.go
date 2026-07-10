@@ -17,7 +17,7 @@ package fr
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/french"
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 type FrenchStemmerFilter struct {

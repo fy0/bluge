@@ -17,7 +17,7 @@ package pt
 import (
 	"bytes"
 
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 type PortugueseLightStemmerFilter struct {

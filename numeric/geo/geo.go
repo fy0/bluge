@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blugelabs/bluge/numeric"
+	"github.com/fy0/bluge/numeric"
 )
 
 // GeoBits is the number of bits used for a single geo point

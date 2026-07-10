@@ -15,9 +15,9 @@
 package ar
 
 import (
-	"github.com/blugelabs/bluge/analysis"
-	"github.com/blugelabs/bluge/analysis/token"
-	"github.com/blugelabs/bluge/analysis/tokenizer"
+	"github.com/fy0/bluge/analysis"
+	"github.com/fy0/bluge/analysis/token"
+	"github.com/fy0/bluge/analysis/tokenizer"
 	"golang.org/x/text/unicode/norm"
 )
 

@@ -1,7 +1,7 @@
 package en
 
 import (
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 // StopWordsBytes is the built-in list of stopwords used by the "stop_en" TokenFilter.

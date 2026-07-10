@@ -18,8 +18,8 @@ import (
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
 	blugeseg "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/internal/blugeidx"
-	zapxtext "github.com/blugelabs/bluge/internal/zapxtext"
+	"github.com/fy0/bluge/internal/blugeidx"
+	zapxtext "github.com/fy0/bluge/internal/zapxtext"
 )
 
 const (

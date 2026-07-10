@@ -14,8 +14,8 @@ import (
 	bleveindex "github.com/blevesearch/bleve_index_api"
 	blugeseg "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/analysis"
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/analysis"
+	"github.com/fy0/bluge/internal/blugeidx"
 )
 
 type exporterTestDocument struct {

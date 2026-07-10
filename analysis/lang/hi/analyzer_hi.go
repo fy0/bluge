@@ -15,10 +15,10 @@
 package hi
 
 import (
-	"github.com/blugelabs/bluge/analysis"
-	"github.com/blugelabs/bluge/analysis/lang/in"
-	"github.com/blugelabs/bluge/analysis/token"
-	"github.com/blugelabs/bluge/analysis/tokenizer"
+	"github.com/fy0/bluge/analysis"
+	"github.com/fy0/bluge/analysis/lang/in"
+	"github.com/fy0/bluge/analysis/token"
+	"github.com/fy0/bluge/analysis/tokenizer"
 )
 
 func Analyzer() *analysis.Analyzer {

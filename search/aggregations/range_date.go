@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 )
 
 type DateRangeAggregation struct {

@@ -19,8 +19,8 @@ import (
 
 	segment "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/index/mergeplan"
-	"github.com/blugelabs/bluge/internal/zapxbluge"
+	"github.com/fy0/bluge/index/mergeplan"
+	"github.com/fy0/bluge/internal/zapxbluge"
 )
 
 type Config struct {

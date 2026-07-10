@@ -15,7 +15,7 @@
 package highlight
 
 import (
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 )
 
 // FragmentScorer will score fragments by how many

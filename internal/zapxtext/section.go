@@ -18,7 +18,7 @@ import (
 	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2"
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/internal/blugeidx"
 )
 
 type section interface {

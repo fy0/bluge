@@ -17,7 +17,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/internal/blugeidx"
 )
 
 // New creates an in-memory zapx text segment.

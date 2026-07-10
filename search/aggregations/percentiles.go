@@ -17,7 +17,7 @@ package aggregations
 import (
 	"fmt"
 
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 	"github.com/caio/go-tdigest"
 )
 

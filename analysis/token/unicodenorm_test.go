@@ -20,7 +20,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 // the following tests come from the lucene

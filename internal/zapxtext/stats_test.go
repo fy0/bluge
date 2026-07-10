@@ -17,7 +17,7 @@ import (
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
 	blugeseg "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/internal/blugeidx"
 )
 
 func TestFieldStatsSurviveMerge(t *testing.T) {

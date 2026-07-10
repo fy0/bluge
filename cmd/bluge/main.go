@@ -15,7 +15,7 @@
 package main
 
 import (
-	"github.com/blugelabs/bluge/cmd/bluge/cmd"
+	"github.com/fy0/bluge/cmd/bluge/cmd"
 )
 
 func main() {

@@ -17,11 +17,11 @@ package searcher
 import (
 	"fmt"
 
-	"github.com/blugelabs/bluge/search/similarity"
+	"github.com/fy0/bluge/search/similarity"
 
 	segment "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 )
 
 // DisjunctionMaxClauseCount is a compile time setting that applications can

@@ -15,7 +15,7 @@
 package searcher
 
 import (
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 	segment "github.com/blugelabs/bluge_segment_api"
 )
 

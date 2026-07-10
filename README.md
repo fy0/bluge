@@ -1,10 +1,23 @@
 # ![Bluge](docs/bluge.png) Bluge
 
-[![PkgGoDev](https://pkg.go.dev/badge/github.com/blugelabs/bluge)](https://pkg.go.dev/github.com/blugelabs/bluge)
-[![Tests](https://github.com/blugelabs/bluge/workflows/Tests/badge.svg?branch=master&event=push)](https://github.com/blugelabs/bluge/actions?query=workflow%3ATests+event%3Apush+branch%3Amaster)
-[![Lint](https://github.com/blugelabs/bluge/workflows/Lint/badge.svg?branch=master&event=push)](https://github.com/blugelabs/bluge/actions?query=workflow%3ALint+event%3Apush+branch%3Amaster)
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/fy0/bluge)](https://pkg.go.dev/github.com/fy0/bluge)
+[![Tests](https://github.com/fy0/bluge/workflows/Tests/badge.svg?branch=main&event=push)](https://github.com/fy0/bluge/actions?query=workflow%3ATests+event%3Apush+branch%3Amain)
+[![Lint](https://github.com/fy0/bluge/workflows/Lint/badge.svg?branch=main&event=push)](https://github.com/fy0/bluge/actions?query=workflow%3ALint+event%3Apush+branch%3Amain)
 
 modern text indexing in go - [blugelabs.com](https://www.blugelabs.com/)
+
+## Installation
+
+The module is published directly from this repository and does not require a
+`replace` directive:
+
+```console
+go get github.com/fy0/bluge@main
+```
+
+```go
+import "github.com/fy0/bluge"
+```
 
 ## About This Branch
 

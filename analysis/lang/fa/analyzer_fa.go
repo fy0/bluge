@@ -15,11 +15,11 @@
 package fa
 
 import (
-	"github.com/blugelabs/bluge/analysis"
-	"github.com/blugelabs/bluge/analysis/char"
-	"github.com/blugelabs/bluge/analysis/lang/ar"
-	"github.com/blugelabs/bluge/analysis/token"
-	"github.com/blugelabs/bluge/analysis/tokenizer"
+	"github.com/fy0/bluge/analysis"
+	"github.com/fy0/bluge/analysis/char"
+	"github.com/fy0/bluge/analysis/lang/ar"
+	"github.com/fy0/bluge/analysis/token"
+	"github.com/fy0/bluge/analysis/tokenizer"
 )
 
 func Analyzer() *analysis.Analyzer {

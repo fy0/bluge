@@ -15,10 +15,10 @@
 package searcher
 
 import (
-	"github.com/blugelabs/bluge/numeric"
-	"github.com/blugelabs/bluge/numeric/geo"
-	"github.com/blugelabs/bluge/search"
-	"github.com/blugelabs/bluge/search/similarity"
+	"github.com/fy0/bluge/numeric"
+	"github.com/fy0/bluge/numeric/geo"
+	"github.com/fy0/bluge/search"
+	"github.com/fy0/bluge/search/similarity"
 	segment "github.com/blugelabs/bluge_segment_api"
 )
 

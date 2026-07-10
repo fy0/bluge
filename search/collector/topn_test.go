@@ -20,9 +20,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/blugelabs/bluge/search/aggregations"
+	"github.com/fy0/bluge/search/aggregations"
 
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 )
 
 func makeMatches(n int, score float64) (rv []*search.DocumentMatch) {

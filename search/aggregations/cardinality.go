@@ -16,7 +16,7 @@ package aggregations
 
 import (
 	"github.com/axiomhq/hyperloglog"
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 )
 
 type CardinalityMetric struct {

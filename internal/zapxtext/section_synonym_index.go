@@ -23,7 +23,7 @@ import (
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
 	"github.com/blevesearch/vellum"
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/internal/blugeidx"
 )
 
 func init() {

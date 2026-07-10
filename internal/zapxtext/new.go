@@ -24,7 +24,7 @@ import (
 
 	index "github.com/blevesearch/bleve_index_api"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/internal/blugeidx"
 	"github.com/golang/snappy"
 )
 

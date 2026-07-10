@@ -27,8 +27,8 @@ import (
 	"github.com/blevesearch/vellum"
 	blugeseg "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/analysis"
-	"github.com/blugelabs/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/analysis"
+	"github.com/fy0/bluge/internal/blugeidx"
 )
 
 func init() {

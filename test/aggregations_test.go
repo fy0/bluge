@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blugelabs/bluge/search/aggregations"
+	"github.com/fy0/bluge/search/aggregations"
 
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 
-	"github.com/blugelabs/bluge"
+	"github.com/fy0/bluge"
 )
 
 func aggregationsLoad(writer *bluge.Writer) error {

@@ -20,14 +20,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blugelabs/bluge/search/similarity"
+	"github.com/fy0/bluge/search/similarity"
 
-	"github.com/blugelabs/bluge/analysis"
-	"github.com/blugelabs/bluge/analysis/tokenizer"
-	"github.com/blugelabs/bluge/numeric"
-	"github.com/blugelabs/bluge/numeric/geo"
-	"github.com/blugelabs/bluge/search"
-	"github.com/blugelabs/bluge/search/searcher"
+	"github.com/fy0/bluge/analysis"
+	"github.com/fy0/bluge/analysis/tokenizer"
+	"github.com/fy0/bluge/numeric"
+	"github.com/fy0/bluge/numeric/geo"
+	"github.com/fy0/bluge/search"
+	"github.com/fy0/bluge/search/searcher"
 )
 
 // A Query represents a description of the type

@@ -1,4 +1,4 @@
-module github.com/blugelabs/bluge
+module github.com/fy0/bluge
 
 go 1.24.0
 

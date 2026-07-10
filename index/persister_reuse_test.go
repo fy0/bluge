@@ -18,7 +18,7 @@ import (
 
 	segment "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/index/mergeplan"
+	"github.com/fy0/bluge/index/mergeplan"
 )
 
 type directoryLoadCounter struct {

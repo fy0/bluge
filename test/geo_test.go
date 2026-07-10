@@ -15,9 +15,9 @@
 package test
 
 import (
-	"github.com/blugelabs/bluge"
-	"github.com/blugelabs/bluge/numeric/geo"
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge"
+	"github.com/fy0/bluge/numeric/geo"
+	"github.com/fy0/bluge/search"
 )
 
 func geoLoad(writer *bluge.Writer) error {

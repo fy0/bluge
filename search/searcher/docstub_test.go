@@ -19,8 +19,8 @@ import (
 
 	segment "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/numeric"
-	"github.com/blugelabs/bluge/numeric/geo"
+	"github.com/fy0/bluge/numeric"
+	"github.com/fy0/bluge/numeric/geo"
 )
 
 type FakeDocument []*FakeField

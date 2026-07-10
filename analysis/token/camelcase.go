@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"unicode/utf8"
 
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 // CamelCaseFilter splits a given token into a set of tokens where each resulting token

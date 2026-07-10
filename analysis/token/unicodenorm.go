@@ -15,7 +15,7 @@
 package token
 
 import (
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 	"golang.org/x/text/unicode/norm"
 )
 

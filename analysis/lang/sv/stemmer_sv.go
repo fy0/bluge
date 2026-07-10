@@ -17,7 +17,7 @@ package sv
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/swedish"
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 type SwedishStemmerFilter struct {

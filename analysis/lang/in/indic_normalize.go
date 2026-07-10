@@ -17,7 +17,7 @@ package in
 import (
 	"bytes"
 
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 type IndicNormalizeFilter struct {

@@ -1,7 +1,7 @@
 package pt
 
 import (
-	"github.com/blugelabs/bluge/analysis"
+	"github.com/fy0/bluge/analysis"
 )
 
 // this content was obtained from:

@@ -20,8 +20,8 @@ import (
 
 	segment "github.com/blugelabs/bluge_segment_api"
 
-	"github.com/blugelabs/bluge/numeric"
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/numeric"
+	"github.com/fy0/bluge/search"
 )
 
 func TestAggregations(t *testing.T) {

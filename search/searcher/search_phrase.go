@@ -17,9 +17,9 @@ package searcher
 import (
 	"fmt"
 
-	"github.com/blugelabs/bluge/search/similarity"
+	"github.com/fy0/bluge/search/similarity"
 
-	"github.com/blugelabs/bluge/search"
+	"github.com/fy0/bluge/search"
 )
 
 type PhraseSearcher struct {

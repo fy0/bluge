@@ -18,8 +18,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/blugelabs/bluge/search"
-	"github.com/blugelabs/bluge/search/aggregations"
+	"github.com/fy0/bluge/search"
+	"github.com/fy0/bluge/search/aggregations"
 )
 
 func TestAllCollector(t *testing.T) {
