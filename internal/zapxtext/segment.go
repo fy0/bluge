@@ -121,6 +121,7 @@ type SegmentBase struct {
 	fieldsMap           map[string]uint16                     // fieldName -> fieldID+1
 	fieldsOptions       map[string]index.FieldIndexingOptions // fieldName -> fieldOptions
 	fieldsInv           []string                              // fieldID -> fieldName
+	fieldStats          []fieldStats                          // fieldID -> collection statistics
 	fieldsSectionsMap   [][]uint64                            // fieldID -> section -> address
 	numDocs             uint64
 	storedIndexOffset   uint64
@@ -166,6 +167,7 @@ func (sb *SegmentBase) updateSize() {
 	for _, entry := range sb.fieldsInv {
 		sizeInBytes += len(entry) + SizeOfString
 	}
+	sizeInBytes += len(sb.fieldStats) * 2 * SizeOfUint64
 
 	// fieldDvReaders
 	for _, secDvReaders := range sb.fieldDvReaders {
@@ -403,6 +405,9 @@ func (sb *SegmentBase) loadField(fieldID uint16, pos uint64) ([]uint64, error) {
 	sb.fieldsOptions[string(fieldName)] = index.FieldIndexingOptions(fieldOptions)
 
 	fieldNumSections, sz := binary.Uvarint(sb.mem[pos : pos+binary.MaxVarintLen64])
+	if sz <= 0 {
+		return nil, fmt.Errorf("invalid section count for field %q", fieldName)
+	}
 	pos += uint64(sz)
 	// create an address mapping array for each of the segment sections
 	// if the field has a valid section index, then the address will be non-zero
@@ -416,6 +421,21 @@ func (sb *SegmentBase) loadField(fieldID uint16, pos uint64) ([]uint64, error) {
 		pos += 8
 		fieldSectionMap[fieldSectionType] = fieldSectionAddr
 	}
+
+	documentCount, sz := binary.Uvarint(sb.mem[pos : pos+binary.MaxVarintLen64])
+	if sz <= 0 {
+		return nil, fmt.Errorf("invalid document count for field %q", fieldName)
+	}
+	pos += uint64(sz)
+	sumTotalTermFrequency, sz := binary.Uvarint(sb.mem[pos : pos+binary.MaxVarintLen64])
+	if sz <= 0 {
+		return nil, fmt.Errorf("invalid total term frequency for field %q", fieldName)
+	}
+	pos += uint64(sz)
+	sb.fieldStats = append(sb.fieldStats, fieldStats{
+		documentCount:         documentCount,
+		sumTotalTermFrequency: sumTotalTermFrequency,
+	})
 
 	// account the bytes read while parsing the sections field index.
 	sb.incrementBytesRead((pos - uint64(fieldStartPos)) + fieldNameLen)

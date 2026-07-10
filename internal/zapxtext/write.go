@@ -57,7 +57,7 @@ func writeRoaringWithLen(r *roaring.Bitmap, w io.Writer,
 
 func persistFieldsSection(fieldsInv []string,
 	fieldsOptions map[string]index.FieldIndexingOptions, w *FileWriter,
-	opaque map[int]resetable) (uint64, error) {
+	opaque map[int]resetable, stats []fieldStats) (uint64, error) {
 	var rv uint64
 	fieldsOffsets := make([]uint64, 0, len(fieldsInv))
 
@@ -95,8 +95,23 @@ func persistFieldsSection(fieldsInv []string,
 		// which has a specific section's data. this serves as the starting point
 		// using which a field's section data can be read and parsed.
 		for segmentSectionType, segmentSectionImpl := range segmentSections {
-			binary.Write(w, binary.BigEndian, segmentSectionType)
-			binary.Write(w, binary.BigEndian, uint64(segmentSectionImpl.AddrForField(opaque, fieldID)))
+			err = binary.Write(w, binary.BigEndian, segmentSectionType)
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(w, binary.BigEndian, uint64(segmentSectionImpl.AddrForField(opaque, fieldID)))
+			if err != nil {
+				return 0, err
+			}
+		}
+
+		var fieldStats fieldStats
+		if fieldID < len(stats) {
+			fieldStats = stats[fieldID]
+		}
+		_, err = writeUvarints(w, fieldStats.documentCount, fieldStats.sumTotalTermFrequency)
+		if err != nil {
+			return 0, err
 		}
 	}
 

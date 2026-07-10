@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-package zapx17
+package zapxbluge
 
 import (
 	"fmt"
@@ -27,19 +27,17 @@ const (
 	Version = zapxtext.Version
 )
 
-const approximateAverageFieldLength = 32
-
 func New(results []blugeseg.Document, normCalc func(string, int) float32) (blugeseg.Segment, uint64, error) {
 	zapDocs := make([]bleveindex.Document, len(results))
 	for i, doc := range results {
 		zapDocs[i] = &documentAdapter{doc: doc}
 	}
 
-	seg, bytesWritten, err := zapxtext.New(zapDocs)
+	seg, bytesWritten, err := zapxtext.NewWithNormCalc(zapDocs, normCalc)
 	if err != nil {
 		return nil, 0, err
 	}
-	return &segmentAdapter{inner: seg, normCalc: normCalc}, bytesWritten, nil
+	return &segmentAdapter{inner: seg}, bytesWritten, nil
 }
 
 func Load(data *blugeseg.Data) (blugeseg.Segment, error) {
@@ -54,7 +52,7 @@ func Load(data *blugeseg.Data) (blugeseg.Segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &segmentAdapter{inner: seg, normCalc: defaultNormCalc}, nil
+	return &segmentAdapter{inner: seg}, nil
 }
 
 func Merge(segments []blugeseg.Segment, drops []*roaringv1.Bitmap, mergeBufferSize int) blugeseg.Merger {
@@ -74,10 +72,6 @@ func Merge(segments []blugeseg.Segment, drops []*roaringv1.Bitmap, mergeBufferSi
 		segments: zapSegments,
 		drops:    zapDrops,
 	}
-}
-
-func defaultNormCalc(_ string, numTerms int) float32 {
-	return float32(1.0 / math.Sqrt(float64(numTerms)))
 }
 
 type documentAdapter struct {
@@ -227,8 +221,7 @@ func (f *fieldAdapter) hasLocations() bool {
 }
 
 type segmentAdapter struct {
-	inner    scorchseg.Segment
-	normCalc func(string, int) float32
+	inner scorchseg.Segment
 }
 
 func (s *segmentAdapter) Dictionary(field string) (blugeseg.Dictionary, error) {
@@ -280,11 +273,20 @@ func (s *segmentAdapter) Fields() []string {
 }
 
 func (s *segmentAdapter) CollectionStats(field string) (blugeseg.CollectionStats, error) {
-	count := s.inner.Count()
+	statsProvider, ok := s.inner.(interface {
+		FieldStats(string) (uint64, uint64, bool)
+	})
+	if !ok {
+		return nil, fmt.Errorf("segment type %T does not expose field statistics", s.inner)
+	}
+	documentCount, sumTotalTermFrequency, ok := statsProvider.FieldStats(field)
+	if !ok {
+		return &collectionStats{}, nil
+	}
 	return &collectionStats{
-		totalDocCount:    count,
-		docCount:         count,
-		sumTotalTermFreq: count * approximateAverageFieldLength,
+		totalDocCount:    s.inner.Count(),
+		docCount:         documentCount,
+		sumTotalTermFreq: sumTotalTermFrequency,
 	}, nil
 }
 

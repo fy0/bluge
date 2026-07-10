@@ -108,13 +108,19 @@ func defaultConfig(indexConfig index.Config) Config {
 	allDocsFields := NewKeywordField("", "")
 	_ = allDocsFields.Analyze(0)
 	indexConfig = indexConfig.WithVirtualField(allDocsFields)
-	indexConfig = indexConfig.WithNormCalc(func(field string, length int) float32 {
-		if pfs, ok := rv.PerFieldSimilarity[field]; ok {
-			return pfs.ComputeNorm(length)
-		}
-		return rv.DefaultSimilarity.ComputeNorm(length)
-	})
+	indexConfig = indexConfig.WithNormCalc(rv.computeNorm)
 	rv.indexConfig = indexConfig
 
 	return rv
+}
+
+func (config Config) computeNorm(field string, length int) float32 {
+	if pfs, ok := config.PerFieldSimilarity[field]; ok {
+		return pfs.ComputeNorm(length)
+	}
+	return config.DefaultSimilarity.ComputeNorm(length)
+}
+
+func (config Config) indexConfigForWriting() index.Config {
+	return config.indexConfig.WithNormCalc(config.computeNorm)
 }

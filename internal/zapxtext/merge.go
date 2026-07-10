@@ -229,7 +229,11 @@ func mergeToWriter(segments []*SegmentBase, drops []*roaring.Bitmap,
 
 	// we can persist the fields section index now, this will point
 	// to the various indexes (each in different section) available for a field.
-	sectionsIndexOffset, err = persistFieldsSection(fieldsInv, fieldsOptions, w, mergeOpaque)
+	var stats []fieldStats
+	if inverted, ok := mergeOpaque[SectionInvertedTextIndex].(*invertedIndexOpaque); ok {
+		stats = inverted.fieldStats
+	}
+	sectionsIndexOffset, err = persistFieldsSection(fieldsInv, fieldsOptions, w, mergeOpaque, stats)
 	if err != nil {
 		return nil, 0, 0, nil, nil, 0, err
 	}
@@ -262,7 +266,7 @@ func computeNewDocCount(segments []*SegmentBase, drops []*roaring.Bitmap) uint64
 
 func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 	newDocNums []uint64, newRoaring *roaring.Bitmap,
-	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder) (
+	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, totalTermFrequency *uint64) (
 	lastDocNum uint64, lastFreq uint64, lastNorm uint64, err error) {
 	nextDocNum, nextFreq, nextNorm, nextFreqNormBytes, nextLocBytes, err :=
 		postItr.nextBytes()
@@ -273,6 +277,9 @@ func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 		}
 
 		newRoaring.Add(uint32(hitNewDocNum))
+		if totalTermFrequency != nil {
+			*totalTermFrequency += nextFreq
+		}
 
 		err = tfEncoder.AddBytes(hitNewDocNum, nextFreqNormBytes)
 		if err != nil {
@@ -299,7 +306,8 @@ func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 
 func mergeTermFreqNormLocs(fieldsMap map[string]uint16, term []byte, postItr *PostingsIterator,
 	newDocNums []uint64, newRoaring *roaring.Bitmap,
-	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, bufLoc []uint64) (
+	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, bufLoc []uint64,
+	totalTermFrequency *uint64) (
 	lastDocNum uint64, lastFreq uint64, lastNorm uint64, bufLocOut []uint64, err error) {
 	next, err := postItr.Next()
 	for next != nil && err == nil {
@@ -311,6 +319,9 @@ func mergeTermFreqNormLocs(fieldsMap map[string]uint16, term []byte, postItr *Po
 		newRoaring.Add(uint32(hitNewDocNum))
 
 		nextFreq := next.Frequency()
+		if totalTermFrequency != nil {
+			*totalTermFrequency += nextFreq
+		}
 		var nextNorm uint64
 		if pi, ok := next.(*Posting); ok {
 			nextNorm = pi.NormUint64()

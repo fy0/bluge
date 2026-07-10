@@ -25,9 +25,9 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 )
 
-const Version uint32 = 17
+const Version uint32 = 1
 
-const Type string = "zap"
+const Type string = "zapx-bluge"
 
 const fieldNotUninverted uint64 = math.MaxUint64
 
@@ -204,6 +204,7 @@ func InitSegmentBase(mem []byte, memCRC uint32, chunkMode uint32, numDocs uint64
 		fieldsMap:     make(map[string]uint16),
 		fieldsOptions: make(map[string]index.FieldIndexingOptions),
 		fieldsInv:     make([]string, 0),
+		fieldStats:    make([]fieldStats, 0),
 		config:        config,
 	}
 	sb.updateSize()

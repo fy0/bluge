@@ -42,16 +42,17 @@ var ValidateDocFields = func(field index.Field) error {
 // New creates an in-memory zap-encoded SegmentBase from a set of Documents
 func (z *ZapPlugin) New(results []index.Document) (
 	segment.Segment, uint64, error) {
-	return z.newWithChunkMode(results, DefaultChunkMode, nil)
+	return z.newWithChunkMode(results, DefaultChunkMode, nil, nil)
 }
 
 func (z *ZapPlugin) NewUsing(results []index.Document, config map[string]interface{}) (
 	segment.Segment, uint64, error) {
-	return z.newWithChunkMode(results, DefaultChunkMode, config)
+	return z.newWithChunkMode(results, DefaultChunkMode, config, nil)
 }
 
 func (*ZapPlugin) newWithChunkMode(results []index.Document,
-	chunkMode uint32, config map[string]interface{}) (segment.Segment, uint64, error) {
+	chunkMode uint32, config map[string]interface{}, normCalc func(string, int) float32) (
+	segment.Segment, uint64, error) {
 	s := interimPool.Get().(*interim)
 
 	var br bytes.Buffer
@@ -71,6 +72,7 @@ func (*ZapPlugin) newWithChunkMode(results []index.Document,
 	s.results, s.edgeList = flattenNestedDocuments(results, s.edgeList)
 	s.config = config
 	s.chunkMode = chunkMode
+	s.normCalc = normCalc
 
 	s.w = NewFileWriterEmpty(NewCountHashWriter(&br))
 
@@ -100,6 +102,8 @@ var interimPool = sync.Pool{New: func() interface{} { return &interim{} }}
 // interim holds temporary working data used while converting from
 // analysis results to a zap-encoded segment
 type interim struct {
+	bytesWritten atomic.Uint64
+
 	results []index.Document
 
 	// edge list for nested documents: child -> parent
@@ -130,10 +134,8 @@ type interim struct {
 	lastNumDocs int
 	lastOutSize int
 
-	// atomic access to this variable
-	bytesWritten uint64
-
-	opaque map[int]resetable
+	opaque   map[int]resetable
+	normCalc func(string, int) float32
 }
 
 func (s *interim) reset() (err error) {
@@ -149,6 +151,7 @@ func (s *interim) reset() (err error) {
 	s.tmp1 = s.tmp1[:0]
 	s.lastNumDocs = 0
 	s.lastOutSize = 0
+	s.normCalc = nil
 
 	// reset the bytes written stat count
 	// to avoid leaking of bytesWritten across reuse cycles.
@@ -225,6 +228,7 @@ func (s *interim) convert() (uint64, uint64, error) {
 		"fieldsMap":     s.FieldsMap,
 		"fieldsInv":     s.FieldsInv,
 		"fieldsOptions": s.FieldsOptions,
+		"normCalc":      s.normCalc,
 	}
 	if s.config != nil {
 		args["config"] = s.config
@@ -268,7 +272,8 @@ func (s *interim) convert() (uint64, uint64, error) {
 
 	// we can persist a new fields section here
 	// this new fields section will point to the various indexes available
-	sectionsIndexOffset, err := persistFieldsSection(s.FieldsInv, s.FieldsOptions, s.w, s.opaque)
+	stats := s.opaque[SectionInvertedTextIndex].(*invertedIndexOpaque).fieldStats
+	sectionsIndexOffset, err := persistFieldsSection(s.FieldsInv, s.FieldsOptions, s.w, s.opaque, stats)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -327,11 +332,11 @@ func (s *interim) processDocument(docNum uint32,
 }
 
 func (s *interim) getBytesWritten() uint64 {
-	return atomic.LoadUint64(&s.bytesWritten)
+	return s.bytesWritten.Load()
 }
 
 func (s *interim) incrementBytesWritten(val uint64) {
-	atomic.AddUint64(&s.bytesWritten, val)
+	s.bytesWritten.Add(val)
 }
 
 func (s *interim) writeStoredFields() (
@@ -470,7 +475,7 @@ func (s *interim) writeStoredFields() (
 }
 
 func (s *interim) setBytesWritten(val uint64) {
-	atomic.StoreUint64(&s.bytesWritten, val)
+	s.bytesWritten.Store(val)
 }
 
 // returns the total # of bytes needed to encode the given uint64's

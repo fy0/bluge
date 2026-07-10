@@ -20,7 +20,7 @@ import (
 	segment "github.com/blugelabs/bluge_segment_api"
 
 	"github.com/blugelabs/bluge/index/mergeplan"
-	"github.com/blugelabs/bluge/internal/zapx17"
+	"github.com/blugelabs/bluge/internal/zapxbluge"
 )
 
 type Config struct {
@@ -153,8 +153,8 @@ func DefaultConfigWithDirectory(df func() Directory) Config {
 
 func defaultConfig() Config {
 	rv := Config{
-		SegmentType:      zapx17.Type,
-		SegmentVersion:   zapx17.Version,
+		SegmentType:      zapxbluge.Type,
+		SegmentVersion:   zapxbluge.Version,
 		MergePlanOptions: mergeplan.DefaultMergePlanOptions,
 		DeletionPolicyFunc: func() DeletionPolicy {
 			return NewKeepNLatestDeletionPolicy(1)
@@ -211,11 +211,11 @@ func defaultConfig() Config {
 	}
 
 	rv.WithSegmentPlugin(&SegmentPlugin{
-		Type:    zapx17.Type,
-		Version: zapx17.Version,
-		New:     zapx17.New,
-		Load:    zapx17.Load,
-		Merge:   zapx17.Merge,
+		Type:    zapxbluge.Type,
+		Version: zapxbluge.Version,
+		New:     zapxbluge.New,
+		Load:    zapxbluge.Load,
+		Merge:   zapxbluge.Merge,
 	})
 
 	return rv

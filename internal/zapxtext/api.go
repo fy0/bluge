@@ -24,6 +24,12 @@ func New(results []index.Document) (seg.Segment, uint64, error) {
 	return new(ZapPlugin).New(results)
 }
 
+// NewWithNormCalc creates a segment using the caller's field norm encoding.
+func NewWithNormCalc(results []index.Document, normCalc func(string, int) float32) (
+	seg.Segment, uint64, error) {
+	return new(ZapPlugin).newWithChunkMode(results, DefaultChunkMode, nil, normCalc)
+}
+
 // LoadBytes opens a zapx segment from bytes owned by the caller.
 func LoadBytes(data []byte) (seg.Segment, error) {
 	return LoadBytesUsing(data, nil)
@@ -78,6 +84,7 @@ func LoadBytesUsing(data []byte, config map[string]interface{}) (seg.Segment, er
 		fieldsMap:           make(map[string]uint16),
 		fieldsOptions:       make(map[string]index.FieldIndexingOptions),
 		fieldsInv:           make([]string, 0),
+		fieldStats:          make([]fieldStats, 0),
 		fileReader:          fileReader,
 		config:              config,
 	}

@@ -80,7 +80,7 @@ func (i *invertedTextIndexSection) AddrForField(opaque map[int]resetable, fieldI
 
 func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.Bitmap,
 	fieldsInv []string, fieldsMap map[string]uint16, fieldsOptions map[string]index.FieldIndexingOptions,
-	fieldsSame bool, newDocNumsIn [][]uint64, newSegDocCount uint64, chunkMode uint32, w *FileWriter,
+	fieldsSame bool, newDocNumsIn [][]uint64, newSegDocCount uint64, chunkMode uint32, stats []fieldStats, w *FileWriter,
 	closeCh chan struct{}) (map[int]int, error) {
 	var bufMaxVarintLen64 []byte = make([]byte, binary.MaxVarintLen64)
 	var bufLoc []uint64
@@ -92,6 +92,30 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 	dictOffsets := make([]uint64, len(fieldsInv))
 	fieldDvLocsStart := make([]uint64, len(fieldsInv))
 	fieldDvLocsEnd := make([]uint64, len(fieldsInv))
+
+	recomputeStats := false
+	for _, drop := range dropsIn {
+		if drop != nil && !drop.IsEmpty() {
+			recomputeStats = true
+			break
+		}
+	}
+	if !recomputeStats {
+		for fieldID, fieldName := range fieldsInv {
+			if !fieldsOptions[fieldName].IsIndexed() {
+				continue
+			}
+			for _, segment := range segments {
+				documentCount, sumTotalTermFrequency, ok := segment.FieldStats(fieldName)
+				if ok {
+					stats[fieldID].add(fieldStats{
+						documentCount:         documentCount,
+						sumTotalTermFrequency: sumTotalTermFrequency,
+					})
+				}
+			}
+		}
+	}
 
 	// copying data directly is safe only if there are no
 	// file callbacks that might modify the data in all
@@ -120,6 +144,10 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 	}
 
 	newRoaring := roaring.NewBitmap()
+	var fieldDocs *roaring.Bitmap
+	if recomputeStats {
+		fieldDocs = roaring.NewBitmap()
+	}
 	newDocNums := make([][]uint64, 0, len(segments))
 	drops := make([]*roaring.Bitmap, 0, len(segments))
 	dicts := make([]*Dictionary, 0, len(segments))
@@ -127,6 +155,11 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 	segmentsInFocus := make([]*SegmentBase, 0, len(segments))
 	// for each field
 	for fieldID, fieldName := range fieldsInv {
+		var totalTermFrequency *uint64
+		if recomputeStats {
+			fieldDocs.Clear()
+			totalTermFrequency = &stats[fieldID].sumTotalTermFrequency
+		}
 		// collect FST iterators from all active segments for this field
 		newDocNums = newDocNums[:0]
 		drops = drops[:0]
@@ -201,6 +234,9 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 					return err
 				}
 			}
+			if recomputeStats {
+				fieldDocs.Or(newRoaring)
+			}
 
 			newRoaring.Clear()
 
@@ -267,11 +303,11 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 				// can optimize by copying freq/norm/loc bytes directly
 				lastDocNum, lastFreq, lastNorm, err = mergeTermFreqNormLocsByCopying(
 					term, postItr, newDocNums[itrI], newRoaring,
-					tfEncoder, locEncoder)
+					tfEncoder, locEncoder, totalTermFrequency)
 			} else {
 				lastDocNum, lastFreq, lastNorm, bufLoc, err = mergeTermFreqNormLocs(
 					fieldsMap, term, postItr, newDocNums[itrI], newRoaring,
-					tfEncoder, locEncoder, bufLoc)
+					tfEncoder, locEncoder, bufLoc, totalTermFrequency)
 			}
 			if err != nil {
 				return nil, err
@@ -294,6 +330,9 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 		err = finishTerm(prevTerm)
 		if err != nil {
 			return nil, err
+		}
+		if recomputeStats {
+			stats[fieldID].documentCount = fieldDocs.GetCardinality()
 		}
 
 		dictOffset := uint64(w.Count())
@@ -420,8 +459,15 @@ func (i *invertedTextIndexSection) Merge(opaque map[int]resetable, segments []*S
 	drops []*roaring.Bitmap, fieldsInv []string, newDocNumsIn [][]uint64,
 	w *FileWriter, closeCh chan struct{}) error {
 	io := i.getInvertedIndexOpaque(opaque)
+	if cap(io.fieldStats) >= len(fieldsInv) {
+		io.fieldStats = io.fieldStats[:len(fieldsInv)]
+		clear(io.fieldStats)
+	} else {
+		io.fieldStats = make([]fieldStats, len(fieldsInv))
+	}
 	fieldAddrs, err := mergeAndPersistInvertedSection(segments, drops, fieldsInv,
-		io.FieldsMap, io.FieldsOptions, io.fieldsSame, newDocNumsIn, io.numDocs, io.chunkMode, w, closeCh)
+		io.FieldsMap, io.FieldsOptions, io.fieldsSame, newDocNumsIn, io.numDocs, io.chunkMode,
+		io.fieldStats, w, closeCh)
 	if err != nil {
 		return err
 	}
@@ -708,10 +754,18 @@ func (io *invertedIndexOpaque) process(field index.Field, fieldID uint16, docNum
 	// finished invoking the process() for every field on that doc.
 	if fieldID == math.MaxUint16 {
 		for fid, tfs := range io.reusableFieldTFs {
+			if len(tfs) == 0 {
+				continue
+			}
 			dict := io.Dicts[fid]
 			norm := math.Float32frombits(uint32(io.reusableFieldLens[fid]))
+			if io.normCalc != nil {
+				norm = io.normCalc(io.FieldsInv[fid], io.reusableFieldLens[fid])
+			}
+			io.fieldStats[fid].documentCount++
 
 			for term, tf := range tfs {
+				io.fieldStats[fid].sumTotalTermFrequency += uint64(tf.Frequency())
 				pid := dict[term] - 1
 				bs := io.Postings[pid]
 				bs.Add(uint32(docNum))
@@ -938,6 +992,13 @@ func (i *invertedIndexOpaque) realloc() {
 	} else {
 		i.reusableFieldLens = make([]int, len(i.FieldsInv))
 	}
+
+	if cap(i.fieldStats) >= len(i.FieldsInv) {
+		i.fieldStats = i.fieldStats[:len(i.FieldsInv)]
+		clear(i.fieldStats)
+	} else {
+		i.fieldStats = make([]fieldStats, len(i.FieldsInv))
+	}
 }
 
 func (i *invertedTextIndexSection) getInvertedIndexOpaque(opaque map[int]resetable) *invertedIndexOpaque {
@@ -1038,6 +1099,8 @@ type invertedIndexOpaque struct {
 	// reusable stuff for processing fields etc.
 	reusableFieldLens []int
 	reusableFieldTFs  []index.TokenFrequencies
+	fieldStats        []fieldStats
+	normCalc          func(string, int) float32
 
 	tmp0 []byte
 
@@ -1090,6 +1153,8 @@ func (io *invertedIndexOpaque) Reset() (err error) {
 
 	io.reusableFieldLens = io.reusableFieldLens[:0]
 	io.reusableFieldTFs = io.reusableFieldTFs[:0]
+	io.fieldStats = io.fieldStats[:0]
+	io.normCalc = nil
 
 	io.tmp0 = io.tmp0[:0]
 	io.extraDocValues = nil
@@ -1117,5 +1182,9 @@ func (i *invertedIndexOpaque) Set(key string, val interface{}) {
 		i.FieldsInv = val.([]string)
 	case "numDocs":
 		i.numDocs = val.(uint64)
+	case "normCalc":
+		if val != nil {
+			i.normCalc = val.(func(string, int) float32)
+		}
 	}
 }
