@@ -25,6 +25,10 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
 	"github.com/blevesearch/vellum"
+	blugeseg "github.com/blugelabs/bluge_segment_api"
+
+	"github.com/blugelabs/bluge/analysis"
+	"github.com/blugelabs/bluge/internal/blugeidx"
 )
 
 func init() {
@@ -34,38 +38,10 @@ func init() {
 type invertedTextIndexSection struct {
 }
 
-// This function checks whether the inverted text index section should avoid processing
-// a particular field, preventing unnecessary work if another section will handle it.
-//
-// NOTE: The exclusion check is applicable only to the InvertedTextIndexSection
-// because it serves as a catch-all section. This section processes every field
-// unless explicitly excluded, similar to a "default" case in a switch statement.
-// Other sections, such as VectorSection and SynonymSection, rely on inclusion
-// checks to process only specific field types (e.g., index.VectorField or
-// index.SynonymField). Any new section added in the future must define its
-// special field type and inclusion logic explicitly.
-var isFieldExcludedFromInvertedTextIndexSection = func(field index.Field) bool {
-	for _, excludeField := range invertedTextIndexSectionExclusionChecks {
-		if excludeField(field) {
-			// atleast one section has agreed to exclude this field
-			// from inverted text index section processing and has
-			// agreed to process it independently
-			return true
-		}
-	}
-	// no section has excluded this field from inverted index processing
-	// so it should be processed by the inverted index section
-	return false
-}
-
-// List of checks to determine if a field is excluded from the inverted text index section
-var invertedTextIndexSectionExclusionChecks = make([]func(field index.Field) bool, 0)
-
-func (i *invertedTextIndexSection) Process(opaque map[int]resetable, docNum uint32, field index.Field, fieldID uint16) {
-	if !isFieldExcludedFromInvertedTextIndexSection(field) {
-		io := i.getInvertedIndexOpaque(opaque)
-		io.process(field, fieldID, docNum)
-	}
+func (i *invertedTextIndexSection) Process(opaque map[int]resetable, docNum uint32,
+	field *blugeidx.Field, fieldID uint16) {
+	io := i.getInvertedIndexOpaque(opaque)
+	io.process(field, fieldID, docNum)
 }
 
 func (i *invertedTextIndexSection) Persist(opaque map[int]resetable, w *FileWriter) error {
@@ -744,7 +720,33 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 	return nil
 }
 
-func (io *invertedIndexOpaque) process(field index.Field, fieldID uint16, docNum uint32) {
+type accumulatedTerm struct {
+	frequency int
+	locations []interimLoc
+}
+
+type fieldTermAccumulator struct {
+	native    analysis.TokenFrequencies
+	nativeSet bool
+	terms     map[string]*accumulatedTerm
+	usingMap  bool
+}
+
+func (a *fieldTermAccumulator) reset() {
+	a.native = nil
+	a.nativeSet = false
+	a.usingMap = false
+	clear(a.terms)
+}
+
+func (a *fieldTermAccumulator) empty() bool {
+	if a.nativeSet {
+		return len(a.native) == 0
+	}
+	return !a.usingMap || len(a.terms) == 0
+}
+
+func (io *invertedIndexOpaque) process(field *blugeidx.Field, fieldID uint16, docNum uint32) {
 	if !io.init && io.results != nil {
 		io.realloc()
 		io.init = true
@@ -753,8 +755,9 @@ func (io *invertedIndexOpaque) process(field index.Field, fieldID uint16, docNum
 	// if the fieldID is MaxUint16, it's mainly indicated that the caller has
 	// finished invoking the process() for every field on that doc.
 	if fieldID == math.MaxUint16 {
-		for fid, tfs := range io.reusableFieldTFs {
-			if len(tfs) == 0 {
+		for fid := range io.reusableFieldTerms {
+			accumulator := &io.reusableFieldTerms[fid]
+			if accumulator.empty() {
 				continue
 			}
 			dict := io.Dicts[fid]
@@ -764,57 +767,110 @@ func (io *invertedIndexOpaque) process(field index.Field, fieldID uint16, docNum
 			}
 			io.fieldStats[fid].documentCount++
 
-			for term, tf := range tfs {
-				io.fieldStats[fid].sumTotalTermFrequency += uint64(tf.Frequency())
-				pid := dict[term] - 1
-				bs := io.Postings[pid]
-				bs.Add(uint32(docNum))
-
-				io.FreqNorms[pid] = append(io.FreqNorms[pid],
-					interimFreqNorm{
-						freq:    uint64(tf.Frequency()),
-						norm:    norm,
-						numLocs: len(tf.Locations),
-					})
-
-				if len(tf.Locations) > 0 {
-					locs := io.Locs[pid]
-
-					for _, loc := range tf.Locations {
-						var locf = uint16(fid)
-						if loc.Field != "" {
-							locf = uint16(io.getOrDefineField(loc.Field))
-						}
-						var arrayposs []uint64
-						if len(loc.ArrayPositions) > 0 {
-							arrayposs = loc.ArrayPositions
-						}
-						locs = append(locs, interimLoc{
-							fieldID:   locf,
-							pos:       uint64(loc.Position),
-							start:     uint64(loc.Start),
-							end:       uint64(loc.End),
-							arrayposs: arrayposs,
-						})
-					}
-
-					io.Locs[pid] = locs
+			if accumulator.nativeSet {
+				for term, tf := range accumulator.native {
+					io.appendNativeTerm(uint16(fid), uint32(docNum), dict, term, tf, norm)
+				}
+			} else {
+				for term, tf := range accumulator.terms {
+					io.appendAccumulatedTerm(uint16(fid), uint32(docNum), dict, term, tf, norm)
 				}
 			}
 		}
 		for i := 0; i < len(io.FieldsInv); i++ { // clear these for reuse
 			io.reusableFieldLens[i] = 0
-			io.reusableFieldTFs[i] = nil
+			io.reusableFieldTerms[i].reset()
 		}
 		return
 	}
 
 	io.reusableFieldLens[fieldID] += field.AnalyzedLength()
-	existingFreqs := io.reusableFieldTFs[fieldID]
-	if existingFreqs != nil {
-		existingFreqs.MergeAll(field.Name(), field.AnalyzedTokenFrequencies())
-	} else {
-		io.reusableFieldTFs[fieldID] = field.AnalyzedTokenFrequencies()
+	accumulator := &io.reusableFieldTerms[fieldID]
+	native, isNative := field.NativeTokenFrequencies()
+	if !accumulator.nativeSet && !accumulator.usingMap && isNative {
+		accumulator.native = native
+		accumulator.nativeSet = true
+		return
+	}
+	if accumulator.nativeSet {
+		io.materializeNativeTerms(accumulator, fieldID)
+	}
+	if isNative {
+		for term, tf := range native {
+			io.accumulateTerm(accumulator, fieldID, term, tf)
+		}
+		return
+	}
+	field.EachTerm(func(term blugeseg.FieldTerm) {
+		io.accumulateTerm(accumulator, fieldID, string(term.Term()), term)
+	})
+}
+
+func (io *invertedIndexOpaque) appendNativeTerm(fieldID uint16, docNum uint32,
+	dict map[string]uint64, term string, tf *analysis.TokenFreq, norm float32) {
+	pid := dict[term] - 1
+	io.fieldStats[fieldID].sumTotalTermFrequency += uint64(tf.Frequency())
+	io.Postings[pid].Add(docNum)
+	io.FreqNorms[pid] = append(io.FreqNorms[pid], interimFreqNorm{
+		freq:    uint64(tf.Frequency()),
+		norm:    norm,
+		numLocs: len(tf.Locations),
+	})
+	for _, location := range tf.Locations {
+		io.Locs[pid] = append(io.Locs[pid], io.makeInterimLocation(fieldID, location))
+	}
+}
+
+func (io *invertedIndexOpaque) appendAccumulatedTerm(fieldID uint16, docNum uint32,
+	dict map[string]uint64, term string, tf *accumulatedTerm, norm float32) {
+	pid := dict[term] - 1
+	io.fieldStats[fieldID].sumTotalTermFrequency += uint64(tf.frequency)
+	io.Postings[pid].Add(docNum)
+	io.FreqNorms[pid] = append(io.FreqNorms[pid], interimFreqNorm{
+		freq:    uint64(tf.frequency),
+		norm:    norm,
+		numLocs: len(tf.locations),
+	})
+	io.Locs[pid] = append(io.Locs[pid], tf.locations...)
+}
+
+func (io *invertedIndexOpaque) materializeNativeTerms(accumulator *fieldTermAccumulator,
+	fieldID uint16) {
+	for term, tf := range accumulator.native {
+		io.accumulateTerm(accumulator, fieldID, term, tf)
+	}
+	accumulator.native = nil
+	accumulator.nativeSet = false
+}
+
+func (io *invertedIndexOpaque) accumulateTerm(accumulator *fieldTermAccumulator,
+	fieldID uint16, term string, tf blugeseg.FieldTerm) {
+	if accumulator.terms == nil {
+		accumulator.terms = make(map[string]*accumulatedTerm)
+	}
+	accumulator.usingMap = true
+	entry := accumulator.terms[term]
+	if entry == nil {
+		entry = &accumulatedTerm{}
+		accumulator.terms[term] = entry
+	}
+	entry.frequency += tf.Frequency()
+	tf.EachLocation(func(location blugeseg.Location) {
+		entry.locations = append(entry.locations, io.makeInterimLocation(fieldID, location))
+	})
+}
+
+func (io *invertedIndexOpaque) makeInterimLocation(fieldID uint16,
+	location blugeseg.Location) interimLoc {
+	locationFieldID := fieldID
+	if location.Field() != "" {
+		locationFieldID = uint16(io.getOrDefineField(location.Field()))
+	}
+	return interimLoc{
+		fieldID: locationFieldID,
+		pos:     uint64(location.Pos()),
+		start:   uint64(location.Start()),
+		end:     uint64(location.End()),
 	}
 }
 
@@ -860,47 +916,44 @@ func (i *invertedIndexOpaque) realloc() {
 
 	// initialize dicts and dict keys from fieldsMap
 	i.initDictsAndKeysFromFields()
-
-	visitField := func(field index.Field, docNum int) {
+	visitField := func(field *blugeidx.Field) {
 		fieldID := uint16(i.getOrDefineField(field.Name()))
-
 		dict := i.Dicts[fieldID]
 		dictKeys := i.DictKeys[fieldID]
-
-		tfs := field.AnalyzedTokenFrequencies()
-		for term, tf := range tfs {
+		var fieldTermCount int
+		visitTerm := func(term string, numLocations int) {
 			pidPlus1, exists := dict[term]
 			if !exists {
 				pidNext++
 				pidPlus1 = uint64(pidNext)
-
 				dict[term] = pidPlus1
 				dictKeys = append(dictKeys, term)
-
 				i.numTermsPerPostingsList = append(i.numTermsPerPostingsList, 0)
 				i.numLocsPerPostingsList = append(i.numLocsPerPostingsList, 0)
 			}
-
 			pid := pidPlus1 - 1
-
-			i.numTermsPerPostingsList[pid] += 1
-			i.numLocsPerPostingsList[pid] += len(tf.Locations)
-
-			totLocs += len(tf.Locations)
+			i.numTermsPerPostingsList[pid]++
+			i.numLocsPerPostingsList[pid] += numLocations
+			totLocs += numLocations
+			fieldTermCount++
 		}
-
-		totTFs += len(tfs)
-
+		if native, ok := field.NativeTokenFrequencies(); ok {
+			for term, tf := range native {
+				visitTerm(term, len(tf.Locations))
+			}
+		} else {
+			field.EachTerm(func(term blugeseg.FieldTerm) {
+				var numLocations int
+				term.EachLocation(func(blugeseg.Location) {
+					numLocations++
+				})
+				visitTerm(string(term.Term()), numLocations)
+			})
+		}
+		totTFs += fieldTermCount
 		i.DictKeys[fieldID] = dictKeys
 		if field.Options().IncludeDocValues() {
 			i.IncludeDocValues[fieldID] = true
-		}
-
-		if f, ok := field.(index.GeoShapeField); ok {
-			if _, exists := i.extraDocValues[docNum]; !exists {
-				i.extraDocValues[docNum] = make(map[uint16][][]byte)
-			}
-			i.extraDocValues[docNum][fieldID] = append(i.extraDocValues[docNum][fieldID], f.EncodedShape())
 		}
 	}
 
@@ -914,15 +967,9 @@ func (i *invertedIndexOpaque) realloc() {
 		i.extraDocValues = map[int]map[uint16][][]byte{}
 	}
 
-	for docNum, result := range i.results {
-		// walk each composite field
-		result.VisitComposite(func(field index.CompositeField) {
-			visitField(field, docNum)
-		})
-
-		// walk each field
-		result.VisitFields(func(field index.Field) {
-			visitField(field, docNum)
+	for _, result := range i.results {
+		result.VisitFields(func(field *blugeidx.Field) {
+			visitField(field)
 		})
 	}
 
@@ -981,10 +1028,10 @@ func (i *invertedIndexOpaque) realloc() {
 		sort.Strings(dict)
 	}
 
-	if cap(i.reusableFieldTFs) >= len(i.FieldsInv) {
-		i.reusableFieldTFs = i.reusableFieldTFs[:len(i.FieldsInv)]
+	if cap(i.reusableFieldTerms) >= len(i.FieldsInv) {
+		i.reusableFieldTerms = i.reusableFieldTerms[:len(i.FieldsInv)]
 	} else {
-		i.reusableFieldTFs = make([]index.TokenFrequencies, len(i.FieldsInv))
+		i.reusableFieldTerms = make([]fieldTermAccumulator, len(i.FieldsInv))
 	}
 
 	if cap(i.reusableFieldLens) >= len(i.FieldsInv) {
@@ -1043,7 +1090,7 @@ func (i *invertedTextIndexSection) InitOpaque(args map[string]interface{}) reset
 type invertedIndexOpaque struct {
 	bytesWritten uint64 // atomic access to this variable, moved to top to correct alignment issues on ARM, 386 and 32-bit MIPS.
 
-	results []index.Document
+	results []*blugeidx.Document
 
 	chunkMode uint32
 
@@ -1097,10 +1144,10 @@ type invertedIndexOpaque struct {
 	builderBuf bytes.Buffer
 
 	// reusable stuff for processing fields etc.
-	reusableFieldLens []int
-	reusableFieldTFs  []index.TokenFrequencies
-	fieldStats        []fieldStats
-	normCalc          func(string, int) float32
+	reusableFieldLens  []int
+	reusableFieldTerms []fieldTermAccumulator
+	fieldStats         []fieldStats
+	normCalc           func(string, int) float32
 
 	tmp0 []byte
 
@@ -1152,7 +1199,10 @@ func (io *invertedIndexOpaque) Reset() (err error) {
 	}
 
 	io.reusableFieldLens = io.reusableFieldLens[:0]
-	io.reusableFieldTFs = io.reusableFieldTFs[:0]
+	for i := range io.reusableFieldTerms {
+		io.reusableFieldTerms[i].reset()
+	}
+	io.reusableFieldTerms = io.reusableFieldTerms[:0]
 	io.fieldStats = io.fieldStats[:0]
 	io.normCalc = nil
 
@@ -1169,7 +1219,7 @@ func (io *invertedIndexOpaque) Reset() (err error) {
 func (i *invertedIndexOpaque) Set(key string, val interface{}) {
 	switch key {
 	case "results":
-		i.results = val.([]index.Document)
+		i.results = val.([]*blugeidx.Document)
 	case "chunkMode":
 		i.chunkMode = val.(uint32)
 	case "fieldsSame":

@@ -72,3 +72,10 @@ type Directory interface {
 	// Unlock releases the lock held on this directory
 	Unlock() error
 }
+
+// concurrentDirectory is implemented by bundled directories whose operations
+// are safe to call from independent offline build and merge tasks.
+type concurrentDirectory interface {
+	Directory
+	supportsConcurrentOperations()
+}

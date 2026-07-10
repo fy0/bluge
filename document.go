@@ -15,7 +15,10 @@
 package bluge
 
 import (
+	bleveindex "github.com/blevesearch/bleve_index_api"
 	segment "github.com/blugelabs/bluge_segment_api"
+
+	"github.com/blugelabs/bluge/internal/blugeidx"
 )
 
 type Document []Field
@@ -61,6 +64,28 @@ type FieldConsumer interface {
 }
 
 func (d Document) Analyze() {
+	hasFieldConsumer := false
+	for _, field := range d {
+		if _, ok := field.(FieldConsumer); ok {
+			hasFieldConsumer = true
+			break
+		}
+	}
+	if !hasFieldConsumer {
+		fieldOffsets := map[string]int{}
+		for _, field := range d {
+			if !field.Index() {
+				continue
+			}
+			fieldOffset := fieldOffsets[field.Name()]
+			if fieldOffset > 0 {
+				fieldOffset += field.PositionIncrementGap()
+			}
+			fieldOffsets[field.Name()] = field.Analyze(fieldOffset)
+		}
+		return
+	}
+
 	fieldOffsets := map[string]int{}
 	for _, field := range d {
 		if !field.Index() {
@@ -90,4 +115,65 @@ func (d Document) EachField(vf segment.VisitField) {
 	for _, field := range d {
 		vf(field)
 	}
+}
+
+// ToBlugeIndexDocument exports an analyzed document to the native segment
+// build representation.
+func (d Document) ToBlugeIndexDocument() (*blugeidx.Document, error) {
+	fields := make([]*blugeidx.Field, 0, len(d))
+	for _, field := range d {
+		options := blugeIndexFieldOptions(field)
+		if field.Name() == _idField {
+			options |= bleveindex.IndexField | bleveindex.StoreField
+		}
+		fields = append(fields, blugeidx.NewField(
+			field.Name(),
+			field.Value(),
+			options,
+			field.Length(),
+			field.AnalyzedTokenFrequencies(),
+			blugeFieldPlainTextBytes(field),
+		))
+	}
+	return blugeidx.NewDocument(fields)
+}
+
+func blugeIndexFieldOptions(field Field) bleveindex.FieldIndexingOptions {
+	var options bleveindex.FieldIndexingOptions
+	if field.Index() {
+		options |= bleveindex.IndexField
+	}
+	if field.Store() {
+		options |= bleveindex.StoreField
+	}
+	if field.IndexDocValues() {
+		options |= bleveindex.DocValues
+	}
+	if blugeFieldHasLocations(field) {
+		options |= bleveindex.IncludeTermVectors
+	}
+	return options
+}
+
+func blugeFieldPlainTextBytes(field Field) uint64 {
+	if sized, ok := field.(interface{ NumPlainTextBytes() int }); ok {
+		return uint64(sized.NumPlainTextBytes())
+	}
+	return uint64(len(field.Value()))
+}
+
+func blugeFieldHasLocations(field Field) bool {
+	if withLocations, ok := field.(interface{ IncludeLocations() bool }); ok {
+		return withLocations.IncludeLocations()
+	}
+	var found bool
+	field.EachTerm(func(term segment.FieldTerm) {
+		if found {
+			return
+		}
+		term.EachLocation(func(segment.Location) {
+			found = true
+		})
+	})
+	return found
 }

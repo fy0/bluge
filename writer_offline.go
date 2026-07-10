@@ -25,21 +25,27 @@ import (
 type OfflineWriter struct {
 	writer *index.WriterOffline
 
-	batchSize          int
-	maxSegmentsToMerge int
-	batch              *index.Batch
-	batchCount         int
+	batchSize  int
+	batch      *index.Batch
+	batchCount int
+	closed     bool
 }
 
 func OpenOfflineWriter(config Config, batchSize, maxSegmentsToMerge int) (*OfflineWriter, error) {
+	if batchSize <= 0 {
+		return nil, fmt.Errorf("batch size must be greater than zero")
+	}
+	if maxSegmentsToMerge < 2 {
+		return nil, fmt.Errorf("max segments to merge must be at least 2")
+	}
 	rv := &OfflineWriter{
-		batchSize:          batchSize,
-		maxSegmentsToMerge: maxSegmentsToMerge,
-		batch:              index.NewBatch(),
+		batchSize: batchSize,
+		batch:     index.NewBatch(),
 	}
 
 	var err error
-	rv.writer, err = index.OpenOfflineWriter(config.indexConfigForWriting())
+	rv.writer, err = index.OpenOfflineWriterWithMergeMax(
+		config.indexConfigForWriting(), maxSegmentsToMerge)
 	if err != nil {
 		return nil, fmt.Errorf("error opening index: %w", err)
 	}
@@ -47,10 +53,18 @@ func OpenOfflineWriter(config Config, batchSize, maxSegmentsToMerge int) (*Offli
 	return rv, nil
 }
 
+// Insert transfers the document to the offline writer. Full batches are built
+// asynchronously; a background build error is returned by a later Insert or Close.
 func (w *OfflineWriter) Insert(doc segment.Document) error {
+	if w.closed {
+		return fmt.Errorf("offline writer is closed")
+	}
+	if doc == nil {
+		return fmt.Errorf("cannot insert nil document")
+	}
 	w.batch.Insert(doc)
 	w.batchCount++
-	if w.batchCount > w.batchSize {
+	if w.batchCount >= w.batchSize {
 		err := w.writer.Batch(w.batch)
 		if err != nil {
 			return err
@@ -62,11 +76,17 @@ func (w *OfflineWriter) Insert(doc segment.Document) error {
 }
 
 func (w *OfflineWriter) Close() error {
-	if w.batchCount > 0 {
-		err := w.writer.Batch(w.batch)
-		if err != nil {
-			return err
-		}
+	if w.closed {
+		return fmt.Errorf("offline writer is closed")
 	}
-	return w.writer.Close()
+	w.closed = true
+	var batchErr error
+	if w.batchCount > 0 {
+		batchErr = w.writer.Batch(w.batch)
+	}
+	closeErr := w.writer.Close()
+	if batchErr != nil {
+		return batchErr
+	}
+	return closeErr
 }

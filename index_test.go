@@ -745,6 +745,11 @@ func BenchmarkBatchOverhead(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer func() {
+		if err := indexWriter.Close(); err != nil {
+			b.Errorf("close writer: %v", err)
+		}
+	}()
 	for n := 0; n < b.N; n++ {
 		// put 1000 items in a batch
 		batch := NewBatch()

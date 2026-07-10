@@ -17,6 +17,8 @@ package index
 import (
 	"fmt"
 	"io"
+	"runtime"
+	"sort"
 	"sync"
 
 	"github.com/RoaringBitmap/roaring"
@@ -32,15 +34,32 @@ type WriterOffline struct {
 	segCount  uint64
 	segIDs    []uint64
 
-	mergeMax int
+	mergeMax            int
+	buildTokens         chan struct{}
+	builds              sync.WaitGroup
+	buildErr            error
+	closed              bool
+	directoryConcurrent bool
+	directoryMu         sync.Mutex
 }
 
 func OpenOfflineWriter(config Config) (writer *WriterOffline, err error) {
+	return OpenOfflineWriterWithMergeMax(config, 10)
+}
+
+// OpenOfflineWriterWithMergeMax opens an offline writer with the maximum
+// number of input segments combined by one merge task.
+func OpenOfflineWriterWithMergeMax(config Config, maxSegmentsToMerge int) (writer *WriterOffline, err error) {
+	if maxSegmentsToMerge < 2 {
+		return nil, fmt.Errorf("max segments to merge must be at least 2")
+	}
+	directory := config.DirectoryFunc()
 	writer = &WriterOffline{
-		config:    config,
-		directory: config.DirectoryFunc(),
-		segPlugin: nil,
-		mergeMax:  10,
+		config:              config,
+		directory:           directory,
+		mergeMax:            maxSegmentsToMerge,
+		buildTokens:         make(chan struct{}, offlineBuildConcurrency()),
+		directoryConcurrent: isConcurrentDirectory(directory),
 	}
 
 	err = writer.directory.Setup(false)
@@ -57,114 +76,211 @@ func OpenOfflineWriter(config Config) (writer *WriterOffline, err error) {
 }
 
 func (s *WriterOffline) Batch(batch *Batch) (err error) {
-	s.m.Lock()
-	defer s.m.Unlock()
-
 	if len(batch.documents) == 0 {
 		return nil
 	}
-
-	for _, doc := range batch.documents {
-		if doc != nil {
-			doc.Analyze()
+	docs := append([]segment.Document(nil), batch.documents...)
+	for i, doc := range docs {
+		if doc == nil {
+			return fmt.Errorf("offline batch contains nil document at index %d", i)
 		}
 	}
 
-	newSegment, _, err := s.segPlugin.New(batch.documents, s.config.NormCalc)
+	s.m.Lock()
+	if s.closed {
+		s.m.Unlock()
+		return fmt.Errorf("offline writer is closed")
+	}
+	if s.buildErr != nil {
+		err := s.buildErr
+		s.m.Unlock()
+		return err
+	}
+	segID := s.segCount
+	s.segCount++
+	s.builds.Add(1)
+	s.m.Unlock()
+
+	s.buildTokens <- struct{}{}
+	go s.buildBatchSegment(segID, docs)
+	return nil
+}
+
+func (s *WriterOffline) buildBatchSegment(segID uint64, docs []segment.Document) {
+	err := s.buildBatchSegmentErr(segID, docs)
+	<-s.buildTokens
+
+	s.m.Lock()
+	if err != nil {
+		if s.buildErr == nil {
+			s.buildErr = err
+		}
+	} else {
+		s.segIDs = append(s.segIDs, segID)
+	}
+	s.m.Unlock()
+	s.builds.Done()
+}
+
+func (s *WriterOffline) buildBatchSegmentErr(segID uint64, docs []segment.Document) error {
+	for _, doc := range docs {
+		doc.Analyze()
+	}
+
+	newSegment, _, err := s.segPlugin.New(docs, s.config.NormCalc)
 	if err != nil {
 		return err
 	}
-
-	err = s.directory.Persist(ItemKindSegment, s.segCount, newSegment, nil)
-	if err != nil {
-		return fmt.Errorf("error persisting segment: %v", err)
+	if err := s.persist(ItemKindSegment, segID, newSegment); err != nil {
+		return fmt.Errorf("error persisting segment %d: %w", segID, err)
 	}
-	s.segIDs = append(s.segIDs, s.segCount)
-	s.segCount++
-
 	return nil
 }
 
 func (s *WriterOffline) doMerge() error {
 	for len(s.segIDs) > 1 {
-		// merge the next <mergeMax> number of segments into one new one
-		// or, if there are fewer than <mergeMax> remaining, merge them all
-		mergeCount := s.mergeMax
-		if mergeCount > len(s.segIDs) {
-			mergeCount = len(s.segIDs)
+		var tasks []offlineMergeTask
+		nextSegIDs := make([]uint64, 0, (len(s.segIDs)+s.mergeMax-1)/s.mergeMax)
+		for pos := 0; pos < len(s.segIDs); {
+			remaining := len(s.segIDs) - pos
+			if remaining == 1 {
+				nextSegIDs = append(nextSegIDs, s.segIDs[pos])
+				break
+			}
+
+			mergeCount := s.mergeMax
+			if mergeCount > remaining {
+				mergeCount = remaining
+			}
+			mergeIDs := append([]uint64(nil), s.segIDs[pos:pos+mergeCount]...)
+			newID := s.segCount
+			s.segCount++
+			tasks = append(tasks, offlineMergeTask{ids: mergeIDs, newID: newID})
+			nextSegIDs = append(nextSegIDs, newID)
+			pos += mergeCount
 		}
 
-		mergeIDs := s.segIDs[0:mergeCount]
-		s.segIDs = s.segIDs[mergeCount:]
-
-		// open each of the segments to be merged
-		mergeSegs := make([]segment.Segment, 0, mergeCount)
-
-		var closers []io.Closer
-		// closeOpenedSegs attempts to close all opened
-		// segments even if an error occurs, in which case
-		// the first error is returned
-		closeOpenedSegs := func() error {
-			var err error
-			for _, closer := range closers {
-				clErr := closer.Close()
-				if clErr != nil && err == nil {
-					err = clErr
-				}
-			}
+		if err := s.runMergeTasks(tasks); err != nil {
 			return err
 		}
-
-		for _, mergeID := range mergeIDs {
-			data, closer, err := s.directory.Load(ItemKindSegment, mergeID)
-			if err != nil {
-				_ = closeOpenedSegs()
-				return fmt.Errorf("error loading segment from directory: %w", err)
-			}
-			if closer != nil {
-				closers = append(closers, closer)
-			}
-			seg, err := s.segPlugin.Load(data)
-			if err != nil {
-				_ = closeOpenedSegs()
-				return fmt.Errorf("error loading segment: %w", err)
-			}
-			mergeSegs = append(mergeSegs, seg)
-		}
-
-		// do the merge
-		drops := make([]*roaring.Bitmap, mergeCount)
-		merger := s.segPlugin.Merge(mergeSegs, drops, s.config.MergeBufferSize)
-
-		err := s.directory.Persist(ItemKindSegment, s.segCount, merger, nil)
-		if err != nil {
-			_ = closeOpenedSegs()
-			return fmt.Errorf("error merging segments (%v): %w", mergeIDs, err)
-		}
-		s.segIDs = append(s.segIDs, s.segCount)
-		s.segCount++
-
-		// close segments opened for merge
-		err = closeOpenedSegs()
-		if err != nil {
-			return fmt.Errorf("error closing opened segments: %w", err)
-		}
-
-		// remove merged segments
-		for _, mergeID := range mergeIDs {
-			err = s.directory.Remove(ItemKindSegment, mergeID)
-			if err != nil {
-				return fmt.Errorf("error removing segment %v after merge: %w", mergeIDs, err)
-			}
-		}
+		s.segIDs = nextSegIDs
 	}
 
 	return nil
 }
 
+type offlineMergeTask struct {
+	ids   []uint64
+	newID uint64
+}
+
+func (s *WriterOffline) runMergeTasks(tasks []offlineMergeTask) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	concurrency := offlineMergeConcurrency()
+	if !s.directoryConcurrent {
+		concurrency = 1
+	}
+	if len(tasks) == 1 || concurrency == 1 {
+		for _, task := range tasks {
+			if err := s.mergeSegments(task.ids, task.newID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	tokens := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var errOnce sync.Once
+	var firstErr error
+	for _, task := range tasks {
+		task := task
+		tokens <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-tokens }()
+			if err := s.mergeSegments(task.ids, task.newID); err != nil {
+				errOnce.Do(func() { firstErr = err })
+			}
+		}()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+func (s *WriterOffline) mergeSegments(mergeIDs []uint64, newID uint64) error {
+	mergeSegs := make([]segment.Segment, 0, len(mergeIDs))
+	var closers []io.Closer
+	closeOpenedSegs := func() error {
+		var firstErr error
+		for _, closer := range closers {
+			if err := closer.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	for _, mergeID := range mergeIDs {
+		data, closer, err := s.directory.Load(ItemKindSegment, mergeID)
+		if err != nil {
+			_ = closeOpenedSegs()
+			return fmt.Errorf("error loading segment %d: %w", mergeID, err)
+		}
+		if closer != nil {
+			closers = append(closers, closer)
+		}
+		seg, err := s.segPlugin.Load(data)
+		if err != nil {
+			_ = closeOpenedSegs()
+			return fmt.Errorf("error loading segment %d: %w", mergeID, err)
+		}
+		mergeSegs = append(mergeSegs, seg)
+	}
+
+	drops := make([]*roaring.Bitmap, len(mergeIDs))
+	merger := s.segPlugin.Merge(mergeSegs, drops, s.config.MergeBufferSize)
+	if err := s.persist(ItemKindSegment, newID, merger); err != nil {
+		_ = closeOpenedSegs()
+		return fmt.Errorf("error merging segments %v: %w", mergeIDs, err)
+	}
+	if err := closeOpenedSegs(); err != nil {
+		return fmt.Errorf("error closing merged segments %v: %w", mergeIDs, err)
+	}
+	for _, mergeID := range mergeIDs {
+		if err := s.directory.Remove(ItemKindSegment, mergeID); err != nil {
+			return fmt.Errorf("error removing segment %d after merge: %w", mergeID, err)
+		}
+	}
+	return nil
+}
+
 func (s *WriterOffline) Close() error {
 	s.m.Lock()
-	defer s.m.Unlock()
+	if s.closed {
+		s.m.Unlock()
+		return fmt.Errorf("offline writer is closed")
+	}
+	s.closed = true
+	s.m.Unlock()
+
+	s.builds.Wait()
+
+	s.m.Lock()
+	if s.buildErr != nil {
+		err := s.buildErr
+		s.m.Unlock()
+		return err
+	}
+	if len(s.segIDs) == 0 {
+		s.m.Unlock()
+		return fmt.Errorf("offline writer has no segments")
+	}
+	sort.Slice(s.segIDs, func(i, j int) bool { return s.segIDs[i] < s.segIDs[j] })
+	s.m.Unlock()
 
 	// perform all the merging into one segment
 	err := s.doMerge()
@@ -183,6 +299,12 @@ func (s *WriterOffline) Close() error {
 			_ = closer.Close()
 		}
 		return fmt.Errorf("error loading segment: %w", err)
+	}
+	closeFinal := func() error {
+		if closer == nil {
+			return nil
+		}
+		return closer.Close()
 	}
 
 	// fake snapshot referencing this segment
@@ -203,13 +325,44 @@ func (s *WriterOffline) Close() error {
 	}
 
 	// persist the snapshot
-	err = s.directory.Persist(ItemKindSnapshot, s.segIDs[0], snapshot, nil)
+	err = s.persist(ItemKindSnapshot, s.segIDs[0], snapshot)
 	if err != nil {
+		_ = closeFinal()
 		return fmt.Errorf("error recording snapshot: %w", err)
 	}
-
-	if closer != nil {
-		return closer.Close()
+	if err := closeFinal(); err != nil {
+		return fmt.Errorf("error closing final segment: %w", err)
 	}
 	return nil
+}
+
+func (s *WriterOffline) persist(kind string, id uint64, writer WriterTo) error {
+	if !s.directoryConcurrent {
+		s.directoryMu.Lock()
+		defer s.directoryMu.Unlock()
+	}
+	return s.directory.Persist(kind, id, writer, nil)
+}
+
+func isConcurrentDirectory(directory Directory) bool {
+	_, ok := directory.(concurrentDirectory)
+	return ok
+}
+
+func offlineBuildConcurrency() int {
+	concurrency := runtime.GOMAXPROCS(0)
+	if concurrency < 1 {
+		return 1
+	}
+	if concurrency > 2 {
+		return 2
+	}
+	return concurrency
+}
+
+func offlineMergeConcurrency() int {
+	if runtime.GOMAXPROCS(0) < 2 {
+		return 1
+	}
+	return 2
 }

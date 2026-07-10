@@ -14,3 +14,8 @@ section address pairs:
 These values let Bluge construct exact BM25 collection statistics without
 scanning the term dictionary during query setup. Any future change to the
 field metadata or footer layout must increment the `zapx-bluge` version.
+
+Segment construction consumes Bluge's analyzed token frequencies through the
+internal `blugeidx` representation. Native fields reuse their token maps;
+custom `bluge_segment_api` fields use an iteration fallback. This changes only
+the in-memory build path and does not change the version 1 on-disk layout.

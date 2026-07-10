@@ -36,6 +36,8 @@ func NewInMemoryDirectory() *InMemoryDirectory {
 	}
 }
 
+func (*InMemoryDirectory) supportsConcurrentOperations() {}
+
 func (d *InMemoryDirectory) Setup(readOnly bool) error {
 	return nil
 }

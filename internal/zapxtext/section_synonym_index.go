@@ -18,28 +18,22 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"math"
-	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
-	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
 	"github.com/blevesearch/vellum"
+	"github.com/blugelabs/bluge/internal/blugeidx"
 )
 
 func init() {
 	registerSegmentSection(SectionSynonymIndex, &synonymIndexSection{})
-	invertedTextIndexSectionExclusionChecks = append(invertedTextIndexSectionExclusionChecks, func(field index.Field) bool {
-		_, ok := field.(index.SynonymField)
-		return ok
-	})
 }
 
 // -----------------------------------------------------------------------------
 
 type synonymIndexOpaque struct {
-	results []index.Document
+	results []*blugeidx.Document
 
 	// indicates whether the following structs are initialized
 	init bool
@@ -105,7 +99,7 @@ type synonymIndexOpaque struct {
 func (so *synonymIndexOpaque) Set(key string, value interface{}) {
 	switch key {
 	case "results":
-		so.results = value.([]index.Document)
+		so.results = value.([]*blugeidx.Document)
 	case "fieldsMap":
 		so.FieldsMap = value.(map[string]uint16)
 	}
@@ -142,108 +136,6 @@ func (so *synonymIndexOpaque) Reset() (err error) {
 
 	so.tmp0 = so.tmp0[:0]
 	return err
-}
-
-func (so *synonymIndexOpaque) process(field index.SynonymField, fieldID uint16, docNum uint32) {
-	// if this is the first time we are processing a synonym field in this batch
-	// we need to allocate memory for the thesauri and related data structures
-	if !so.init {
-		so.realloc()
-		so.init = true
-	}
-
-	// get the thesaurus id for this field
-	tid := so.FieldIDtoThesaurusID[fieldID]
-
-	// get the thesaurus for this field
-	thesaurus := so.Thesauri[tid]
-
-	termSynMap := so.SynonymTermToID[tid]
-
-	field.IterateSynonyms(func(term string, synonyms []string) {
-		pid := thesaurus[term] - 1
-
-		bs := so.Synonyms[pid]
-
-		for _, syn := range synonyms {
-			code := encodeSynonym(termSynMap[syn], docNum)
-			bs.Add(code)
-		}
-	})
-}
-
-// a one-time call to allocate memory for the thesauri and synonyms which takes
-// all the documents in the result batch and the fieldsMap and predetermines the
-// size of the data structures in the synonymIndexOpaque
-func (so *synonymIndexOpaque) realloc() {
-	var pidNext int
-	var sidNext uint32
-
-	// count the number of unique thesauri from the batch of documents
-	for _, result := range so.results {
-		if synDoc, ok := result.(index.SynonymDocument); ok {
-			synDoc.VisitSynonymFields(func(synField index.SynonymField) {
-				fieldIDPlus1 := so.FieldsMap[synField.Name()]
-				so.getOrDefineThesaurus(fieldIDPlus1-1, synField.Name())
-			})
-		}
-	}
-
-	for _, result := range so.results {
-		if synDoc, ok := result.(index.SynonymDocument); ok {
-			synDoc.VisitSynonymFields(func(synField index.SynonymField) {
-				fieldIDPlus1 := so.FieldsMap[synField.Name()]
-				thesaurusID := so.getOrDefineThesaurus(fieldIDPlus1-1, synField.Name())
-
-				thesaurus := so.Thesauri[thesaurusID]
-				thesaurusKeys := so.ThesaurusKeys[thesaurusID]
-
-				synTermMap := so.SynonymIDtoTerm[thesaurusID]
-
-				termSynMap := so.SynonymTermToID[thesaurusID]
-
-				// iterate over all the term-synonyms pair from the field
-				synField.IterateSynonyms(func(term string, synonyms []string) {
-					_, exists := thesaurus[term]
-					if !exists {
-						pidNext++
-						pidPlus1 := uint64(pidNext)
-
-						thesaurus[term] = pidPlus1
-						thesaurusKeys = append(thesaurusKeys, term)
-					}
-					for _, syn := range synonyms {
-						_, exists := termSynMap[syn]
-						if !exists {
-							termSynMap[syn] = sidNext
-							synTermMap[sidNext] = syn
-							sidNext++
-						}
-					}
-				})
-				so.ThesaurusKeys[thesaurusID] = thesaurusKeys
-			})
-		}
-	}
-
-	numSynonymsLists := pidNext
-
-	if cap(so.Synonyms) >= numSynonymsLists {
-		so.Synonyms = so.Synonyms[:numSynonymsLists]
-	} else {
-		synonyms := make([]*roaring64.Bitmap, numSynonymsLists)
-		copy(synonyms, so.Synonyms[:cap(so.Synonyms)])
-		for i := 0; i < numSynonymsLists; i++ {
-			if synonyms[i] == nil {
-				synonyms[i] = roaring64.New()
-			}
-		}
-		so.Synonyms = synonyms
-	}
-
-	for _, thes := range so.ThesaurusKeys {
-		sort.Strings(thes)
-	}
 }
 
 // getOrDefineThesaurus returns the thesaurus id for the given field id and thesaurus name.
@@ -412,14 +304,8 @@ func (s *synonymIndexSection) InitOpaque(args map[string]interface{}) resetable 
 
 // Process processes a synonym field by adding the synonyms to the thesaurus
 // pointed to by the fieldID, implements the Process API for the synonym index section.
-func (s *synonymIndexSection) Process(opaque map[int]resetable, docNum uint32, field index.Field, fieldID uint16) {
-	if fieldID == math.MaxUint16 {
-		return
-	}
-	if sf, ok := field.(index.SynonymField); ok {
-		so := s.getSynonymIndexOpaque(opaque)
-		so.process(sf, fieldID, docNum)
-	}
+func (s *synonymIndexSection) Process(opaque map[int]resetable, docNum uint32,
+	field *blugeidx.Field, fieldID uint16) {
 }
 
 // Persist serializes and writes the thesauri processed to the writer, along

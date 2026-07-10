@@ -15,10 +15,10 @@ import (
 
 	roaringv1 "github.com/RoaringBitmap/roaring"
 	roaringv2 "github.com/RoaringBitmap/roaring/v2"
-	bleveindex "github.com/blevesearch/bleve_index_api"
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
 	blugeseg "github.com/blugelabs/bluge_segment_api"
 
+	"github.com/blugelabs/bluge/internal/blugeidx"
 	zapxtext "github.com/blugelabs/bluge/internal/zapxtext"
 )
 
@@ -27,10 +27,22 @@ const (
 	Version = zapxtext.Version
 )
 
+type blugeIndexDocumentExporter interface {
+	ToBlugeIndexDocument() (*blugeidx.Document, error)
+}
+
 func New(results []blugeseg.Document, normCalc func(string, int) float32) (blugeseg.Segment, uint64, error) {
-	zapDocs := make([]bleveindex.Document, len(results))
+	zapDocs := make([]*blugeidx.Document, len(results))
 	for i, doc := range results {
-		zapDocs[i] = &documentAdapter{doc: doc}
+		var err error
+		if exporter, ok := doc.(blugeIndexDocumentExporter); ok {
+			zapDocs[i], err = exporter.ToBlugeIndexDocument()
+		} else {
+			zapDocs[i], err = blugeidx.FromSegmentDocument(doc)
+		}
+		if err != nil {
+			return nil, 0, fmt.Errorf("zapx-bluge: document %d (%T): %w", i, doc, err)
+		}
 	}
 
 	seg, bytesWritten, err := zapxtext.NewWithNormCalc(zapDocs, normCalc)
@@ -72,152 +84,6 @@ func Merge(segments []blugeseg.Segment, drops []*roaringv1.Bitmap, mergeBufferSi
 		segments: zapSegments,
 		drops:    zapDrops,
 	}
-}
-
-type documentAdapter struct {
-	doc blugeseg.Document
-}
-
-func (d *documentAdapter) ID() string {
-	var id string
-	d.doc.EachField(func(field blugeseg.Field) {
-		if id == "" && field.Name() == "_id" {
-			id = string(field.Value())
-		}
-	})
-	return id
-}
-
-func (d *documentAdapter) Size() int {
-	var rv int
-	d.doc.EachField(func(field blugeseg.Field) {
-		rv += len(field.Name()) + len(field.Value())
-	})
-	return rv
-}
-
-func (d *documentAdapter) VisitFields(visitor bleveindex.FieldVisitor) {
-	d.doc.EachField(func(field blugeseg.Field) {
-		visitor(&fieldAdapter{field: field})
-	})
-}
-
-func (d *documentAdapter) VisitComposite(visitor bleveindex.CompositeFieldVisitor) {}
-
-func (d *documentAdapter) HasComposite() bool {
-	return false
-}
-
-func (d *documentAdapter) NumPlainTextBytes() uint64 {
-	var rv uint64
-	d.doc.EachField(func(field blugeseg.Field) {
-		rv += uint64(len(field.Value()))
-	})
-	return rv
-}
-
-func (d *documentAdapter) AddIDField() {}
-
-func (d *documentAdapter) StoredFieldsBytes() uint64 {
-	var rv uint64
-	d.doc.EachField(func(field blugeseg.Field) {
-		if field.Store() {
-			rv += uint64(len(field.Value()))
-		}
-	})
-	return rv
-}
-
-func (d *documentAdapter) Indexed() bool {
-	var indexed bool
-	d.doc.EachField(func(field blugeseg.Field) {
-		if field.Index() {
-			indexed = true
-		}
-	})
-	return indexed
-}
-
-type fieldAdapter struct {
-	field blugeseg.Field
-}
-
-func (f *fieldAdapter) Name() string {
-	return f.field.Name()
-}
-
-func (f *fieldAdapter) Value() []byte {
-	return f.field.Value()
-}
-
-func (f *fieldAdapter) ArrayPositions() []uint64 {
-	return nil
-}
-
-func (f *fieldAdapter) EncodedFieldType() byte {
-	return 't'
-}
-
-func (f *fieldAdapter) Analyze() {}
-
-func (f *fieldAdapter) Options() bleveindex.FieldIndexingOptions {
-	var rv bleveindex.FieldIndexingOptions
-	if f.field.Index() {
-		rv |= bleveindex.IndexField
-	}
-	if f.field.Store() {
-		rv |= bleveindex.StoreField
-	}
-	if f.field.IndexDocValues() {
-		rv |= bleveindex.DocValues
-	}
-	if f.hasLocations() {
-		rv |= bleveindex.IncludeTermVectors
-	}
-	return rv
-}
-
-func (f *fieldAdapter) AnalyzedLength() int {
-	return f.field.Length()
-}
-
-func (f *fieldAdapter) AnalyzedTokenFrequencies() bleveindex.TokenFrequencies {
-	rv := make(bleveindex.TokenFrequencies)
-	f.field.EachTerm(func(term blugeseg.FieldTerm) {
-		termBytes := term.Term()
-		tf := &bleveindex.TokenFreq{
-			Term: append([]byte(nil), termBytes...),
-		}
-		tf.SetFrequency(term.Frequency())
-		term.EachLocation(func(location blugeseg.Location) {
-			fieldName := location.Field()
-			if fieldName == "" {
-				fieldName = f.field.Name()
-			}
-			tf.Locations = append(tf.Locations, &bleveindex.TokenLocation{
-				Field:    fieldName,
-				Start:    location.Start(),
-				End:      location.End(),
-				Position: location.Pos(),
-			})
-		})
-		rv[string(termBytes)] = tf
-	})
-	return rv
-}
-
-func (f *fieldAdapter) NumPlainTextBytes() uint64 {
-	return uint64(len(f.field.Value()))
-}
-
-func (f *fieldAdapter) hasLocations() bool {
-	var hasLocations bool
-	f.field.EachTerm(func(term blugeseg.FieldTerm) {
-		term.EachLocation(func(location blugeseg.Location) {
-			hasLocations = true
-		})
-	})
-	return hasLocations
 }
 
 type segmentAdapter struct {

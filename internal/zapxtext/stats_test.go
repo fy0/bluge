@@ -14,8 +14,10 @@ import (
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
-	index "github.com/blevesearch/bleve_index_api"
-	segment "github.com/blevesearch/scorch_segment_api/v2"
+	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
+	blugeseg "github.com/blugelabs/bluge_segment_api"
+
+	"github.com/blugelabs/bluge/internal/blugeidx"
 )
 
 func TestFieldStatsSurviveMerge(t *testing.T) {
@@ -48,7 +50,7 @@ func TestFieldStatsSurviveMerge(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
-			_, _, err := MergeToWriter([]segment.Segment{first, second}, test.drops,
+			_, _, err := MergeToWriter([]scorchseg.Segment{first, second}, test.drops,
 				&output, make(chan struct{}))
 			if err != nil {
 				t.Fatal(err)
@@ -72,13 +74,28 @@ func TestFieldStatsSurviveMerge(t *testing.T) {
 	}
 }
 
-func newStatsTestSegment(t *testing.T, documents ...index.Document) segment.Segment {
+func newStatsTestSegment(t *testing.T, documents ...blugeseg.Document) scorchseg.Segment {
 	t.Helper()
-	result, _, err := New(documents)
+	buildDocuments := newStatsTestBuildDocuments(t, documents...)
+	result, _, err := New(buildDocuments)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func newStatsTestBuildDocuments(t *testing.T,
+	documents ...blugeseg.Document) []*blugeidx.Document {
+	t.Helper()
+	buildDocuments := make([]*blugeidx.Document, len(documents))
+	for i, document := range documents {
+		var err error
+		buildDocuments[i], err = blugeidx.FromSegmentDocument(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return buildDocuments
 }
 
 type statsTestDocument struct {
@@ -90,65 +107,67 @@ func newStatsTestDocument(id, body string) *statsTestDocument {
 	return &statsTestDocument{
 		id: id,
 		fields: []*statsTestField{
-			newStatsTestField("_id", id, index.IndexField|index.StoreField),
-			newStatsTestField("body", body, index.IndexField|index.DocValues),
+			newStatsTestField("_id", id, true, true, false),
+			newStatsTestField("body", body, true, false, true),
 		},
 	}
 }
 
-func (d *statsTestDocument) ID() string { return d.id }
-func (d *statsTestDocument) Size() int {
-	var size int
-	for _, field := range d.fields {
-		size += len(field.name) + len(field.value)
-	}
-	return size
-}
-func (d *statsTestDocument) VisitFields(visitor index.FieldVisitor) {
+func (d *statsTestDocument) Analyze() {}
+func (d *statsTestDocument) EachField(visitor blugeseg.VisitField) {
 	for _, field := range d.fields {
 		visitor(field)
 	}
 }
-func (d *statsTestDocument) VisitComposite(index.CompositeFieldVisitor) {}
-func (d *statsTestDocument) HasComposite() bool                         { return false }
-func (d *statsTestDocument) NumPlainTextBytes() uint64                  { return uint64(d.Size()) }
-func (d *statsTestDocument) AddIDField()                                {}
-func (d *statsTestDocument) StoredFieldsBytes() uint64                  { return uint64(len(d.id)) }
-func (d *statsTestDocument) Indexed() bool                              { return true }
 
 type statsTestField struct {
-	name        string
-	value       []byte
-	options     index.FieldIndexingOptions
-	length      int
-	frequencies index.TokenFrequencies
+	name      string
+	value     []byte
+	indexed   bool
+	stored    bool
+	docValues bool
+	length    int
+	terms     map[string]*statsTestTerm
 }
 
-func newStatsTestField(name, value string, options index.FieldIndexingOptions) *statsTestField {
+func newStatsTestField(name, value string, indexed, stored, docValues bool) *statsTestField {
 	field := &statsTestField{
-		name:        name,
-		value:       []byte(value),
-		options:     options,
-		frequencies: make(index.TokenFrequencies),
+		name:      name,
+		value:     []byte(value),
+		indexed:   indexed,
+		stored:    stored,
+		docValues: docValues,
+		terms:     make(map[string]*statsTestTerm),
 	}
 	for _, term := range strings.Fields(value) {
 		field.length++
-		frequency := field.frequencies[term]
+		frequency := field.terms[term]
 		if frequency == nil {
-			frequency = &index.TokenFreq{Term: []byte(term)}
-			field.frequencies[term] = frequency
+			frequency = &statsTestTerm{term: []byte(term)}
+			field.terms[term] = frequency
 		}
-		frequency.SetFrequency(frequency.Frequency() + 1)
+		frequency.frequency++
 	}
 	return field
 }
 
-func (f *statsTestField) Name() string                                     { return f.name }
-func (f *statsTestField) Value() []byte                                    { return f.value }
-func (f *statsTestField) ArrayPositions() []uint64                         { return nil }
-func (f *statsTestField) EncodedFieldType() byte                           { return 't' }
-func (f *statsTestField) Analyze()                                         {}
-func (f *statsTestField) Options() index.FieldIndexingOptions              { return f.options }
-func (f *statsTestField) AnalyzedLength() int                              { return f.length }
-func (f *statsTestField) AnalyzedTokenFrequencies() index.TokenFrequencies { return f.frequencies }
-func (f *statsTestField) NumPlainTextBytes() uint64                        { return uint64(len(f.value)) }
+func (f *statsTestField) Name() string         { return f.name }
+func (f *statsTestField) Value() []byte        { return f.value }
+func (f *statsTestField) Length() int          { return f.length }
+func (f *statsTestField) Index() bool          { return f.indexed }
+func (f *statsTestField) Store() bool          { return f.stored }
+func (f *statsTestField) IndexDocValues() bool { return f.docValues }
+func (f *statsTestField) EachTerm(v blugeseg.VisitTerm) {
+	for _, term := range f.terms {
+		v(term)
+	}
+}
+
+type statsTestTerm struct {
+	term      []byte
+	frequency int
+}
+
+func (t *statsTestTerm) Term() []byte                        { return t.term }
+func (t *statsTestTerm) Frequency() int                      { return t.frequency }
+func (t *statsTestTerm) EachLocation(blugeseg.VisitLocation) {}

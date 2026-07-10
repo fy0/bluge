@@ -56,6 +56,8 @@ func NewFileSystemDirectory(path string) *FileSystemDirectory {
 	}
 }
 
+func (*FileSystemDirectory) supportsConcurrentOperations() {}
+
 func (d *FileSystemDirectory) exists() (bool, error) {
 	_, err := os.Stat(d.path)
 	if err == nil {

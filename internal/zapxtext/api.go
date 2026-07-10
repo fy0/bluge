@@ -17,15 +17,16 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
+	"github.com/blugelabs/bluge/internal/blugeidx"
 )
 
 // New creates an in-memory zapx text segment.
-func New(results []index.Document) (seg.Segment, uint64, error) {
+func New(results []*blugeidx.Document) (seg.Segment, uint64, error) {
 	return new(ZapPlugin).New(results)
 }
 
 // NewWithNormCalc creates a segment using the caller's field norm encoding.
-func NewWithNormCalc(results []index.Document, normCalc func(string, int) float32) (
+func NewWithNormCalc(results []*blugeidx.Document, normCalc func(string, int) float32) (
 	seg.Segment, uint64, error) {
 	return new(ZapPlugin).newWithChunkMode(results, DefaultChunkMode, nil, normCalc)
 }

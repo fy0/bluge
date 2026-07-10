@@ -24,6 +24,7 @@ import (
 
 	index "github.com/blevesearch/bleve_index_api"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
+	"github.com/blugelabs/bluge/internal/blugeidx"
 	"github.com/golang/snappy"
 )
 
@@ -35,22 +36,22 @@ var NewSegmentBufferAvgBytesPerDocFactor float64 = 1.0
 // on fields in a document being added to a new segment, by default it does
 // nothing.
 // This API is experimental and may be removed at any time.
-var ValidateDocFields = func(field index.Field) error {
+var ValidateDocFields = func(field *blugeidx.Field) error {
 	return nil
 }
 
 // New creates an in-memory zap-encoded SegmentBase from a set of Documents
-func (z *ZapPlugin) New(results []index.Document) (
+func (z *ZapPlugin) New(results []*blugeidx.Document) (
 	segment.Segment, uint64, error) {
 	return z.newWithChunkMode(results, DefaultChunkMode, nil, nil)
 }
 
-func (z *ZapPlugin) NewUsing(results []index.Document, config map[string]interface{}) (
+func (z *ZapPlugin) NewUsing(results []*blugeidx.Document, config map[string]interface{}) (
 	segment.Segment, uint64, error) {
 	return z.newWithChunkMode(results, DefaultChunkMode, config, nil)
 }
 
-func (*ZapPlugin) newWithChunkMode(results []index.Document,
+func (*ZapPlugin) newWithChunkMode(results []*blugeidx.Document,
 	chunkMode uint32, config map[string]interface{}, normCalc func(string, int) float32) (
 	segment.Segment, uint64, error) {
 	s := interimPool.Get().(*interim)
@@ -69,7 +70,8 @@ func (*ZapPlugin) newWithChunkMode(results []index.Document,
 	}
 
 	var err error
-	s.results, s.edgeList = flattenNestedDocuments(results, s.edgeList)
+	s.results = results
+	clear(s.edgeList)
 	s.config = config
 	s.chunkMode = chunkMode
 	s.normCalc = normCalc
@@ -104,7 +106,7 @@ var interimPool = sync.Pool{New: func() interface{} { return &interim{} }}
 type interim struct {
 	bytesWritten atomic.Uint64
 
-	results []index.Document
+	results []*blugeidx.Document
 
 	// edge list for nested documents: child -> parent
 	edgeList map[uint64]uint64
@@ -196,20 +198,15 @@ func (s *interim) convert() (uint64, uint64, error) {
 		s.FieldsOptions = map[string]index.FieldIndexingOptions{}
 	}
 
-	s.getOrDefineField("_id") // _id field is fieldID 0
+	s.getOrDefineField(blugeidx.IDFieldName) // _id field is fieldID 0
 	// special case _id field options: the _id is the canonical document identifier and
 	// must always be both indexed and stored so that it can be used for lookups/queries
 	// and retrieved back from the stored fields, regardless of user-specified field options.
-	s.FieldsOptions["_id"] = index.IndexField | index.StoreField
+	s.FieldsOptions[blugeidx.IDFieldName] = index.IndexField | index.StoreField
 
 	var fName string
 	for _, result := range s.results {
-		result.VisitComposite(func(field index.CompositeField) {
-			fName = field.Name()
-			s.getOrDefineField(fName)
-			s.FieldsOptions[fName] |= field.Options()
-		})
-		result.VisitFields(func(field index.Field) {
+		result.VisitFields(func(field *blugeidx.Field) {
 			fName = field.Name()
 			s.getOrDefineField(fName)
 			s.FieldsOptions[fName] |= field.Options()
@@ -299,25 +296,14 @@ func (s *interim) processDocuments() {
 }
 
 func (s *interim) processDocument(docNum uint32,
-	result index.Document) {
-	// this callback is essentially going to be invoked on each field,
-	// as part of which preprocessing, cumulation etc. of the doc's data
-	// will take place.
-	visitField := func(field index.Field) {
+	result *blugeidx.Document) {
+	visitField := func(field *blugeidx.Field) {
 		fieldID := uint16(s.getOrDefineField(field.Name()))
 
-		// section specific processing of the field
 		for _, section := range segmentSections {
 			section.Process(s.opaque, docNum, field, fieldID)
 		}
 	}
-
-	// walk each composite field
-	result.VisitComposite(func(field index.CompositeField) {
-		visitField(field)
-	})
-
-	// walk each field
 	result.VisitFields(visitField)
 
 	// given that as part of visiting each field, there may some kind of totalling
@@ -362,7 +348,7 @@ func (s *interim) writeStoredFields() (
 		}
 
 		var validationErr error
-		result.VisitFields(func(field index.Field) {
+		result.VisitFields(func(field *blugeidx.Field) {
 			fieldID := uint16(s.getOrDefineField(field.Name()))
 
 			if field.Options().IsStored() {
@@ -499,64 +485,4 @@ func numUvarintBytes(x uint64) (n int) {
 		n++
 	}
 	return n + 1
-}
-
-// flattenNestedDocuments returns a preorder list of the given documents and
-// all their nested documents, along with a map mapping each flattened index
-// to its parent index (excluding root docs entirely).
-// The edge list is represented as a map[child]parent, where both child and
-// parent are flattened document indices.
-// Root documents (those without a parent) are not included in the edge list,
-// as they have no parent. The order of documents in the returned slice is
-// such that parents always appear before their children. A reusable edgeList
-// can be provided to avoid allocations across multiple calls.
-func flattenNestedDocuments(docs []index.Document, edgeList map[uint64]uint64) (
-	[]index.Document, map[uint64]uint64) {
-	totalCount := 0
-	for _, doc := range docs {
-		totalCount += countNestedDocuments(doc)
-	}
-
-	if totalCount == len(docs) {
-		// no nested documents, return early
-		return docs, nil
-	}
-
-	flattened := make([]index.Document, 0, totalCount)
-	if edgeList == nil {
-		edgeList = make(map[uint64]uint64, totalCount-len(docs))
-	}
-
-	var traverse func(doc index.Document, hasParent bool, parentIdx uint64)
-	traverse = func(d index.Document, hasParent bool, parentIdx uint64) {
-		curIdx := uint64(len(flattened))
-		flattened = append(flattened, d)
-
-		if hasParent {
-			edgeList[curIdx] = parentIdx
-		}
-
-		if nestedDoc, ok := d.(index.NestedDocument); ok {
-			nestedDoc.VisitNestedDocuments(func(child index.Document) {
-				traverse(child, true, curIdx)
-			})
-		}
-	}
-	// Top-level docs have no parent
-	for _, doc := range docs {
-		traverse(doc, false, 0)
-	}
-	return flattened, edgeList
-}
-
-// countNestedDocuments returns the total number of docs in preorder,
-// including the parent and all descendants.
-func countNestedDocuments(doc index.Document) int {
-	count := 1 // include this doc
-	if nd, ok := doc.(index.NestedDocument); ok {
-		nd.VisitNestedDocuments(func(child index.Document) {
-			count += countNestedDocuments(child)
-		})
-	}
-	return count
 }
