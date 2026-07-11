@@ -17,6 +17,8 @@ package zap
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/golang/snappy"
 )
 
 type chunkedIntDecoder struct {
@@ -24,6 +26,7 @@ type chunkedIntDecoder struct {
 	dataStartOffset uint64
 	chunkOffsets    []uint64
 	curChunkBytes   []byte
+	uncompressed    []byte
 	data            []byte
 	r               *memUvarintReader
 	fr              *FileReader
@@ -90,9 +93,24 @@ func (d *chunkedIntDecoder) loadChunk(chunk int) error {
 	end += e
 
 	var err error
-	d.curChunkBytes, err = d.fr.process(d.data[start:end])
+	encoded, err := d.fr.process(d.data[start:end])
 	if err != nil {
 		return fmt.Errorf("error processing chunk %d: %w", chunk, err)
+	}
+	if len(encoded) == 0 {
+		return fmt.Errorf("empty encoded integer chunk %d", chunk)
+	}
+	switch encoded[0] {
+	case intChunkRaw:
+		d.curChunkBytes = encoded[1:]
+	case intChunkSnappy:
+		d.curChunkBytes, err = snappy.Decode(d.uncompressed[:cap(d.uncompressed)], encoded[1:])
+		if err != nil {
+			return fmt.Errorf("error decompressing integer chunk %d: %w", chunk, err)
+		}
+		d.uncompressed = d.curChunkBytes
+	default:
+		return fmt.Errorf("unknown integer chunk encoding %d", encoded[0])
 	}
 	d.bytesRead += end - start
 	if d.r == nil {
@@ -109,6 +127,7 @@ func (d *chunkedIntDecoder) reset() {
 	d.dataStartOffset = 0
 	d.chunkOffsets = d.chunkOffsets[:0]
 	d.curChunkBytes = d.curChunkBytes[:0]
+	d.uncompressed = d.uncompressed[:0]
 	d.bytesRead = 0
 	d.data = d.data[:0]
 	if d.r != nil {
