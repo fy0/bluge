@@ -560,38 +560,18 @@ func (sb *SegmentBase) visitStoredFields(vdc *visitDocumentCtx, num uint64,
 			return err
 		}
 
-		vdc.reader.Reset(meta)
-
-		// handle _id field special case
-		idFieldValLen, err := binary.ReadUvarint(&vdc.reader)
-		if err != nil {
-			return err
-		}
-		idFieldVal := compressed[:idFieldValLen]
-
-		keepGoing := visitor("_id", byte('t'), idFieldVal, nil)
-		if !keepGoing {
-			visitDocumentCtxPool.Put(vdc)
-			return nil
-		}
-
-		// handle non-"_id" fields
-		compressed = compressed[idFieldValLen:]
-
 		uncompressed, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], compressed)
 		if err != nil {
 			return err
 		}
 
+		vdc.reader.Reset(meta)
+		keepGoing := true
 		for keepGoing {
 			field, err := binary.ReadUvarint(&vdc.reader)
 			if err == io.EOF {
 				break
 			}
-			if err != nil {
-				return err
-			}
-			typ, err := binary.ReadUvarint(&vdc.reader)
 			if err != nil {
 				return err
 			}
@@ -603,26 +583,8 @@ func (sb *SegmentBase) visitStoredFields(vdc *visitDocumentCtx, num uint64,
 			if err != nil {
 				return err
 			}
-			numap, err := binary.ReadUvarint(&vdc.reader)
-			if err != nil {
-				return err
-			}
-			var arrayPos []uint64
-			if numap > 0 {
-				if cap(vdc.arrayPos) < int(numap) {
-					vdc.arrayPos = make([]uint64, numap)
-				}
-				arrayPos = vdc.arrayPos[:numap]
-				for i := 0; i < int(numap); i++ {
-					ap, err := binary.ReadUvarint(&vdc.reader)
-					if err != nil {
-						return err
-					}
-					arrayPos[i] = ap
-				}
-			}
 			value := uncompressed[offset : offset+l]
-			keepGoing = visitor(sb.fieldsInv[field], byte(typ), value, arrayPos)
+			keepGoing = visitor(sb.fieldsInv[field], byte('t'), value, nil)
 		}
 
 		vdc.buf = uncompressed
@@ -643,15 +605,30 @@ func (sb *SegmentBase) DocID(num uint64) ([]byte, error) {
 		return nil, err
 	}
 
-	vdc.reader.Reset(meta)
-
-	// handle _id field special case
-	idFieldValLen, err := binary.ReadUvarint(&vdc.reader)
+	uncompressed, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], compressed)
 	if err != nil {
 		return nil, err
 	}
-	idFieldVal := compressed[:idFieldValLen]
 
+	vdc.reader.Reset(meta)
+	field, err := binary.ReadUvarint(&vdc.reader)
+	if err != nil {
+		return nil, err
+	}
+	if field != 0 {
+		return nil, fmt.Errorf("stored _id field missing for doc %d", num)
+	}
+	offset, err := binary.ReadUvarint(&vdc.reader)
+	if err != nil {
+		return nil, err
+	}
+	l, err := binary.ReadUvarint(&vdc.reader)
+	if err != nil {
+		return nil, err
+	}
+	idFieldVal := append([]byte(nil), uncompressed[offset:offset+l]...)
+
+	vdc.buf = uncompressed
 	visitDocumentCtxPool.Put(vdc)
 
 	return idFieldVal, nil

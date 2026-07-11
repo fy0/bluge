@@ -171,9 +171,7 @@ func (s *interim) reset() (err error) {
 }
 
 type interimStoredField struct {
-	vals      [][]byte
-	typs      []byte
-	arrayposs [][]uint64 // array positions
+	vals [][]byte
 }
 
 type interimFreqNorm struct {
@@ -354,8 +352,6 @@ func (s *interim) writeStoredFields() (
 			if field.Options().IsStored() {
 				isf := docStoredFields[fieldID]
 				isf.vals = append(isf.vals, field.Value())
-				isf.typs = append(isf.typs, field.EncodedFieldType())
-				isf.arrayposs = append(isf.arrayposs, field.ArrayPositions())
 				docStoredFields[fieldID] = isf
 			}
 
@@ -373,19 +369,13 @@ func (s *interim) writeStoredFields() (
 		s.metaBuf.Reset()
 		data = data[:0]
 
-		// _id field special case optimizes ExternalID() lookups
-		idFieldVal := docStoredFields[uint16(0)].vals[0]
-		_, err = metaEncode(uint64(len(idFieldVal)))
-		if err != nil {
-			return 0, err
-		}
-
-		// handle non-"_id" fields
-		for fieldID := 1; fieldID < len(s.FieldsInv); fieldID++ {
+		// Store every field, including _id, in one compressed payload so repeated
+		// values within a document can share Snappy back-references.
+		for fieldID := 0; fieldID < len(s.FieldsInv); fieldID++ {
 			isf, exists := docStoredFields[uint16(fieldID)]
 			if exists {
 				curr, data, err = persistStoredFieldValues(
-					fieldID, isf.vals, isf.typs, isf.arrayposs,
+					fieldID, isf.vals,
 					curr, metaEncode, data)
 				if err != nil {
 					return 0, err
@@ -399,11 +389,8 @@ func (s *interim) writeStoredFields() (
 		s.incrementBytesWritten(uint64(len(compressed)))
 		docStoredOffsets[docNum] = uint64(s.w.Count())
 
-		combined := make([]byte, len(idFieldVal)+len(compressed))
-		copy(combined, idFieldVal)
-		copy(combined[len(idFieldVal):], compressed)
 		bufMeta := s.w.process(metaBytes)
-		bufCompressed := s.w.process(combined)
+		bufCompressed := s.w.process(compressed)
 
 		_, err = writeUvarints(s.w,
 			uint64(len(bufMeta)),

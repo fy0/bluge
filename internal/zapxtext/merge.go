@@ -459,8 +459,6 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 	}
 
 	vals := make([][][]byte, len(fieldsInv))
-	typs := make([][]byte, len(fieldsInv))
-	poss := make([][][]uint64, len(fieldsInv))
 
 	// copying data directly is safe only if there are no
 	// file callbacks that might modify the data in all
@@ -475,8 +473,6 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 	if w.id != "" {
 		copyFlag = false
 	}
-
-	var posBuf []uint64
 
 	docNumOffsets := make([]uint64, newSegDocCount)
 
@@ -527,15 +523,11 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 			metaBuf.Reset()
 			data = data[:0]
 
-			posTemp := posBuf
-
 			// collect all the data
 			for i := 0; i < len(fieldsInv); i++ {
 				vals[i] = vals[i][:0]
-				typs[i] = typs[i][:0]
-				poss[i] = poss[i][:0]
 			}
-			err := segment.visitStoredFields(vdc, docNum, func(field string, typ byte, value []byte, pos []uint64) bool {
+			err := segment.visitStoredFields(vdc, docNum, func(field string, _ byte, value []byte, _ []uint64) bool {
 				fieldID := int(fieldsMap[field]) - 1
 				if fieldID < 0 {
 					// no entry for field in fieldsMap
@@ -546,20 +538,6 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 					return true
 				}
 				vals[fieldID] = append(vals[fieldID], value)
-				typs[fieldID] = append(typs[fieldID], typ)
-
-				// copy array positions to preserve them beyond the scope of this callback
-				var curPos []uint64
-				if len(pos) > 0 {
-					if cap(posTemp) < len(pos) {
-						posBuf = make([]uint64, len(pos)*len(fieldsInv))
-						posTemp = posBuf
-					}
-					curPos = posTemp[0:len(pos)]
-					copy(curPos, pos)
-					posTemp = posTemp[len(pos):]
-				}
-				poss[fieldID] = append(poss[fieldID], curPos)
 
 				return true
 			})
@@ -567,15 +545,8 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 				return 0, nil, err
 			}
 
-			// _id field special case optimizes ExternalID() lookups
-			idFieldVal := vals[uint16(0)][0]
-			_, err = metaEncode(uint64(len(idFieldVal)))
-			if err != nil {
-				return 0, nil, err
-			}
-
-			// now walk the non-"_id" fields in order
-			for fieldID := 1; fieldID < len(fieldsInv); fieldID++ {
+			// Walk every stored field, including _id, in field order.
+			for fieldID := 0; fieldID < len(fieldsInv); fieldID++ {
 				// early exit if the store is not wanted for this field
 				if !fieldsOptions[fieldsInv[fieldID]].IsStored() {
 					continue
@@ -586,12 +557,9 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 				}
 				storedFieldValues := vals[fieldID]
 
-				stf := typs[fieldID]
-				spf := poss[fieldID]
-
 				var err2 error
 				curr, data, err2 = persistStoredFieldValues(fieldID,
-					storedFieldValues, stf, spf, curr, metaEncode, data)
+					storedFieldValues, curr, metaEncode, data)
 				if err2 != nil {
 					return 0, nil, err2
 				}
@@ -606,13 +574,7 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 
 			bufMeta := w.process(metaBytes)
 
-			// idFieldVal is a pointer to a mem mapped byte slice, so we copy
-			// before merging it with the compressed data
-			buf := make([]byte, 0, len(idFieldVal)+len(compressed))
-			buf = append(buf, idFieldVal...)
-			buf = append(buf, compressed...)
-
-			bufCompressed := w.process(buf)
+			bufCompressed := w.process(compressed)
 
 			// write out the meta len and compressed data len
 			_, err = writeUvarints(w,
