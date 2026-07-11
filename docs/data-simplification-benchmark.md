@@ -166,10 +166,33 @@ Canonical BM25 Top 5:
 5  3.3122  data-simplification/wikilarge/wiki.full.aner.train.src:284192
 ```
 
-### Additional OfflineWriter Build
+### Additional OfflineWriter Builds
 
-An additional build used 1,000 documents per initial segment, a merge fan-in
-of 32 segments, and six concurrent segment build or merge tasks:
+Both OfflineWriter builds used 1,000 documents per initial segment. The first
+used the default merge fan-in of 10 and the default concurrency of 2, without
+calling `WithOfflineWriterConcurrency`:
+
+```go
+config := bluge.DefaultConfig(indexPath)
+writer, err := bluge.OpenOfflineWriter(config, 1000, 10)
+```
+
+Default configuration output:
+
+```text
+index:   ...\bluge-offline-default-c2-m10 (285.49 MiB, kept=true)
+files:   24 text files
+docs:    1547580
+text:    176.24 MiB uncompressed indexed text
+batch:   1000 docs
+writer:  offline, merge-max=10 concurrency=2 (defaults)
+build:   1m50.945s, 13949 docs/sec, 1.59 MiB/sec
+query:   "LOCATION" in 49ms, 5 hits shown
+memory:  peak Alloc=81.02 MiB peak Sys=134.30 MiB final Alloc=36.05 MiB final Sys=134.30 MiB
+```
+
+The tuned build used a merge fan-in of 32 segments and six concurrent segment
+build or merge tasks:
 
 ```go
 config := bluge.DefaultConfig(indexPath).
@@ -191,9 +214,10 @@ if err := writer.Close(); err != nil {
 }
 ```
 
-The value `32` is `maxSegmentsToMerge`: each merge task consumes at most 32
-segments. It does not leave 32 final segments. `Close()` completed the
-hierarchical merge into one `.seg` file and one snapshot file.
+The third argument is `maxSegmentsToMerge`: each merge task consumes at most
+that many segments. It does not control the final segment count. `Close()`
+completed both hierarchical merge plans into one `.seg` file and one snapshot
+file.
 
 Memory was sampled every 25 ms throughout archive ingestion, asynchronous
 segment construction, and the final `Close()` merge. Observed output:
@@ -210,19 +234,36 @@ query:   "LOCATION" in 46ms, 5 hits shown
 memory:  peak Alloc=155.23 MiB peak Sys=187.85 MiB final Alloc=52.82 MiB final Sys=187.85 MiB
 ```
 
-The query was a correctness check after the build; its Top 5 IDs, ordering, and
-canonical BM25 scores exactly matched the ordinary Writer index. No 10-run
-query-only distribution was collected for this additional build.
+The post-build queries were correctness checks. Both OfflineWriter indexes had
+the same Top 5 IDs, ordering, and canonical BM25 scores as the ordinary Writer
+index. No 10-run query-only distribution was collected for these additional
+builds.
 
-Compared with the ordinary Writer run from the same revision:
-
-| Metric | Ordinary Writer | OfflineWriter, 32 / 6 | Change |
+| Metric | Ordinary Writer | OfflineWriter 10 / 2 | OfflineWriter 32 / 6 |
 |---|---:|---:|---:|
-| Build time | 2m4.044s | **1m11.561s** | **-42.31%** |
-| Throughput | 12,476 docs/s | **21,626 docs/s** | **+73.34%** |
-| Index size | 300.93 MiB | **285.49 MiB** | **-5.13%** |
-| Peak Go `Alloc` | 72.77 MiB | 155.23 MiB | +113.32% |
-| Peak Go `Sys` | 109.58 MiB | 187.85 MiB | +71.43% |
+| Build time | 2m4.044s | 1m50.945s | **1m11.561s** |
+| Throughput | 12,476 docs/s | 13,949 docs/s | **21,626 docs/s** |
+| Index size | 300.93 MiB | **285.49 MiB** | **285.49 MiB** |
+| Peak Go `Alloc` | 72.77 MiB | 81.02 MiB | 155.23 MiB |
+| Peak Go `Sys` | 109.58 MiB | 134.30 MiB | 187.85 MiB |
+
+The default OfflineWriter was 10.56 percent faster than the ordinary Writer
+and used 11.34 percent more peak `Alloc`. The 32 / 6 configuration was another
+35.50 percent faster than the default OfflineWriter, but used 91.59 percent
+more peak `Alloc` than the default.
+
+Both OfflineWriter configurations produced exactly 299,356,126 bytes: one
+299,356,102-byte segment and one 24-byte snapshot. The smaller index relative
+to the ordinary Writer therefore comes from OfflineWriter forcing all data
+into one final segment, not from increasing the merge fan-in from 10 to 32.
+
+Very large fan-in values are not automatically better. With 1,548 initial
+segments, fan-in 10 takes approximately four merge rounds, fan-in 32 takes
+three, and fan-in 300 takes two. However, one fan-in-300 task may open and merge
+up to 300 segment readers at once. Multiple concurrent tasks multiply the
+file-handle, mmap, heap, and I/O pressure. Use a larger fan-in only after
+measuring repeated build medians and peak memory on the deployment platform;
+32 is a more conservative high-throughput setting for this workload than 300.
 
 ## Official Bluge v0.2.2
 
