@@ -14,8 +14,8 @@ import (
 	"testing"
 )
 
-func TestDefaultIndexSegmentsAreZapxBlugeV2(t *testing.T) {
-	cfg, cleanup := CreateConfig("TestDefaultIndexSegmentsAreZapxBlugeV2")
+func TestDefaultIndexSegmentsAreZapxBlugeV1(t *testing.T) {
+	cfg, cleanup := CreateConfig("TestDefaultIndexSegmentsAreZapxBlugeV1")
 	defer func() {
 		err := cleanup()
 		if err != nil {
@@ -63,8 +63,8 @@ func TestDefaultIndexSegmentsAreZapxBlugeV2(t *testing.T) {
 	if seg.Type() != "zapx-bluge" {
 		t.Fatalf("expected segment type zapx-bluge, got %s", seg.Type())
 	}
-	if seg.Version() != 2 {
-		t.Fatalf("expected segment version 2, got %d", seg.Version())
+	if seg.Version() != 1 {
+		t.Fatalf("expected segment version 1, got %d", seg.Version())
 	}
 }
 

@@ -25,7 +25,7 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 )
 
-const Version uint32 = 2
+const Version uint32 = 1
 
 const Type string = "zapx-bluge"
 
