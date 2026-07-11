@@ -126,14 +126,20 @@ func (d Document) ToBlugeIndexDocument() (*blugeidx.Document, error) {
 		if field.Name() == _idField {
 			options |= bleveindex.IndexField | bleveindex.StoreField
 		}
-		fields = append(fields, blugeidx.NewField(
+		indexField := blugeidx.NewField(
 			field.Name(),
 			field.Value(),
 			options,
 			field.Length(),
 			field.AnalyzedTokenFrequencies(),
 			blugeFieldPlainTextBytes(field),
-		))
+		)
+		if termField, ok := field.(*TermField); ok {
+			if _, numeric := termField.analyzer.(*numericAnalyzer); numeric {
+				indexField.SetCanonicalDocValues()
+			}
+		}
+		fields = append(fields, indexField)
 	}
 	return blugeidx.NewDocument(fields)
 }
