@@ -42,6 +42,10 @@ type Config struct {
 
 	MergeBufferSize int
 
+	// OfflineWriterConcurrency controls the maximum number of concurrent
+	// segment builds and merge tasks used by WriterOffline.
+	OfflineWriterConcurrency int
+
 	// Optimizations
 	OptimizeConjunction          bool
 	OptimizeConjunctionUnadorned bool
@@ -88,6 +92,11 @@ func (config Config) WithSegmentVersion(ver uint32) Config {
 
 func (config Config) WithPersisterNapTimeMSec(napTime int) Config {
 	config.PersisterNapTimeMSec = napTime
+	return config
+}
+
+func (config Config) WithOfflineWriterConcurrency(concurrency int) Config {
+	config.OfflineWriterConcurrency = concurrency
 	return config
 }
 
@@ -160,7 +169,8 @@ func defaultConfig() Config {
 			return NewKeepNLatestDeletionPolicy(1)
 		},
 
-		MergeBufferSize: 1024 * 1024,
+		MergeBufferSize:          1024 * 1024,
+		OfflineWriterConcurrency: 2,
 
 		// Optimizations enabled
 		OptimizeConjunction:          true,

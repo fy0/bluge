@@ -61,6 +61,13 @@ func (config Config) WithSegmentVersion(ver uint32) Config {
 	return config
 }
 
+// WithOfflineWriterConcurrency sets the maximum number of concurrent segment
+// builds and merge tasks used by OfflineWriter.
+func (config Config) WithOfflineWriterConcurrency(concurrency int) Config {
+	config.indexConfig = config.indexConfig.WithOfflineWriterConcurrency(concurrency)
+	return config
+}
+
 func (config Config) DisableOptimizeConjunction() Config {
 	config.indexConfig = config.indexConfig.DisableOptimizeConjunction()
 	return config

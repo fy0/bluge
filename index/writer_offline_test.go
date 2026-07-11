@@ -9,6 +9,7 @@
 package index
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,49 @@ func TestOfflineWriterBuildsBatchesConcurrently(t *testing.T) {
 	}
 }
 
+func TestOfflineWriterHonorsConfiguredConcurrency(t *testing.T) {
+	previousMaxProcs := runtime.GOMAXPROCS(3)
+	defer runtime.GOMAXPROCS(previousMaxProcs)
+
+	config := InMemoryOnlyConfig().WithOfflineWriterConcurrency(3)
+	writer, err := OpenOfflineWriterWithMergeMax(config, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{}, 3)
+	release := make(chan struct{})
+	for _, id := range []string{"1", "2", "3"} {
+		document := FakeDocument{
+			NewFakeField("_id", id, true, false, true),
+			NewFakeField("body", "alpha", false, false, false),
+		}
+		batch := NewBatch()
+		batch.Insert(&blockingOfflineDocument{
+			document: &document,
+			started:  started,
+			release:  release,
+		})
+		if err := writer.Batch(batch); err != nil {
+			close(release)
+			t.Fatal(err)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			close(release)
+			t.Fatal("timed out waiting for configured offline builds")
+		}
+	}
+	close(release)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOfflineWriterReportsAsyncBuildError(t *testing.T) {
 	writer, err := OpenOfflineWriterWithMergeMax(InMemoryOnlyConfig(), 2)
 	if err != nil {
@@ -93,6 +137,14 @@ func TestOfflineWriterRejectsInvalidMergeMax(t *testing.T) {
 	_, err := OpenOfflineWriterWithMergeMax(InMemoryOnlyConfig(), 1)
 	if err == nil {
 		t.Fatal("expected invalid merge max error")
+	}
+}
+
+func TestOfflineWriterRejectsInvalidConcurrency(t *testing.T) {
+	config := InMemoryOnlyConfig().WithOfflineWriterConcurrency(0)
+	_, err := OpenOfflineWriter(config)
+	if err == nil || !strings.Contains(err.Error(), "concurrency") {
+		t.Fatalf("expected invalid concurrency error, got %v", err)
 	}
 }
 

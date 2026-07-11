@@ -30,6 +30,9 @@ the indexing and search hot paths.
 
 * **zapx-bluge v1 segment format** - the default backend is a pure-Go,
   text-focused adaptation of zapx.  It does not require FAISS or cgo.
+* **Compact text storage** - stored fields are packed into Snappy-compressed
+  blocks, integer posting chunks select raw or compressed encoding by size,
+  and native numeric and document-value metadata use compact canonical forms.
 * **Exact BM25 inputs** - the standard BM25 IDF formula is corrected and
   guarded against invalid statistics.  Segments persist exact per-field
   document counts and total term frequencies, including multi-valued fields.
@@ -92,47 +95,56 @@ raw scores are not portable between engines. All three built-in modes share
 the same on-disk norm encoding, so switching among them does not require
 rebuilding a `zapx-bluge v1` index.
 
-### Performance Against Official Bluge
+### Performance Comparison
 
-The following results, measured on 2026-07-10, compare this branch at
-`eb9cdb7` with the official Bluge v0.2.2 baseline at `5741419`.  Both revisions
-used the same runner and workload:
+The following fresh results, measured on 2026-07-11, compare this branch at
+`055c561`, the official Bluge v0.2.2 baseline at `5741419`, and Bleve v2.5.7
+using its `scorch` index and BM25 scoring. All three used the same workload:
 
 * Windows/amd64, Go 1.24.6
 * Intel Core i5-13600KF (14 cores / 20 logical CPUs), 64 GiB RAM
 * `data-simplification.tar.bz2`: 1,547,580 documents and 176.24 MiB of indexed
   body text
 * ordinary safe `Writer`, batch size 1,000
-* build figures are medians of three runs; query-only figures are medians of ten
-  fresh process runs
+* Bleve text fields used `unicode` tokenization plus lowercase filtering to
+  match Bluge rather than Bleve's stop-word-removing default standard analyzer
+* build figures are one low-load run per engine; query-only figures are medians
+  of ten fresh process runs
 
-| Metric | Official `5741419` | This branch | Change |
-|---|---:|---:|---:|
-| Writer build time | 2m59.686s | 1m54.431s | **-36.32% (1.57x throughput)** |
-| Writer throughput | 8,613 docs/s | 13,524 docs/s | **+57.02%** |
-| Query-only, `LOCATION`, Top 5 | 40 ms | 22 ms | **-45.00% (1.82x)** |
-| Peak Go `Alloc` | 76.25 MiB | 74.02 MiB | **-2.92%** |
-| Peak Go `Sys` | 109.74 MiB | 121.02 MiB | +10.28% |
-| Final index size | 475.40 MiB | 552.03 MiB | +16.12% |
+| Metric | Official `5741419` | This branch | Bleve v2.5.7 | vs official | vs Bleve |
+|---|---:|---:|---:|---:|---:|
+| Writer build time | 2m39.744s | **2m4.044s** | 2m25.974s | **-22.35%** | **-15.02%** |
+| Writer throughput | 9,688 docs/s | **12,476 docs/s** | 10,602 docs/s | **+28.78%** | **+17.68%** |
+| Query-only, `LOCATION`, Top 5 | 39 ms | **20 ms** | 35 ms | **-48.72%** | **-42.86%** |
+| Peak Go `Alloc` | 71.71 MiB | 72.77 MiB | 78.53 MiB | +1.48% | **-7.33%** |
+| Peak Go `Sys` | 101.14 MiB | 109.58 MiB | 108.46 MiB | +8.35% | +1.03% |
+| Final index size | 475.40 MiB | **300.93 MiB** | 536.47 MiB | **-36.70%** | **-43.91%** |
 
-Build run distributions were `3m18.817s / 2m59.686s / 2m47.807s` for the
-official baseline and `1m54.431s / 1m59.383s / 1m52.245s` for this branch.
-Sorted query-only distributions were `38/39/39/40/40/40/40/41/41/42 ms` and
-`21/21/21/22/22/22/24/24/24/24 ms`, respectively.
+Sorted query-only distributions were
+`38/38/38/39/39/39/39/40/41/42 ms` for the official baseline,
+`19/19/20/20/20/20/21/21/21/21 ms` for this branch, and
+`33/33/34/34/35/35/36/36/37/45 ms` for Bleve.
 
-The latest bounded persisted-segment reuse is also isolated by a direct A/B
-against its immediate parent: ordinary Writer build median improved from
-1m58.347s to 1m54.431s (**-3.31%**) while Peak `Alloc` and `Sys` remained within
-6.73% of that parent.  The larger index is an explicit tradeoff of the new
-format and its exact field statistics.  BM25 scores are not expected to match
-the official baseline because this branch fixes the baseline IDF formula and
-persists exact statistics; results are stable across rebuilds of this format.
+Against the previous pre-compaction measurement at `5fbb646`, the current
+branch reduced Writer build time from 2m10.766s to 2m4.044s (**-5.14%**), index
+size from 552.03 MiB to 300.93 MiB (**-45.49%**), and query-only median from
+22 ms to 20 ms (**-9.09%**).
+
+For the single-field `LOCATION` query, canonical BM25 and the official baseline
+shared four of their Top 5 document IDs. Bleve's Top 5 did not overlap because
+Bleve v2.5.7 uses different term-frequency and average-length behavior. Setting
+`NewBleveBM25Similarity()` on the same `zapx-bluge v1` index reproduced Bleve's
+five IDs, ordering, and scores without rebuilding the index.
 
 Reproduce the workload with:
 
 ```console
 go run ./examples/data_simplification -archive <path-to-data-simplification.tar.bz2> -index <index-directory> -query LOCATION -batch 1000 -keep-index
 ```
+
+See [the full benchmark reproduction guide](docs/data-simplification-benchmark.md)
+for the data checksum, exact workload contract, official Bluge and Bleve setup,
+query-only procedure, and captured outputs.
 
 Wall-clock results are sensitive to background load, storage, Go version, and
 segment merge timing.  Compare multiple-run medians rather than a single run.

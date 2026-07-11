@@ -53,12 +53,15 @@ func OpenOfflineWriterWithMergeMax(config Config, maxSegmentsToMerge int) (write
 	if maxSegmentsToMerge < 2 {
 		return nil, fmt.Errorf("max segments to merge must be at least 2")
 	}
+	if config.OfflineWriterConcurrency < 1 {
+		return nil, fmt.Errorf("offline writer concurrency must be at least 1")
+	}
 	directory := config.DirectoryFunc()
 	writer = &WriterOffline{
 		config:              config,
 		directory:           directory,
 		mergeMax:            maxSegmentsToMerge,
-		buildTokens:         make(chan struct{}, offlineBuildConcurrency()),
+		buildTokens:         make(chan struct{}, offlineConcurrency(config.OfflineWriterConcurrency)),
 		directoryConcurrent: isConcurrentDirectory(directory),
 	}
 
@@ -178,7 +181,7 @@ func (s *WriterOffline) runMergeTasks(tasks []offlineMergeTask) error {
 	if len(tasks) == 0 {
 		return nil
 	}
-	concurrency := offlineMergeConcurrency()
+	concurrency := offlineConcurrency(s.config.OfflineWriterConcurrency)
 	if !s.directoryConcurrent {
 		concurrency = 1
 	}
@@ -349,20 +352,10 @@ func isConcurrentDirectory(directory Directory) bool {
 	return ok
 }
 
-func offlineBuildConcurrency() int {
-	concurrency := runtime.GOMAXPROCS(0)
-	if concurrency < 1 {
-		return 1
+func offlineConcurrency(configured int) int {
+	maxProcs := runtime.GOMAXPROCS(0)
+	if configured > maxProcs {
+		return maxProcs
 	}
-	if concurrency > 2 {
-		return 2
-	}
-	return concurrency
-}
-
-func offlineMergeConcurrency() int {
-	if runtime.GOMAXPROCS(0) < 2 {
-		return 1
-	}
-	return 2
+	return configured
 }
