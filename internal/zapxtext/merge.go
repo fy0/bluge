@@ -26,7 +26,6 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
-	"github.com/golang/snappy"
 )
 
 var DefaultFileMergerBufferSize = 1024 * 1024
@@ -450,7 +449,7 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 	var newDocNum uint64
 
 	var curr int
-	var data, compressed []byte
+	var data []byte
 	var metaBuf bytes.Buffer
 	varBuf := make([]byte, binary.MaxVarintLen64)
 	metaEncode := func(val uint64) (int, error) {
@@ -459,22 +458,7 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 	}
 
 	vals := make([][][]byte, len(fieldsInv))
-
-	// copying data directly is safe only if there are no
-	// file callbacks that might modify the data in all
-	// of the involved segments and the current writer
-	copyFlag := true
-	for _, segment := range segments {
-		if segment.fileReader.id != "" {
-			copyFlag = false
-			break
-		}
-	}
-	if w.id != "" {
-		copyFlag = false
-	}
-
-	docNumOffsets := make([]uint64, newSegDocCount)
+	blockWriter := newStoredBlockWriter(w, newSegDocCount)
 
 	vdc := visitDocumentCtxPool.Get().(*visitDocumentCtx)
 	defer visitDocumentCtxPool.Put(vdc)
@@ -490,18 +474,18 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 
 		dropsI := drops[segI]
 
-		// optimize when the field mapping is the same across all
-		// segments and there are no deletions, via byte-copying
-		// of stored docs bytes directly to the writer
-		// cannot copy directly if fields might have been deleted
-		if fieldsSame && (dropsI == nil || dropsI.GetCardinality() == 0) && copyFlag {
-			err := segment.copyStoredDocs(newDocNum, docNumOffsets, w)
-			if err != nil {
-				return 0, nil, err
-			}
-
-			for i := uint64(0); i < segment.numDocs; i++ {
-				segNewDocNums[i] = newDocNum
+		// With identical field mappings and no deletions, reuse each decoded
+		// document record directly and only recompress at the new block boundary.
+		if fieldsSame && (dropsI == nil || dropsI.GetCardinality() == 0) {
+			for docNum := uint64(0); docNum < segment.numDocs; docNum++ {
+				meta, storedData, err := segment.getDocStoredMetaAndData(vdc, docNum)
+				if err != nil {
+					return 0, nil, err
+				}
+				if err = blockWriter.Add(meta, storedData); err != nil {
+					return 0, nil, err
+				}
+				segNewDocNums[docNum] = newDocNum
 				newDocNum++
 			}
 			rv = append(rv, segNewDocNums)
@@ -567,30 +551,7 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 
 			metaBytes := metaBuf.Bytes()
 
-			compressed = snappy.Encode(compressed[:cap(compressed)], data)
-
-			// record where we're about to start writing
-			docNumOffsets[newDocNum] = uint64(w.Count())
-
-			bufMeta := w.process(metaBytes)
-
-			bufCompressed := w.process(compressed)
-
-			// write out the meta len and compressed data len
-			_, err = writeUvarints(w,
-				uint64(len(bufMeta)),
-				uint64(len(bufCompressed)))
-			if err != nil {
-				return 0, nil, err
-			}
-			// now write the meta
-			_, err = w.Write(bufMeta)
-			if err != nil {
-				return 0, nil, err
-			}
-			// now write the compressed data
-			_, err = w.Write(bufCompressed)
-			if err != nil {
+			if err = blockWriter.Add(metaBytes, data); err != nil {
 				return 0, nil, err
 			}
 
@@ -600,15 +561,9 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 		rv = append(rv, segNewDocNums)
 	}
 
-	// return value is the start of the stored index
-	storedIndexOffset := uint64(w.Count())
-
-	// now write out the stored doc index
-	for _, docNumOffset := range docNumOffsets {
-		err := binary.Write(w, binary.BigEndian, docNumOffset)
-		if err != nil {
-			return 0, nil, err
-		}
+	storedIndexOffset, err := blockWriter.Close()
+	if err != nil {
+		return 0, nil, err
 	}
 
 	// calculate new edge list if applicable
@@ -646,7 +601,7 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 	// in the merged segment
 	buf := make([]byte, binary.MaxVarintLen64)
 	n := binary.PutUvarint(buf, uint64(len(newEdgeList)))
-	_, err := w.Write(buf[:n])
+	_, err = w.Write(buf[:n])
 	if err != nil {
 		return 0, nil, err
 	}
@@ -666,41 +621,6 @@ func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
 	}
 
 	return storedIndexOffset, rv, nil
-}
-
-// copyStoredDocs writes out a segment's stored doc info, optimized by
-// using a single Write() call for the entire set of bytes.  The
-// newDocNumOffsets is filled with the new offsets for each doc.
-func (sb *SegmentBase) copyStoredDocs(newDocNum uint64, newDocNumOffsets []uint64,
-	w *FileWriter) error {
-	if sb.numDocs <= 0 {
-		return nil
-	}
-
-	indexOffset0, storedOffset0, _, _, _ :=
-		sb.getDocStoredOffsets(0) // the segment's first doc
-
-	indexOffsetN, storedOffsetN, readN, metaLenN, dataLenN :=
-		sb.getDocStoredOffsets(sb.numDocs - 1) // the segment's last doc
-
-	storedOffset0New := uint64(w.Count())
-
-	storedBytes := sb.mem[storedOffset0 : storedOffsetN+readN+metaLenN+dataLenN]
-	_, err := w.Write(storedBytes)
-	if err != nil {
-		return err
-	}
-
-	// remap the storedOffset's for the docs into new offsets relative
-	// to storedOffset0New, filling the given docNumOffsetsOut array
-	for indexOffset := indexOffset0; indexOffset <= indexOffsetN; indexOffset += 8 {
-		storedOffset := binary.BigEndian.Uint64(sb.mem[indexOffset : indexOffset+8])
-		storedOffsetNew := storedOffset - storedOffset0 + storedOffset0New
-		newDocNumOffsets[newDocNum] = storedOffsetNew
-		newDocNum += 1
-	}
-
-	return nil
 }
 
 // mergeFields builds a unified list of fields used across all the

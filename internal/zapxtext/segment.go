@@ -28,7 +28,6 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 	mmap "github.com/blevesearch/mmap-go"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
-	"github.com/golang/snappy"
 )
 
 var reflectStaticSizeSegmentBase int
@@ -533,7 +532,8 @@ func (sb *SegmentBase) thesaurus(name string) (rv *Thesaurus, err error) {
 type visitDocumentCtx struct {
 	buf      []byte
 	reader   bytes.Reader
-	arrayPos []uint64
+	segment  *SegmentBase
+	blockNum uint64
 }
 
 var visitDocumentCtxPool = sync.Pool{
@@ -555,12 +555,7 @@ func (sb *SegmentBase) visitStoredFields(vdc *visitDocumentCtx, num uint64,
 	visitor segment.StoredFieldValueVisitor) error {
 	// first make sure this is a valid number in this segment
 	if num < sb.numDocs {
-		meta, compressed, err := sb.getDocStoredMetaAndCompressed(num)
-		if err != nil {
-			return err
-		}
-
-		uncompressed, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], compressed)
+		meta, uncompressed, err := sb.getDocStoredMetaAndData(vdc, num)
 		if err != nil {
 			return err
 		}
@@ -586,8 +581,6 @@ func (sb *SegmentBase) visitStoredFields(vdc *visitDocumentCtx, num uint64,
 			value := uncompressed[offset : offset+l]
 			keepGoing = visitor(sb.fieldsInv[field], byte('t'), value, nil)
 		}
-
-		vdc.buf = uncompressed
 	}
 	return nil
 }
@@ -599,13 +592,9 @@ func (sb *SegmentBase) DocID(num uint64) ([]byte, error) {
 	}
 
 	vdc := visitDocumentCtxPool.Get().(*visitDocumentCtx)
+	defer visitDocumentCtxPool.Put(vdc)
 
-	meta, compressed, err := sb.getDocStoredMetaAndCompressed(num)
-	if err != nil {
-		return nil, err
-	}
-
-	uncompressed, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], compressed)
+	meta, uncompressed, err := sb.getDocStoredMetaAndData(vdc, num)
 	if err != nil {
 		return nil, err
 	}
@@ -627,9 +616,6 @@ func (sb *SegmentBase) DocID(num uint64) ([]byte, error) {
 		return nil, err
 	}
 	idFieldVal := append([]byte(nil), uncompressed[offset:offset+l]...)
-
-	vdc.buf = uncompressed
-	visitDocumentCtxPool.Put(vdc)
 
 	return idFieldVal, nil
 }
