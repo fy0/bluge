@@ -15,8 +15,8 @@
 package searcher
 
 import (
-	"github.com/fy0/bluge/search"
 	segment "github.com/blugelabs/bluge_segment_api"
+	"github.com/fy0/bluge/search"
 )
 
 type TermSearcher struct {
@@ -34,6 +34,11 @@ type rawNormScorer interface {
 
 type rawNormPosting interface {
 	NormUint64() uint64
+}
+
+type queryNormScorer interface {
+	QueryNormWeight() (float64, bool)
+	SetQueryNorm(queryNorm float64)
 }
 
 func NewTermSearcher(indexReader search.Reader, term, field string, boost float64, scorer search.Scorer,
@@ -89,6 +94,20 @@ func (s *TermSearcher) Size() int {
 
 func (s *TermSearcher) Count() uint64 {
 	return s.reader.Count()
+}
+
+func (s *TermSearcher) QueryNormWeight() (float64, bool) {
+	weighted, ok := s.scorer.(queryNormScorer)
+	if !ok {
+		return 0, false
+	}
+	return weighted.QueryNormWeight()
+}
+
+func (s *TermSearcher) SetQueryNorm(queryNorm float64) {
+	if weighted, ok := s.scorer.(queryNormScorer); ok {
+		weighted.SetQueryNorm(queryNorm)
+	}
 }
 
 func (s *TermSearcher) Next(ctx *search.Context) (*search.DocumentMatch, error) {

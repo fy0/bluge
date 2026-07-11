@@ -58,7 +58,16 @@ func newDisjunctionHeapSearcher(searchers []search.Searcher, min int, scorer sea
 		heap:          make([]*searcherCurr, 0, len(searchers)),
 		options:       options,
 	}
+	normalizeQuery(searchers)
 	return &rv, nil
+}
+
+func (s *DisjunctionHeapSearcher) QueryNormWeight() (float64, bool) {
+	return queryNormWeight(s.searchers)
+}
+
+func (s *DisjunctionHeapSearcher) SetQueryNorm(queryNorm float64) {
+	setQueryNorm(s.searchers, queryNorm)
 }
 
 func (s *DisjunctionHeapSearcher) Size() int {

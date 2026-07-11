@@ -37,6 +37,37 @@ type Query interface {
 		options search.SearcherOptions) (search.Searcher, error)
 }
 
+type queryNormSimilarity interface {
+	UsesQueryNorm() bool
+}
+
+func usesQueryNorm(options search.SearcherOptions, field string) bool {
+	if options.SimilarityForField == nil {
+		return false
+	}
+	similarity, ok := options.SimilarityForField(field).(queryNormSimilarity)
+	return ok && similarity.UsesQueryNorm()
+}
+
+func searchersUseQueryNorm(searchers ...search.Searcher) bool {
+	found := false
+	for _, child := range searchers {
+		if child == nil {
+			continue
+		}
+		weighted, ok := child.(search.QueryNormSearcher)
+		if !ok {
+			return false
+		}
+		_, enabled := weighted.QueryNormWeight()
+		if !enabled {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
 type querySlice []Query
 
 func (s querySlice) searchers(i search.Reader, options search.SearcherOptions) (rv []search.Searcher, err error) {
@@ -221,11 +252,17 @@ func (q *BooleanQuery) Searcher(i search.Reader, options search.SearcherOptions)
 		}
 	}
 
-	if q.scorer == nil {
-		q.scorer = similarity.NewCompositeSumScorerWithBoost(q.boost.Value())
+	scorer := q.scorer
+	if scorer == nil {
+		compositeBoost := q.boost.Value()
+		if searchersUseQueryNorm(mustSearcher, shouldSearcher) {
+			// Bleve applies compound-query boosts at the term scorer level.
+			compositeBoost = 1
+		}
+		scorer = similarity.NewCompositeSumScorerWithBoost(compositeBoost)
 	}
 
-	return searcher.NewBooleanSearcher(mustSearcher, shouldSearcher, mustNotSearcher, q.scorer, options)
+	return searcher.NewBooleanSearcher(mustSearcher, shouldSearcher, mustNotSearcher, scorer, options)
 }
 
 func replaceMatchNoneWithNil(s search.Searcher) search.Searcher {
@@ -971,6 +1008,7 @@ func (q *MatchQuery) Searcher(i search.Reader, options search.SearcherOptions) (
 	}
 
 	if len(tokens) > 0 {
+		bleveQueryNorm := q.fuzziness == 0 && usesQueryNorm(options, field)
 		if len(tokens) == 1 && q.fuzziness == 0 {
 			tq := NewTermQuery(string(tokens[0].Term))
 			tq.SetField(field)
@@ -991,6 +1029,9 @@ func (q *MatchQuery) Searcher(i search.Reader, options search.SearcherOptions) (
 			for i, token := range tokens {
 				tq := NewTermQuery(string(token.Term))
 				tq.SetField(field)
+				if bleveQueryNorm {
+					tq.SetBoost(q.boost.Value())
+				}
 				tqs[i] = tq
 			}
 		}
@@ -1000,13 +1041,17 @@ func (q *MatchQuery) Searcher(i search.Reader, options search.SearcherOptions) (
 			booleanQuery := NewBooleanQuery()
 			booleanQuery.AddShould(tqs...)
 			booleanQuery.SetMinShould(1)
-			booleanQuery.SetBoost(q.boost.Value())
+			if !bleveQueryNorm {
+				booleanQuery.SetBoost(q.boost.Value())
+			}
 			return booleanQuery.Searcher(i, options)
 
 		case MatchQueryOperatorAnd:
 			booleanQuery := NewBooleanQuery()
 			booleanQuery.AddMust(tqs...)
-			booleanQuery.SetBoost(q.boost.Value())
+			if !bleveQueryNorm {
+				booleanQuery.SetBoost(q.boost.Value())
+			}
 			return booleanQuery.Searcher(i, options)
 
 		default:
@@ -1082,7 +1127,8 @@ func (q *MultiPhraseQuery) Searcher(i search.Reader, options search.SearcherOpti
 		field = options.DefaultSearchField
 	}
 
-	return searcher.NewSloppyMultiPhraseSearcher(i, q.terms, field, q.slop, q.scorer, options)
+	return searcher.NewSloppyMultiPhraseSearcherWithBoost(i, q.terms, field, q.slop,
+		q.boost.Value(), q.scorer, options)
 }
 
 func (q *MultiPhraseQuery) Validate() error {

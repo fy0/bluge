@@ -190,6 +190,7 @@ type collectionStats struct {
 	totalDocCount    uint64
 	docCount         uint64
 	sumTotalTermFreq uint64
+	uniqueTermCount  uint64
 }
 
 func (c *collectionStats) TotalDocumentCount() uint64 {
@@ -204,10 +205,17 @@ func (c *collectionStats) SumTotalTermFrequency() uint64 {
 	return c.sumTotalTermFreq
 }
 
+func (c *collectionStats) UniqueTermCount() uint64 {
+	return c.uniqueTermCount
+}
+
 func (c *collectionStats) Merge(other segment.CollectionStats) {
 	c.totalDocCount += other.TotalDocumentCount()
 	c.docCount += other.DocumentCount()
 	c.sumTotalTermFreq += other.SumTotalTermFrequency()
+	if extended, ok := other.(interface{ UniqueTermCount() uint64 }); ok {
+		c.uniqueTermCount += extended.UniqueTermCount()
+	}
 }
 
 func (i *Snapshot) CollectionStats(field string) (segment.CollectionStats, error) {
@@ -220,6 +228,7 @@ func (i *Snapshot) CollectionStats(field string) (segment.CollectionStats, error
 					totalDocCount:    totalDocCount,
 					docCount:         totalDocCount,
 					sumTotalTermFreq: totalDocCount,
+					uniqueTermCount:  1,
 				}, nil
 			}
 		}

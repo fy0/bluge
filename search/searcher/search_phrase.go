@@ -33,6 +33,14 @@ type PhraseSearcher struct {
 	slop         int
 }
 
+func (s *PhraseSearcher) QueryNormWeight() (float64, bool) {
+	return queryNormWeight([]search.Searcher{s.mustSearcher})
+}
+
+func (s *PhraseSearcher) SetQueryNorm(queryNorm float64) {
+	setQueryNorm([]search.Searcher{s.mustSearcher}, queryNorm)
+}
+
 func (s *PhraseSearcher) Size() int {
 	sizeInBytes := reflectStaticSizePhraseSearcher + sizeOfPtr
 
@@ -56,19 +64,24 @@ func (s *PhraseSearcher) Size() int {
 
 func NewMultiPhraseSearcher(indexReader search.Reader, terms [][]string, field string, scorer search.Scorer,
 	options search.SearcherOptions) (*PhraseSearcher, error) {
-	return NewSloppyMultiPhraseSearcher(indexReader, terms, field, 0, scorer, options)
+	return NewSloppyMultiPhraseSearcherWithBoost(indexReader, terms, field, 0, 1, scorer, options)
 }
 
 // NewSloppyMultiPhraseSearcher create a multi-phrase searcher which tolerates a specified "sloppyness"
 // the value of the slop parameter restricts the distance between the terms
 func NewSloppyMultiPhraseSearcher(indexReader search.Reader, terms [][]string, field string, slop int,
 	scorer search.Scorer, options search.SearcherOptions) (*PhraseSearcher, error) {
+	return NewSloppyMultiPhraseSearcherWithBoost(indexReader, terms, field, slop, 1, scorer, options)
+}
+
+func NewSloppyMultiPhraseSearcherWithBoost(indexReader search.Reader, terms [][]string, field string, slop int,
+	boost float64, scorer search.Scorer, options search.SearcherOptions) (*PhraseSearcher, error) {
 	options.IncludeTermVectors = true
 	var termPositionSearchers []search.Searcher
 	for _, termPos := range terms {
 		if len(termPos) == 1 && termPos[0] != "" {
 			// single term
-			ts, err := NewTermSearcher(indexReader, termPos[0], field, 1.0, scorer, options)
+			ts, err := NewTermSearcher(indexReader, termPos[0], field, boost, scorer, options)
 			if err != nil {
 				// close any searchers already opened
 				for _, ts := range termPositionSearchers {
@@ -84,7 +97,7 @@ func NewSloppyMultiPhraseSearcher(indexReader search.Reader, terms [][]string, f
 				if term == "" {
 					continue
 				}
-				ts, err := NewTermSearcher(indexReader, term, field, 1.0, scorer, options)
+				ts, err := NewTermSearcher(indexReader, term, field, boost, scorer, options)
 				if err != nil {
 					// close any searchers already opened
 					for _, ts := range termPositionSearchers {
@@ -274,14 +287,20 @@ func (p phrasePath) String() string {
 //
 // prevPos - the previous location, 0 on first invocation
 // phraseTerms - slice containing the phrase terms,
-//               may contain empty string as placeholder (don't care)
+//
+//	may contain empty string as placeholder (don't care)
+//
 // tlm - the Term Location Map containing all relevant term locations
 // p - the current path being explored (appended to in recursive calls)
-//     this is the primary state being built during the traversal
+//
+//	this is the primary state being built during the traversal
+//
 // remainingSlop - amount of sloppiness that's allowed, which is the
-//        sum of the editDistances from each matching phrase part,
-//        where 0 means no sloppiness allowed (all editDistances must be 0),
-//        decremented during recursion
+//
+//	sum of the editDistances from each matching phrase part,
+//	where 0 means no sloppiness allowed (all editDistances must be 0),
+//	decremented during recursion
+//
 // rv - the final result being appended to by all the recursive calls
 //
 // returns slice of paths, or nil if invocation did not find any successul paths

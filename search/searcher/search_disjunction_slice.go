@@ -58,7 +58,16 @@ func newDisjunctionSliceSearcher(qsearchers []search.Searcher, min int, scorer s
 		matchingIdxs: make([]int, len(searchers)),
 		options:      options,
 	}
+	normalizeQuery(searchers)
 	return &rv, nil
+}
+
+func (s *DisjunctionSliceSearcher) QueryNormWeight() (float64, bool) {
+	return queryNormWeight(s.searchers)
+}
+
+func (s *DisjunctionSliceSearcher) SetQueryNorm(queryNorm float64) {
+	setQueryNorm(s.searchers, queryNorm)
 }
 
 func (s *DisjunctionSliceSearcher) Size() int {

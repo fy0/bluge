@@ -26,7 +26,7 @@ import (
 func TestPhraseSearch(t *testing.T) {
 	soptions := search.SearcherOptions{
 		SimilarityForField: func(field string) search.Similarity {
-			return similarity.NewBM25Similarity()
+			return similarity.NewLegacyBM25Similarity()
 		},
 		Explain:            true,
 		IncludeTermVectors: true,
@@ -109,7 +109,7 @@ func TestPhraseSearch(t *testing.T) {
 func TestMultiPhraseSearch(t *testing.T) {
 	soptions := search.SearcherOptions{
 		SimilarityForField: func(field string) search.Similarity {
-			return similarity.NewBM25Similarity()
+			return similarity.NewLegacyBM25Similarity()
 		},
 		Explain:            true,
 		IncludeTermVectors: true,
@@ -162,7 +162,7 @@ func TestMultiPhraseSearch(t *testing.T) {
 func TestSloppyMultiPhraseSearch(t *testing.T) {
 	soptions := search.SearcherOptions{
 		SimilarityForField: func(field string) search.Similarity {
-			return similarity.NewBM25Similarity()
+			return similarity.NewLegacyBM25Similarity()
 		},
 		Explain:            true,
 		IncludeTermVectors: true,

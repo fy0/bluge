@@ -149,10 +149,15 @@ func (s *segmentAdapter) CollectionStats(field string) (blugeseg.CollectionStats
 	if !ok {
 		return &collectionStats{}, nil
 	}
+	dict, err := s.inner.Dictionary(field)
+	if err != nil {
+		return nil, err
+	}
 	return &collectionStats{
 		totalDocCount:    s.inner.Count(),
 		docCount:         documentCount,
 		sumTotalTermFreq: sumTotalTermFrequency,
+		uniqueTermCount:  uint64(dict.Cardinality()),
 	}, nil
 }
 
@@ -186,6 +191,7 @@ type collectionStats struct {
 	totalDocCount    uint64
 	docCount         uint64
 	sumTotalTermFreq uint64
+	uniqueTermCount  uint64
 }
 
 func (c *collectionStats) TotalDocumentCount() uint64 {
@@ -200,10 +206,17 @@ func (c *collectionStats) SumTotalTermFrequency() uint64 {
 	return c.sumTotalTermFreq
 }
 
+func (c *collectionStats) UniqueTermCount() uint64 {
+	return c.uniqueTermCount
+}
+
 func (c *collectionStats) Merge(other blugeseg.CollectionStats) {
 	c.totalDocCount += other.TotalDocumentCount()
 	c.docCount += other.DocumentCount()
 	c.sumTotalTermFreq += other.SumTotalTermFrequency()
+	if extended, ok := other.(interface{ UniqueTermCount() uint64 }); ok {
+		c.uniqueTermCount += extended.UniqueTermCount()
+	}
 }
 
 type dictionaryAdapter struct {

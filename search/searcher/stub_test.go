@@ -176,7 +176,7 @@ func newStubTermFieldReader(field, term string, list stubList,
 		includeFreq:        includeFreq,
 		includeNorm:        includeNorm,
 		includeTermVectors: includeTermVectors,
-		similarity:         similarity.NewBM25Similarity(),
+		similarity:         similarity.NewLegacyBM25Similarity(),
 	}
 }
 

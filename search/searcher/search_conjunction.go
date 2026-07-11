@@ -67,7 +67,16 @@ func NewConjunctionSearcher(indexReader search.Reader,
 		}
 	}
 
+	normalizeQuery(searchers)
 	return &rv, nil
+}
+
+func (s *ConjunctionSearcher) QueryNormWeight() (float64, bool) {
+	return queryNormWeight(s.searchers)
+}
+
+func (s *ConjunctionSearcher) SetQueryNorm(queryNorm float64) {
+	setQueryNorm(s.searchers, queryNorm)
 }
 
 func (s *ConjunctionSearcher) Size() int {

@@ -120,6 +120,13 @@ func TestZapxBlugeCollectionStatsPersisted(t *testing.T) {
 	if got, want := stats.SumTotalTermFrequency(), uint64(6); got != want {
 		t.Fatalf("total term frequency: got %d want %d", got, want)
 	}
+	extended, ok := stats.(interface{ UniqueTermCount() uint64 })
+	if !ok {
+		t.Fatal("collection stats do not expose unique term count")
+	}
+	if got, want := extended.UniqueTermCount(), uint64(3); got != want {
+		t.Fatalf("unique term count: got %d want %d", got, want)
+	}
 
 	missing, err := reader.CollectionStats("missing")
 	if err != nil {

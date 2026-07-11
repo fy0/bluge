@@ -37,7 +37,7 @@ func init() {
 
 var testSearchOptions = search.SearcherOptions{
 	SimilarityForField: func(field string) search.Similarity {
-		return similarity.NewBM25Similarity()
+		return similarity.NewLegacyBM25Similarity()
 	},
 	Explain: true,
 }

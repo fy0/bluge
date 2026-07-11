@@ -44,7 +44,20 @@ func NewBooleanSearcher(mustSearcher, shouldSearcher, mustNotSearcher search.Sea
 		matches:         make([]*search.DocumentMatch, 2),
 		options:         options,
 	}
+	normalizeQuery([]search.Searcher{mustSearcher, shouldSearcher})
 	return &rv, nil
+}
+
+func (s *BooleanSearcher) scoringSearchers() []search.Searcher {
+	return []search.Searcher{s.mustSearcher, s.shouldSearcher}
+}
+
+func (s *BooleanSearcher) QueryNormWeight() (float64, bool) {
+	return queryNormWeight(s.scoringSearchers())
+}
+
+func (s *BooleanSearcher) SetQueryNorm(queryNorm float64) {
+	setQueryNorm(s.scoringSearchers(), queryNorm)
 }
 
 func (s *BooleanSearcher) Size() int {

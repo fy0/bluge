@@ -261,6 +261,14 @@ type Searcher interface {
 	DocumentMatchPoolSize() int
 }
 
+// QueryNormSearcher is optionally implemented by searchers that participate
+// in Bleve-style query normalization.  The bool is false when normalization
+// is not enabled for the underlying scorer.
+type QueryNormSearcher interface {
+	QueryNormWeight() (float64, bool)
+	SetQueryNorm(queryNorm float64)
+}
+
 type SearcherOptions struct {
 	SimilarityForField func(field string) Similarity
 	DefaultSearchField string

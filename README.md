@@ -64,6 +64,34 @@ the core library does not open them.  The vector API is an extension boundary
 only and returns `ErrVectorUnsupported` unless an application supplies a vector
 backend.
 
+### BM25 Scoring Modes
+
+`NewBM25Similarity()` is the default and implements the canonical BM25 term
+score, including the `(k1 + 1)` numerator factor. It uses the number of
+documents containing a field when calculating that field's average length.
+
+Two explicit compatibility modes are also available:
+
+```go
+import "github.com/fy0/bluge/search/similarity"
+
+config := bluge.DefaultConfig(path)
+
+// Preserve scores produced by earlier versions of this Bluge fork.
+config.DefaultSimilarity = similarity.NewLegacyBM25Similarity()
+
+// Approximate Bleve v2.5.7 BM25 ranking for migration or comparison.
+config.DefaultSimilarity = similarity.NewBleveBM25Similarity()
+```
+
+The Bleve mode reproduces its square-root term frequency, query
+normalization, global document-count statistics, and per-segment dictionary
+cardinality used as the average-length numerator. Its compatibility contract
+is result ordering for Term, Match AND/OR, Phrase, and Boolean text queries;
+raw scores are not portable between engines. All three built-in modes share
+the same on-disk norm encoding, so switching among them does not require
+rebuilding a `zapx-bluge v1` index.
+
 ### Performance Against Official Bluge
 
 The following results, measured on 2026-07-10, compare this branch at
