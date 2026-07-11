@@ -115,6 +115,7 @@ type Field struct {
 	analyzedTokenFreqs analysis.TokenFrequencies
 	hasNativeTokenFreq bool
 	numPlainTextBytes  uint64
+	canonicalDocValues bool
 	source             blugeseg.Field
 }
 
@@ -188,6 +189,11 @@ func (f *Field) AnalyzedLength() int                      { return f.analyzedLen
 func (f *Field) NumPlainTextBytes() uint64                { return f.numPlainTextBytes }
 func (f *Field) NativeTokenFrequencies() (analysis.TokenFrequencies, bool) {
 	return f.analyzedTokenFreqs, f.hasNativeTokenFreq
+}
+
+func (f *Field) SetCanonicalDocValues() { f.canonicalDocValues = true }
+func (f *Field) CanonicalDocValues() bool {
+	return f.canonicalDocValues
 }
 
 func (f *Field) EachTerm(visitor blugeseg.VisitTerm) {

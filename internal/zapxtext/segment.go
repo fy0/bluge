@@ -28,7 +28,6 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 	mmap "github.com/blevesearch/mmap-go"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
-	"github.com/golang/snappy"
 )
 
 var reflectStaticSizeSegmentBase int
@@ -533,7 +532,8 @@ func (sb *SegmentBase) thesaurus(name string) (rv *Thesaurus, err error) {
 type visitDocumentCtx struct {
 	buf      []byte
 	reader   bytes.Reader
-	arrayPos []uint64
+	segment  *SegmentBase
+	blockNum uint64
 }
 
 var visitDocumentCtxPool = sync.Pool{
@@ -555,43 +555,18 @@ func (sb *SegmentBase) visitStoredFields(vdc *visitDocumentCtx, num uint64,
 	visitor segment.StoredFieldValueVisitor) error {
 	// first make sure this is a valid number in this segment
 	if num < sb.numDocs {
-		meta, compressed, err := sb.getDocStoredMetaAndCompressed(num)
+		meta, uncompressed, err := sb.getDocStoredMetaAndData(vdc, num)
 		if err != nil {
 			return err
 		}
 
 		vdc.reader.Reset(meta)
-
-		// handle _id field special case
-		idFieldValLen, err := binary.ReadUvarint(&vdc.reader)
-		if err != nil {
-			return err
-		}
-		idFieldVal := compressed[:idFieldValLen]
-
-		keepGoing := visitor("_id", byte('t'), idFieldVal, nil)
-		if !keepGoing {
-			visitDocumentCtxPool.Put(vdc)
-			return nil
-		}
-
-		// handle non-"_id" fields
-		compressed = compressed[idFieldValLen:]
-
-		uncompressed, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], compressed)
-		if err != nil {
-			return err
-		}
-
+		keepGoing := true
 		for keepGoing {
 			field, err := binary.ReadUvarint(&vdc.reader)
 			if err == io.EOF {
 				break
 			}
-			if err != nil {
-				return err
-			}
-			typ, err := binary.ReadUvarint(&vdc.reader)
 			if err != nil {
 				return err
 			}
@@ -603,29 +578,9 @@ func (sb *SegmentBase) visitStoredFields(vdc *visitDocumentCtx, num uint64,
 			if err != nil {
 				return err
 			}
-			numap, err := binary.ReadUvarint(&vdc.reader)
-			if err != nil {
-				return err
-			}
-			var arrayPos []uint64
-			if numap > 0 {
-				if cap(vdc.arrayPos) < int(numap) {
-					vdc.arrayPos = make([]uint64, numap)
-				}
-				arrayPos = vdc.arrayPos[:numap]
-				for i := 0; i < int(numap); i++ {
-					ap, err := binary.ReadUvarint(&vdc.reader)
-					if err != nil {
-						return err
-					}
-					arrayPos[i] = ap
-				}
-			}
 			value := uncompressed[offset : offset+l]
-			keepGoing = visitor(sb.fieldsInv[field], byte(typ), value, arrayPos)
+			keepGoing = visitor(sb.fieldsInv[field], byte('t'), value, nil)
 		}
-
-		vdc.buf = uncompressed
 	}
 	return nil
 }
@@ -637,22 +592,30 @@ func (sb *SegmentBase) DocID(num uint64) ([]byte, error) {
 	}
 
 	vdc := visitDocumentCtxPool.Get().(*visitDocumentCtx)
+	defer visitDocumentCtxPool.Put(vdc)
 
-	meta, compressed, err := sb.getDocStoredMetaAndCompressed(num)
+	meta, uncompressed, err := sb.getDocStoredMetaAndData(vdc, num)
 	if err != nil {
 		return nil, err
 	}
 
 	vdc.reader.Reset(meta)
-
-	// handle _id field special case
-	idFieldValLen, err := binary.ReadUvarint(&vdc.reader)
+	field, err := binary.ReadUvarint(&vdc.reader)
 	if err != nil {
 		return nil, err
 	}
-	idFieldVal := compressed[:idFieldValLen]
-
-	visitDocumentCtxPool.Put(vdc)
+	if field != 0 {
+		return nil, fmt.Errorf("stored _id field missing for doc %d", num)
+	}
+	offset, err := binary.ReadUvarint(&vdc.reader)
+	if err != nil {
+		return nil, err
+	}
+	l, err := binary.ReadUvarint(&vdc.reader)
+	if err != nil {
+		return nil, err
+	}
+	idFieldVal := append([]byte(nil), uncompressed[offset:offset+l]...)
 
 	return idFieldVal, nil
 }

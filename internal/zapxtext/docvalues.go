@@ -205,11 +205,18 @@ func (di *docValueReader) loadDvChunk(chunkNumber uint64, s *SegmentBase) error 
 	} else {
 		di.curChunkHeader = di.curChunkHeader[:int(numDocs)]
 	}
+	var previousDocNum, previousOffset uint64
 	for i := 0; i < int(numDocs); i++ {
-		di.curChunkHeader[i].DocNum, read = binary.Uvarint(s.mem[chunkMetaLoc+offset : chunkMetaLoc+offset+binary.MaxVarintLen64])
+		docNumDelta, read := binary.Uvarint(s.mem[chunkMetaLoc+offset : chunkMetaLoc+offset+binary.MaxVarintLen64])
 		offset += uint64(read)
-		di.curChunkHeader[i].DocDvOffset, read = binary.Uvarint(s.mem[chunkMetaLoc+offset : chunkMetaLoc+offset+binary.MaxVarintLen64])
+		valueOffsetDelta, read := binary.Uvarint(s.mem[chunkMetaLoc+offset : chunkMetaLoc+offset+binary.MaxVarintLen64])
 		offset += uint64(read)
+		previousDocNum += docNumDelta
+		previousOffset += valueOffsetDelta
+		di.curChunkHeader[i] = MetaData{
+			DocNum:      previousDocNum,
+			DocDvOffset: previousOffset,
+		}
 	}
 
 	compressedDataLoc := chunkMetaLoc + offset

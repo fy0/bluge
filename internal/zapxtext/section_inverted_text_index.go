@@ -29,6 +29,13 @@ import (
 
 	"github.com/fy0/bluge/analysis"
 	"github.com/fy0/bluge/internal/blugeidx"
+	"github.com/fy0/bluge/numeric"
+)
+
+const (
+	docValueModeUnknown uint8 = iota
+	docValueModeCanonical
+	docValueModeAll
 )
 
 func init() {
@@ -587,9 +594,15 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 
 				freqNormOffset++
 
-				docTermMap[docNum] = append(
-					append(docTermMap[docNum], term...),
-					index.DocValueTermSeparator)
+				if io.DocValueModes[fieldID] != docValueModeCanonical {
+					docTermMap[docNum] = append(
+						append(docTermMap[docNum], term...),
+						index.DocValueTermSeparator)
+				} else if valid, shift := numeric.ValidPrefixCodedTerm(term); valid && shift == 0 {
+					docTermMap[docNum] = append(
+						append(docTermMap[docNum], term...),
+						index.DocValueTermSeparator)
+				}
 			}
 
 			tfEncoder.Close()
@@ -954,6 +967,13 @@ func (i *invertedIndexOpaque) realloc() {
 		i.DictKeys[fieldID] = dictKeys
 		if field.Options().IncludeDocValues() {
 			i.IncludeDocValues[fieldID] = true
+			if field.CanonicalDocValues() {
+				if i.DocValueModes[fieldID] == docValueModeUnknown {
+					i.DocValueModes[fieldID] = docValueModeCanonical
+				}
+			} else {
+				i.DocValueModes[fieldID] = docValueModeAll
+			}
 		}
 	}
 
@@ -961,6 +981,12 @@ func (i *invertedIndexOpaque) realloc() {
 		i.IncludeDocValues = i.IncludeDocValues[:len(i.FieldsInv)]
 	} else {
 		i.IncludeDocValues = make([]bool, len(i.FieldsInv))
+	}
+	if cap(i.DocValueModes) >= len(i.FieldsInv) {
+		i.DocValueModes = i.DocValueModes[:len(i.FieldsInv)]
+		clear(i.DocValueModes)
+	} else {
+		i.DocValueModes = make([]uint8, len(i.FieldsInv))
 	}
 
 	if i.extraDocValues == nil {
@@ -1120,6 +1146,7 @@ type invertedIndexOpaque struct {
 	// Fields whose IncludeDocValues is true
 	//  field id -> bool
 	IncludeDocValues []bool
+	DocValueModes    []uint8
 
 	// postings id -> bitmap of docNums
 	Postings []*roaring.Bitmap
@@ -1177,6 +1204,8 @@ func (io *invertedIndexOpaque) Reset() (err error) {
 		io.IncludeDocValues[i] = false
 	}
 	io.IncludeDocValues = io.IncludeDocValues[:0]
+	clear(io.DocValueModes)
+	io.DocValueModes = io.DocValueModes[:0]
 	for _, idn := range io.Postings {
 		idn.Clear()
 	}

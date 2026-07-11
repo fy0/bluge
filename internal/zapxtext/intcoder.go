@@ -18,6 +18,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+
+	"github.com/golang/snappy"
+)
+
+const (
+	intChunkRaw byte = iota
+	intChunkSnappy
 )
 
 // We can safely use 0 to represent termNotEncoded since 0
@@ -34,6 +41,8 @@ type chunkedIntCoder struct {
 	currChunk uint64
 
 	buf []byte
+
+	compressed []byte
 
 	bytesWritten uint64
 }
@@ -141,22 +150,34 @@ func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 	}
 	buf := c.buf
 
-	// process each chunk's data individually and recalculate the chunk
-	// lengths based on the processed data
-	if fw, ok := w.(*FileWriter); ok && fw != nil {
-		var pos int
-		processedBuf := make([]byte, 0)
-		for i := 0; i < len(c.chunkLens); i++ {
-			if c.chunkLens[i] == 0 {
-				continue
-			}
-			buf := fw.process(c.final[pos : pos+int(c.chunkLens[i])])
-			processedBuf = append(processedBuf, buf...)
-			pos += int(c.chunkLens[i])
-			c.chunkLens[i] = uint64(len(buf))
+	// Encode each non-empty chunk independently so random chunk access remains
+	// bounded. Small or incompressible chunks stay raw.
+	var pos int
+	processedBuf := make([]byte, 0, len(c.final))
+	for i := 0; i < len(c.chunkLens); i++ {
+		if c.chunkLens[i] == 0 {
+			continue
 		}
-		c.final = processedBuf
+		raw := c.final[pos : pos+int(c.chunkLens[i])]
+		c.compressed = snappy.Encode(c.compressed[:cap(c.compressed)], raw)
+		var encoded []byte
+		if len(c.compressed) < len(raw) {
+			processedBuf = append(processedBuf, intChunkSnappy)
+			encoded = c.compressed
+		} else {
+			processedBuf = append(processedBuf, intChunkRaw)
+			encoded = raw
+		}
+		processedBuf = append(processedBuf, encoded...)
+		pos += len(raw)
+		encodedStart := len(processedBuf) - len(encoded) - 1
+		if fw, ok := w.(*FileWriter); ok && fw != nil {
+			processed := fw.process(processedBuf[encodedStart:])
+			processedBuf = append(processedBuf[:encodedStart], processed...)
+		}
+		c.chunkLens[i] = uint64(len(processedBuf) - encodedStart)
 	}
+	c.final = processedBuf
 	// calculate chunk offsets from chunk lengths
 	chunkOffsets := modifyLengthsToEndOffsets(c.chunkLens)
 

@@ -127,11 +127,15 @@ func (c *chunkedContentCoder) writeChunkMeta() ([]byte, error) {
 	}
 
 	// write out the metaData slice
+	var previousDocNum, previousOffset uint64
 	for _, meta := range c.chunkMeta {
-		_, err := writeUvarints(&c.chunkMetaBuf, meta.DocNum, meta.DocDvOffset)
+		_, err := writeUvarints(&c.chunkMetaBuf,
+			meta.DocNum-previousDocNum, meta.DocDvOffset-previousOffset)
 		if err != nil {
 			return nil, err
 		}
+		previousDocNum = meta.DocNum
+		previousOffset = meta.DocDvOffset
 	}
 
 	// write the metadata to final data

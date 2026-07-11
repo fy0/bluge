@@ -25,7 +25,6 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
 	"github.com/fy0/bluge/internal/blugeidx"
-	"github.com/golang/snappy"
 )
 
 var NewSegmentBufferNumResultsBump int = 100
@@ -131,7 +130,6 @@ type interim struct {
 	metaBuf bytes.Buffer
 
 	tmp0 []byte
-	tmp1 []byte
 
 	lastNumDocs int
 	lastOutSize int
@@ -150,7 +148,6 @@ func (s *interim) reset() (err error) {
 	s.FieldsInv = s.FieldsInv[:0]
 	s.metaBuf.Reset()
 	s.tmp0 = s.tmp0[:0]
-	s.tmp1 = s.tmp1[:0]
 	s.lastNumDocs = 0
 	s.lastOutSize = 0
 	s.normCalc = nil
@@ -171,9 +168,7 @@ func (s *interim) reset() (err error) {
 }
 
 type interimStoredField struct {
-	vals      [][]byte
-	typs      []byte
-	arrayposs [][]uint64 // array positions
+	vals [][]byte
 }
 
 type interimFreqNorm struct {
@@ -333,16 +328,14 @@ func (s *interim) writeStoredFields() (
 		return s.metaBuf.Write(varBuf[:wb])
 	}
 
-	data, compressed := s.tmp0[:0], s.tmp1[:0]
-	defer func() { s.tmp0, s.tmp1 = data, compressed }()
-
-	// keyed by docNum
-	docStoredOffsets := make([]uint64, len(s.results))
+	data := s.tmp0[:0]
+	defer func() { s.tmp0 = data }()
+	blockWriter := newStoredBlockWriter(s.w, uint64(len(s.results)))
 
 	// keyed by fieldID, for the current doc in the loop
 	docStoredFields := map[uint16]interimStoredField{}
 
-	for docNum, result := range s.results {
+	for _, result := range s.results {
 		for fieldID := range docStoredFields { // reset for next doc
 			delete(docStoredFields, fieldID)
 		}
@@ -354,8 +347,6 @@ func (s *interim) writeStoredFields() (
 			if field.Options().IsStored() {
 				isf := docStoredFields[fieldID]
 				isf.vals = append(isf.vals, field.Value())
-				isf.typs = append(isf.typs, field.EncodedFieldType())
-				isf.arrayposs = append(isf.arrayposs, field.ArrayPositions())
 				docStoredFields[fieldID] = isf
 			}
 
@@ -373,19 +364,13 @@ func (s *interim) writeStoredFields() (
 		s.metaBuf.Reset()
 		data = data[:0]
 
-		// _id field special case optimizes ExternalID() lookups
-		idFieldVal := docStoredFields[uint16(0)].vals[0]
-		_, err = metaEncode(uint64(len(idFieldVal)))
-		if err != nil {
-			return 0, err
-		}
-
-		// handle non-"_id" fields
-		for fieldID := 1; fieldID < len(s.FieldsInv); fieldID++ {
+		// Store every field, including _id, in one compressed payload so repeated
+		// values within a document can share Snappy back-references.
+		for fieldID := 0; fieldID < len(s.FieldsInv); fieldID++ {
 			isf, exists := docStoredFields[uint16(fieldID)]
 			if exists {
 				curr, data, err = persistStoredFieldValues(
-					fieldID, isf.vals, isf.typs, isf.arrayposs,
+					fieldID, isf.vals,
 					curr, metaEncode, data)
 				if err != nil {
 					return 0, err
@@ -395,42 +380,17 @@ func (s *interim) writeStoredFields() (
 
 		metaBytes := s.metaBuf.Bytes()
 
-		compressed = snappy.Encode(compressed[:cap(compressed)], data)
-		s.incrementBytesWritten(uint64(len(compressed)))
-		docStoredOffsets[docNum] = uint64(s.w.Count())
-
-		combined := make([]byte, len(idFieldVal)+len(compressed))
-		copy(combined, idFieldVal)
-		copy(combined[len(idFieldVal):], compressed)
-		bufMeta := s.w.process(metaBytes)
-		bufCompressed := s.w.process(combined)
-
-		_, err = writeUvarints(s.w,
-			uint64(len(bufMeta)),
-			uint64(len(bufCompressed)))
-		if err != nil {
-			return 0, err
-		}
-
-		_, err = s.w.Write(bufMeta)
-		if err != nil {
-			return 0, err
-		}
-
-		_, err = s.w.Write(bufCompressed)
+		err = blockWriter.Add(metaBytes, data)
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	storedIndexOffset = uint64(s.w.Count())
-
-	for _, docStoredOffset := range docStoredOffsets {
-		err = binary.Write(s.w, binary.BigEndian, docStoredOffset)
-		if err != nil {
-			return 0, err
-		}
+	storedIndexOffset, err = blockWriter.Close()
+	if err != nil {
+		return 0, err
 	}
+	s.incrementBytesWritten(blockWriter.bytesWritten)
 
 	// write the number of edges in the child -> parent edge list
 	// this will be zero if there are no nested documents
