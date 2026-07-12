@@ -31,21 +31,22 @@ the indexing and search hot paths.
 | Metric | Current | Current (OfflineWriter) | Bluge Official | Bleve |
 |---|---:|---:|---:|---:|
 | Writer configuration | ordinary, batch 1,000 | batch 1,000, merge 10, concurrency 2 | ordinary, batch 1,000 | batch 1,000 |
-| Build time | **2m4.044s** | **1m50.945s** | 2m39.744s | 2m25.974s |
-| Throughput | **12,476 docs/s** | **13,949 docs/s** | 9,688 docs/s | 10,602 docs/s |
+| Indexing time | 2m4.044s | **1m50.945s** | 2m39.744s | 2m25.974s |
+| Throughput | 12,476 docs/s | **13,949 docs/s** | 9,688 docs/s | 10,602 docs/s |
 | Query-only, `LOCATION`, Top 5 | **20 ms** | **20 ms** | 39 ms | 35 ms |
-| Peak Go `Alloc` | **72.77 MiB** | 81.02 MiB | 71.71 MiB | 78.53 MiB |
-| Peak Go `Sys` | **109.58 MiB** | 134.30 MiB | 101.14 MiB | 108.46 MiB |
-| Final index size | **300.93 MiB** | **285.49 MiB** | 475.40 MiB | 536.47 MiB |
-| Release `.exe` size | **4.62 MiB / 4,845,568 bytes** | 4.62 MiB / 4,845,568 bytes | **4.60 MiB / 4,819,456 bytes** | 10.67 MiB / 11,192,320 bytes |
+| Peak Go `Alloc` | 72.77 MiB | 81.02 MiB | **71.71 MiB** | 78.53 MiB |
+| Peak Go `Sys` | 109.58 MiB | 134.30 MiB | **101.14 MiB** | 108.46 MiB |
+| Final index size | 300.93 MiB | **285.49 MiB** | 475.40 MiB | 536.47 MiB |
+| Release `.exe` size | 4.62 MiB / 4,845,568 bytes | 4.62 MiB / 4,845,568 bytes | **4.60 MiB / 4,819,456 bytes** | 10.67 MiB / 11,192,320 bytes |
 
 #### Improvement Ratios
 
-| Comparison | Query time | Index size | Binary size | Build time | Throughput | Peak `Alloc` | Peak `Sys` |
+| Engine | Query time | Index size | Binary size | Indexing time | Throughput | Peak `Alloc` | Peak `Sys` |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Current OfflineWriter vs Current | same | **1.05x smaller** | same | **1.12x faster** | **1.12x higher** | 1.11x more | 1.23x more |
-| Current vs Bluge Official | **1.95x faster** | **1.58x smaller** | 1.01x more | **1.29x faster** | **1.29x higher** | 1.01x more | 1.08x more |
-| Current vs Bleve | **1.75x faster** | **1.78x smaller** | **2.31x smaller** | **1.18x faster** | **1.18x higher** | **1.08x less** | 1.01x more |
+| Bluge Official (baseline) | 100% | 100% | **100%** | 100% | 100% | **100%** | **100%** |
+| Current OfflineWriter | **51.28%**<br>faster | **60.05%**<br>smaller | 100.54%<br>larger | **69.45%**<br>faster | **143.98%**<br>higher | 112.98%<br>more | 132.79%<br>more |
+| Current | **51.28%**<br>faster | 63.30%<br>smaller | 100.54%<br>larger | 77.65%<br>faster | 128.78%<br>higher | 101.48%<br>more | 108.34%<br>more |
+| Bleve | 89.74%<br>faster | 112.85%<br>larger | 232.23%<br>larger | 91.38%<br>faster | 109.43%<br>higher | 109.51%<br>more | 107.24%<br>more |
 
 The following fresh results, measured on 2026-07-11, compare this branch at
 `67210a9`, the official Bluge v0.2.2 baseline at `5741419`, and Bleve v2.5.7
@@ -70,9 +71,10 @@ writer does not require a separate build. The release-size comparison uses the
 same benchmark functionality and build flags for all three executables. The
 OfflineWriter query cell uses the Current query-only median because both modes
 produce the same final format and identical Top-5 results; a separate ten-run
-OfflineWriter query distribution was not collected. Improvement ratios state
-the comparison direction explicitly; resource increases are shown as `more`
-rather than presented as improvements.
+OfflineWriter query distribution was not collected. Improvement ratios
+normalize Bluge Official to 100%. The second line labels each result as
+`faster`, `smaller`, `larger`, `higher`, or `more`; resource increases are not
+presented as improvements.
 
 Sorted query-only distributions were
 `38/38/38/39/39/39/39/40/41/42 ms` for the official baseline,
