@@ -437,6 +437,75 @@ Sorted distributions:
 | This fork | `19/19/20/20/20/20/21/21/21/21 ms` | 20 ms |
 | Bleve | `33/33/34/34/35/35/36/36/37/45 ms` | 35 ms |
 
+## Resident Handle Follow-up
+
+This follow-up was measured on 2026-07-13 without changing the historical
+results above. It distinguishes a fresh process and handle from repeated
+searches on an already-open reader or index.
+
+The three full indexes were rebuilt with the same workload and pinned engine
+versions. Each reported 1,547,580 documents, 24 input files, and 176.24 MiB of
+body text. Current Bluge produced 300.93 MiB, official Bluge produced
+475.04 MiB, and Bleve v2.5.7 produced 536.47 MiB. Their Top 5 IDs and ordering
+matched the corresponding historical results.
+
+The runners accept `-profile-query -warm-queries 10`. A profile opens the
+index once, executes one first query, executes ten more queries on that same
+handle, and then closes it. Every query includes query/request construction,
+the complete Top-5 search, result iteration, and stored-field loading. Every
+same-handle result is checked against the first result for identical IDs,
+ordering, and scores.
+
+Each engine was run in ten fresh processes after one unmeasured filesystem
+cache warm-up. This yielded ten open, first-query, and close values plus 100
+same-handle query values per engine. No operating-system cache was flushed, so
+this is a resident-handle measurement, not a cold-disk benchmark.
+
+Example PowerShell invocation:
+
+```powershell
+1..10 | ForEach-Object {
+  & $benchmarkExe `
+    -archive $archive `
+    -index $retainedIndex `
+    -query LOCATION `
+    -query-only `
+    -profile-query `
+    -warm-queries 10
+}
+```
+
+The Bleve executable is built from the pinned nested module:
+
+```powershell
+Set-Location examples/data_simplification_bleve
+go build -o "$env:TEMP\bluge-resident-bleve.exe" .
+```
+
+Observed phase distributions:
+
+| Engine | Phase | Samples | Minimum | Median | p95 | Maximum |
+|---|---|---:|---:|---:|---:|---:|
+| Current Bluge | Open | 10 | 1.6 ms | 1.65 ms | 2.2 ms | 2.2 ms |
+| Current Bluge | First query | 10 | 13.6 ms | 14.35 ms | 17.3 ms | 17.3 ms |
+| Current Bluge | Same-handle query | 100 | 12.5 ms | **13.95 ms** | 16.3 ms | 19.0 ms |
+| Current Bluge | Close | 10 | 2.6 ms | 4.05 ms | 5.2 ms | 5.2 ms |
+| Official Bluge | Open | 10 | 1.0 ms | 1.6 ms | 2.1 ms | 2.1 ms |
+| Official Bluge | First query | 10 | 31.3 ms | 31.8 ms | 36.7 ms | 36.7 ms |
+| Official Bluge | Same-handle query | 100 | 28.5 ms | 30.1 ms | 34.6 ms | 49.3 ms |
+| Official Bluge | Close | 10 | 4.4 ms | 5.75 ms | 7.4 ms | 7.4 ms |
+| Bleve v2.5.7 | Open | 10 | 1.6 ms | 2.1 ms | 2.7 ms | 2.7 ms |
+| Bleve v2.5.7 | First query | 10 | 16.9 ms | 17.2 ms | 18.7 ms | 18.7 ms |
+| Bleve v2.5.7 | Same-handle query | 100 | 15.2 ms | 16.6 ms | 18.0 ms | 19.2 ms |
+| Bleve v2.5.7 | Close | 10 | 4.9 ms | 6.4 ms | 8.4 ms | 8.4 ms |
+
+For the resident `LOCATION` query, this fork was 2.16 times as fast as
+official Bluge and 1.19 times as fast as Bleve. The first and subsequent query
+medians were close for all three engines; most lifecycle-only cost in this
+measurement came from closing the handle rather than opening it. Repeating one
+query is useful for isolating handle lifetime, but it does not represent a
+varied production query mix. The p95 values use the nearest-rank definition.
+
 ## Results Summary
 
 | Metric | Official Bluge | This fork | Bleve v2.5.7 |

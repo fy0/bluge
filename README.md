@@ -81,6 +81,27 @@ Sorted query-only distributions were
 `19/19/20/20/20/20/21/21/21/21 ms` for this branch, and
 `33/33/34/34/35/35/36/36/37/45 ms` for Bleve.
 
+#### Resident Query Follow-up
+
+A 2026-07-13 follow-up separated index open, the first query, repeated queries
+on the same open handle, and close. Each engine was measured in ten fresh
+processes, with ten same-handle queries per process. The resident figures below
+therefore contain 100 complete Top-5 searches, including request construction,
+result iteration, and stored-field loading:
+
+| Engine | Resident median | p95 | Range |
+|---|---:|---:|---:|
+| Current | **13.95 ms** | **16.3 ms** | 12.5-19.0 ms |
+| Bluge Official | 30.1 ms | 34.6 ms | 28.5-49.3 ms |
+| Bleve v2.5.7 | 16.6 ms | 18.0 ms | 15.2-19.2 ms |
+
+On this same-handle measurement, Current was 2.16 times as fast as Bluge
+Official and 1.19 times as fast as Bleve. These repeated `LOCATION` queries
+measure a resident handle with a warm filesystem cache; they are not a
+cold-disk test or a substitute for a varied production query mix. The full
+phase breakdown and reproduction commands are in the
+[benchmark guide](docs/data-simplification-benchmark.md#resident-handle-follow-up).
+
 Against the previous pre-compaction measurement at `5fbb646`, the current
 branch reduced Writer build time from 2m10.766s to 2m4.044s (**-5.14%**), index
 size from 552.03 MiB to 300.93 MiB (**-45.49%**), and query-only median from
