@@ -5,7 +5,6 @@ go 1.24.0
 toolchain go1.24.6
 
 require (
-	github.com/RoaringBitmap/roaring v0.9.4
 	github.com/RoaringBitmap/roaring/v2 v2.14.5
 	github.com/axiomhq/hyperloglog v0.0.0-20191112132149-a4c4c47bc57f
 	github.com/bits-and-blooms/bitset v1.24.2
@@ -16,7 +15,6 @@ require (
 	github.com/blevesearch/segment v0.9.0
 	github.com/blevesearch/snowballstem v0.9.0
 	github.com/blevesearch/vellum v1.2.0
-	github.com/blugelabs/bluge_segment_api v0.2.0
 	github.com/caio/go-tdigest v3.1.0+incompatible
 	github.com/golang/snappy v1.0.0
 	github.com/spf13/cobra v1.10.2

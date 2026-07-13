@@ -13,10 +13,9 @@ import (
 	"io"
 	"math"
 
-	roaringv1 "github.com/RoaringBitmap/roaring"
-	roaringv2 "github.com/RoaringBitmap/roaring/v2"
+	"github.com/RoaringBitmap/roaring/v2"
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
-	blugeseg "github.com/blugelabs/bluge_segment_api"
+	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/internal/blugeidx"
 	zapxtext "github.com/fy0/bluge/internal/zapxtext"
@@ -67,7 +66,7 @@ func Load(data *blugeseg.Data) (blugeseg.Segment, error) {
 	return &segmentAdapter{inner: seg}, nil
 }
 
-func Merge(segments []blugeseg.Segment, drops []*roaringv1.Bitmap, mergeBufferSize int) blugeseg.Merger {
+func Merge(segments []blugeseg.Segment, drops []*roaring.Bitmap, mergeBufferSize int) blugeseg.Merger {
 	zapSegments := make([]scorchseg.Segment, len(segments))
 	for i, segment := range segments {
 		if adapter, ok := segment.(*segmentAdapter); ok {
@@ -75,14 +74,9 @@ func Merge(segments []blugeseg.Segment, drops []*roaringv1.Bitmap, mergeBufferSi
 		}
 	}
 
-	zapDrops := make([]*roaringv2.Bitmap, len(drops))
-	for i, drop := range drops {
-		zapDrops[i] = roaring1To2(drop)
-	}
-
 	return &merger{
 		segments: zapSegments,
-		drops:    zapDrops,
+		drops:    drops,
 	}
 }
 
@@ -108,8 +102,8 @@ func (s *segmentAdapter) Count() uint64 {
 	return s.inner.Count()
 }
 
-func (s *segmentAdapter) DocsMatchingTerms(terms []blugeseg.Term) (*roaringv1.Bitmap, error) {
-	rv := roaringv1.NewBitmap()
+func (s *segmentAdapter) DocsMatchingTerms(terms []blugeseg.Term) (*roaring.Bitmap, error) {
+	rv := roaring.NewBitmap()
 	for _, term := range terms {
 		dict, err := s.inner.Dictionary(term.Field())
 		if err != nil {
@@ -231,13 +225,13 @@ func (d *dictionaryAdapter) Close() error {
 	return nil
 }
 
-func (d *dictionaryAdapter) PostingsList(term []byte, except *roaringv1.Bitmap,
+func (d *dictionaryAdapter) PostingsList(term []byte, except *roaring.Bitmap,
 	prealloc blugeseg.PostingsList) (blugeseg.PostingsList, error) {
 	var innerPrealloc scorchseg.PostingsList
 	if p, ok := prealloc.(*postingsListAdapter); ok {
 		innerPrealloc = p.inner
 	}
-	inner, err := d.inner.PostingsList(term, roaring1To2(except), innerPrealloc)
+	inner, err := d.inner.PostingsList(term, except, innerPrealloc)
 	if err != nil {
 		return nil, err
 	}
@@ -347,12 +341,12 @@ func (p *postingsIteratorAdapter) Close() error {
 	return nil
 }
 
-func (p *postingsIteratorAdapter) ActualBitmap() *roaringv1.Bitmap {
+func (p *postingsIteratorAdapter) ActualBitmap() *roaring.Bitmap {
 	optimizable, ok := p.inner.(scorchseg.OptimizablePostingsIterator)
 	if !ok {
 		return nil
 	}
-	return roaring2To1(optimizable.ActualBitmap())
+	return optimizable.ActualBitmap()
 }
 
 func (p *postingsIteratorAdapter) DocNum1Hit() (uint64, bool) {
@@ -363,12 +357,12 @@ func (p *postingsIteratorAdapter) DocNum1Hit() (uint64, bool) {
 	return optimizable.DocNum1Hit()
 }
 
-func (p *postingsIteratorAdapter) ReplaceActual(actual *roaringv1.Bitmap) {
+func (p *postingsIteratorAdapter) ReplaceActual(actual *roaring.Bitmap) {
 	optimizable, ok := p.inner.(scorchseg.OptimizablePostingsIterator)
 	if !ok {
 		return
 	}
-	optimizable.ReplaceActual(roaring1To2(actual))
+	optimizable.ReplaceActual(actual)
 }
 
 type postingAdapter struct {
@@ -467,7 +461,7 @@ func (d *documentValueReaderAdapter) VisitDocumentValues(number uint64,
 
 type merger struct {
 	segments    []scorchseg.Segment
-	drops       []*roaringv2.Bitmap
+	drops       []*roaring.Bitmap
 	documentMap [][]uint64
 }
 
@@ -521,28 +515,4 @@ func toScorchAutomaton(a blugeseg.Automaton) scorchseg.Automaton {
 		return rv
 	}
 	return automatonAdapter{inner: a}
-}
-
-func roaring1To2(src *roaringv1.Bitmap) *roaringv2.Bitmap {
-	if src == nil {
-		return nil
-	}
-	rv := roaringv2.New()
-	itr := src.Iterator()
-	for itr.HasNext() {
-		rv.Add(itr.Next())
-	}
-	return rv
-}
-
-func roaring2To1(src *roaringv2.Bitmap) *roaringv1.Bitmap {
-	if src == nil {
-		return nil
-	}
-	rv := roaringv1.NewBitmap()
-	itr := src.Iterator()
-	for itr.HasNext() {
-		rv.Add(itr.Next())
-	}
-	return rv
 }

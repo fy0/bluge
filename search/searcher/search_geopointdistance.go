@@ -19,7 +19,7 @@ import (
 	"github.com/fy0/bluge/numeric/geo"
 	"github.com/fy0/bluge/search"
 	"github.com/fy0/bluge/search/similarity"
-	segment "github.com/blugelabs/bluge_segment_api"
+	segment "github.com/fy0/bluge/segment"
 )
 
 func NewGeoPointDistanceSearcher(indexReader search.Reader, centerLon,

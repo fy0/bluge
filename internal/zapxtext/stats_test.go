@@ -15,7 +15,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
-	blugeseg "github.com/blugelabs/bluge_segment_api"
+	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/internal/blugeidx"
 )

@@ -16,7 +16,7 @@ package bluge
 
 import (
 	bleveindex "github.com/blevesearch/bleve_index_api"
-	segment "github.com/blugelabs/bluge_segment_api"
+	segment "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/internal/blugeidx"
 )

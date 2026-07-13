@@ -17,7 +17,7 @@ package index
 import (
 	"math"
 
-	segment "github.com/blugelabs/bluge_segment_api"
+	segment "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/index/mergeplan"
 	"github.com/fy0/bluge/internal/zapxbluge"

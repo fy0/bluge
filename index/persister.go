@@ -19,8 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/RoaringBitmap/roaring"
-	segment "github.com/blugelabs/bluge_segment_api"
+	"github.com/RoaringBitmap/roaring/v2"
+	segment "github.com/fy0/bluge/segment"
 )
 
 // Keep direct-persist reuse bounded so disk-backed roots do not retain an

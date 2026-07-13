@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	segment "github.com/blugelabs/bluge_segment_api"
+	segment "github.com/fy0/bluge/segment"
 
 	"github.com/blevesearch/vellum"
 	"github.com/blevesearch/vellum/levenshtein"

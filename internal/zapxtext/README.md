@@ -17,5 +17,5 @@ field metadata or footer layout must increment the `zapx-bluge` version.
 
 Segment construction consumes Bluge's analyzed token frequencies through the
 internal `blugeidx` representation. Native fields reuse their token maps;
-custom `bluge_segment_api` fields use an iteration fallback. This changes only
+custom `segment.Field` implementations use an iteration fallback. This changes only
 the in-memory build path and does not change the version 1 on-disk layout.

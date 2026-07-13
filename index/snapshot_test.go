@@ -15,11 +15,49 @@
 package index
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
-	segment "github.com/blugelabs/bluge_segment_api"
+	segment "github.com/fy0/bluge/segment"
 )
+
+func TestReadVersion1SnapshotWithRoaringV1DeletedBitmap(t *testing.T) {
+	// The deleted bitmap bytes come from roaring v0.9.4's
+	// testfrozendata/runs_only.portable fixture.
+	fixture := []byte{
+		0x01, // snapshot format version
+		0x01, // segment count
+		0x07, 'f', 'i', 'x', 't', 'u', 'r', 'e',
+		0x00, 0x00, 0x00, 0x01, // segment version
+		0x07, // segment ID
+		0x19, // deleted bitmap byte length
+		0x3b, 0x30, 0x01, 0x00, 0x03, 0x00, 0x00, 0xfe,
+		0xef, 0x03, 0x00, 0xfe, 0xef, 0x01, 0x00, 0x00,
+		0x00, 0xfe, 0xef, 0x01, 0x00, 0x00, 0x00, 0xfe,
+		0xef,
+	}
+
+	snapshot := &Snapshot{}
+	n, err := snapshot.ReadFrom(bytes.NewReader(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(len(fixture)) {
+		t.Fatalf("read %d bytes, expected %d", n, len(fixture))
+	}
+	if len(snapshot.segment) != 1 {
+		t.Fatalf("read %d segments, expected 1", len(snapshot.segment))
+	}
+	got := snapshot.segment[0]
+	if got.id != 7 || got.segmentType != "fixture" || got.segmentVersion != 1 {
+		t.Fatalf("unexpected segment metadata: id=%d type=%q version=%d",
+			got.id, got.segmentType, got.segmentVersion)
+	}
+	if got.deleted == nil || got.deleted.GetCardinality() != 122878 {
+		t.Fatalf("deleted bitmap cardinality = %v, expected 122878", got.deleted)
+	}
+}
 
 func TestIndexReader(t *testing.T) {
 	cfg, cleanup := CreateConfig("TestIndexReader")

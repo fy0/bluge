@@ -11,12 +11,58 @@ package zapxbluge
 import (
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	bleveindex "github.com/blevesearch/bleve_index_api"
-	blugeseg "github.com/blugelabs/bluge_segment_api"
+	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
+	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/analysis"
 	"github.com/fy0/bluge/internal/blugeidx"
 )
+
+type optimizablePostingsIteratorStub struct {
+	actual *roaring.Bitmap
+}
+
+func (*optimizablePostingsIteratorStub) Next() (scorchseg.Posting, error) {
+	return nil, nil
+}
+
+func (*optimizablePostingsIteratorStub) Advance(uint64) (scorchseg.Posting, error) {
+	return nil, nil
+}
+
+func (*optimizablePostingsIteratorStub) Size() int             { return 0 }
+func (*optimizablePostingsIteratorStub) BytesRead() uint64     { return 0 }
+func (*optimizablePostingsIteratorStub) ResetBytesRead(uint64) {}
+func (*optimizablePostingsIteratorStub) BytesWritten() uint64  { return 0 }
+func (s *optimizablePostingsIteratorStub) ActualBitmap() *roaring.Bitmap {
+	return s.actual
+}
+func (*optimizablePostingsIteratorStub) DocNum1Hit() (uint64, bool) { return 0, false }
+func (s *optimizablePostingsIteratorStub) ReplaceActual(actual *roaring.Bitmap) {
+	s.actual = actual
+}
+
+func TestBitmapAdaptersPassV2BitmapsThrough(t *testing.T) {
+	initial := roaring.BitmapOf(1, 3, 5)
+	inner := &optimizablePostingsIteratorStub{actual: initial}
+	adapter := &postingsIteratorAdapter{inner: inner}
+	if adapter.ActualBitmap() != initial {
+		t.Fatal("ActualBitmap did not return the inner v2 bitmap")
+	}
+
+	replacement := roaring.BitmapOf(2, 4, 6)
+	adapter.ReplaceActual(replacement)
+	if inner.actual != replacement {
+		t.Fatal("ReplaceActual did not pass the v2 bitmap through")
+	}
+
+	merged := Merge(nil, []*roaring.Bitmap{replacement}, 0).(*merger)
+	if merged.drops[0] != replacement {
+		t.Fatal("Merge did not pass the v2 drop bitmap through")
+	}
+}
 
 type exporterTestDocument struct {
 	native   *blugeidx.Document

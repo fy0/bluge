@@ -25,7 +25,7 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
 	"github.com/blevesearch/vellum"
-	blugeseg "github.com/blugelabs/bluge_segment_api"
+	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/analysis"
 	"github.com/fy0/bluge/internal/blugeidx"

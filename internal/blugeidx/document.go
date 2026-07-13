@@ -12,7 +12,7 @@ import (
 	"fmt"
 
 	bleveindex "github.com/blevesearch/bleve_index_api"
-	blugeseg "github.com/blugelabs/bluge_segment_api"
+	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/analysis"
 )
