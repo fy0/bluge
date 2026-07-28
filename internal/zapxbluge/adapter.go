@@ -337,6 +337,20 @@ func (p *postingsIteratorAdapter) Count() uint64 {
 	return p.count
 }
 
+func (p *postingsIteratorAdapter) HasImpacts() bool {
+	inner, ok := p.inner.(blugeseg.ImpactPostingsIterator)
+	return ok && inner.HasImpacts()
+}
+
+func (p *postingsIteratorAdapter) AdvanceShallow(docNum uint64) (
+	uint64, []blugeseg.Impact, bool, error) {
+	inner, ok := p.inner.(blugeseg.ImpactPostingsIterator)
+	if !ok {
+		return 0, nil, false, nil
+	}
+	return inner.AdvanceShallow(docNum)
+}
+
 func (p *postingsIteratorAdapter) Close() error {
 	return nil
 }

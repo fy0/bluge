@@ -119,6 +119,7 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 	// while processing each individual field-term section
 	tfEncoder := newChunkedIntCoder(1024, newSegDocCount-1)
 	locEncoder := newChunkedIntCoder(1024, newSegDocCount-1)
+	impactEncoder := &impactCoder{}
 
 	var vellumBuf bytes.Buffer
 	newVellum, err := vellum.New(&vellumBuf, nil)
@@ -206,7 +207,7 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 			locEncoder.Close()
 
 			postingsOffset, err := writePostings(newRoaring,
-				tfEncoder, locEncoder, use1HitEncoding, w, bufMaxVarintLen64)
+				tfEncoder, locEncoder, impactEncoder, use1HitEncoding, w, bufMaxVarintLen64)
 			if err != nil {
 				return err
 			}
@@ -270,6 +271,7 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 				// update encoders chunk
 				tfEncoder.SetChunkSize(chunkSize, newSegDocCount-1)
 				locEncoder.SetChunkSize(chunkSize, newSegDocCount-1)
+				impactEncoder.Reset(newCard)
 			}
 
 			postings, err = dicts[itrI].postingsListFromOffset(
@@ -286,11 +288,11 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 				// can optimize by copying freq/norm/loc bytes directly
 				lastDocNum, lastFreq, lastNorm, err = mergeTermFreqNormLocsByCopying(
 					term, postItr, newDocNums[itrI], newRoaring,
-					tfEncoder, locEncoder, totalTermFrequency)
+					tfEncoder, locEncoder, impactEncoder, totalTermFrequency)
 			} else {
 				lastDocNum, lastFreq, lastNorm, bufLoc, err = mergeTermFreqNormLocs(
 					fieldsMap, term, postItr, newDocNums[itrI], newRoaring,
-					tfEncoder, locEncoder, bufLoc, totalTermFrequency)
+					tfEncoder, locEncoder, impactEncoder, bufLoc, totalTermFrequency)
 			}
 			if err != nil {
 				return nil, err
@@ -500,6 +502,7 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 	// while processing each individual field-term section
 	tfEncoder := newChunkedIntCoder(1024, uint64(len(io.results)-1))
 	locEncoder := newChunkedIntCoder(1024, uint64(len(io.results)-1))
+	impactEncoder := &impactCoder{}
 
 	var docTermMap [][]byte
 
@@ -543,6 +546,7 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 			}
 			tfEncoder.SetChunkSize(chunkSize, uint64(len(io.results)-1))
 			locEncoder.SetChunkSize(chunkSize, uint64(len(io.results)-1))
+			impactEncoder.Reset(cardinality)
 
 			postingsItr := postingsBS.Iterator()
 			for postingsItr.HasNext() {
@@ -551,10 +555,11 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 				freqNorm := freqNorms[freqNormOffset]
 
 				// check if freq/norm is enabled
+				normBits := uint64(math.Float32bits(freqNorm.norm))
 				if freqNorm.freq > 0 {
 					err = tfEncoder.Add(docNum,
 						encodeFreqHasLocs(freqNorm.freq, freqNorm.numLocs > 0),
-						uint64(math.Float32bits(freqNorm.norm)))
+						normBits)
 				} else {
 					// if disabled, then skip the norm part
 					err = tfEncoder.Add(docNum,
@@ -563,6 +568,7 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 				if err != nil {
 					return err
 				}
+				impactEncoder.Add(docNum, freqNorm.freq, normBits)
 
 				if freqNorm.numLocs > 0 {
 					numBytesLocs := 0
@@ -611,7 +617,7 @@ func (io *invertedIndexOpaque) writeDicts(w *FileWriter) error {
 			io.incrementBytesWritten(tfEncoder.getBytesWritten())
 
 			postingsOffset, err :=
-				writePostings(postingsBS, tfEncoder, locEncoder, nil, w, buf)
+				writePostings(postingsBS, tfEncoder, locEncoder, impactEncoder, nil, w, buf)
 			if err != nil {
 				return err
 			}

@@ -1,4 +1,13 @@
-# Data Simplification Benchmark Reproduction
+# Historical zapx-bluge v1 Data Simplification Benchmark
+
+> This is the archived zapx-bluge v1 benchmark and reproduction guide. The
+> current zapx-bluge v2 results are in
+> [data-simplification-v2-benchmark.md](data-simplification-v2-benchmark.md).
+
+The final v2 comparison used a contemporaneous v1 ordinary Writer reference of
+123.513 seconds, 28 segments, and 300.93 MiB. The detailed measurements below
+preserve the earlier 2026-07-11 v1, OfflineWriter, official Bluge, and Bleve
+results without rewriting their historical single-run values.
 
 This document reproduces the ordinary Writer benchmark used to compare:
 

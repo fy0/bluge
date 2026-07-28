@@ -154,6 +154,45 @@ func TestSimplePlan(t *testing.T) {
 	}
 }
 
+func TestPlanSkipsCleanSingletonTask(t *testing.T) {
+	segments := make([]Segment, 11)
+	for i := range segments {
+		segments[i] = &segment{MyID: uint64(i), MyFullSize: 1, MyLiveSize: 1}
+	}
+	options := &Options{
+		MaxSegmentSize:       1000,
+		MaxSegmentsPerTier:   1,
+		TierGrowth:           2,
+		SegmentsPerMergeTask: 10,
+		FloorSegmentSize:     1,
+		CalcBudget: func(int64, int64, *Options) int {
+			return 1
+		},
+	}
+
+	plan, err := Plan(segments, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil || len(plan.Tasks) != 1 {
+		t.Fatalf("tasks: got %#v want one useful task", plan)
+	}
+	if got := len(plan.Tasks[0].Segments); got != 10 {
+		t.Fatalf("task inputs: got %d want 10", got)
+	}
+}
+
+func TestRosterWithDeletionsMakesProgress(t *testing.T) {
+	clean := &segment{MyFullSize: 10, MyLiveSize: 10}
+	deleted := &segment{MyFullSize: 10, MyLiveSize: 9}
+	if rosterMakesProgress([]Segment{clean}) {
+		t.Fatal("clean singleton unexpectedly makes progress")
+	}
+	if !rosterMakesProgress([]Segment{deleted}) {
+		t.Fatal("singleton with deletions should reclaim space")
+	}
+}
+
 // ----------------------------------------
 
 func TestSort(t *testing.T) {

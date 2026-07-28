@@ -265,7 +265,8 @@ func computeNewDocCount(segments []*SegmentBase, drops []*roaring.Bitmap) uint64
 
 func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 	newDocNums []uint64, newRoaring *roaring.Bitmap,
-	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, totalTermFrequency *uint64) (
+	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, impactEncoder *impactCoder,
+	totalTermFrequency *uint64) (
 	lastDocNum uint64, lastFreq uint64, lastNorm uint64, err error) {
 	nextDocNum, nextFreq, nextNorm, nextFreqNormBytes, nextLocBytes, err :=
 		postItr.nextBytes()
@@ -284,6 +285,7 @@ func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 		if err != nil {
 			return 0, 0, 0, err
 		}
+		impactEncoder.Add(hitNewDocNum, nextFreq, nextNorm)
 
 		if len(nextLocBytes) > 0 {
 			err = locEncoder.AddBytes(hitNewDocNum, nextLocBytes)
@@ -305,7 +307,7 @@ func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 
 func mergeTermFreqNormLocs(fieldsMap map[string]uint16, term []byte, postItr *PostingsIterator,
 	newDocNums []uint64, newRoaring *roaring.Bitmap,
-	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, bufLoc []uint64,
+	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, impactEncoder *impactCoder, bufLoc []uint64,
 	totalTermFrequency *uint64) (
 	lastDocNum uint64, lastFreq uint64, lastNorm uint64, bufLocOut []uint64, err error) {
 	next, err := postItr.Next()
@@ -340,6 +342,7 @@ func mergeTermFreqNormLocs(fieldsMap map[string]uint16, term []byte, postItr *Po
 		if err != nil {
 			return 0, 0, 0, nil, err
 		}
+		impactEncoder.Add(hitNewDocNum, nextFreq, nextNorm)
 
 		if len(locs) > 0 {
 			numBytesLocs := 0
@@ -384,6 +387,7 @@ func mergeTermFreqNormLocs(fieldsMap map[string]uint16, term []byte, postItr *Po
 }
 
 func writePostings(postings *roaring.Bitmap, tfEncoder, locEncoder *chunkedIntCoder,
+	impactEncoder *impactCoder,
 	use1HitEncoding func(uint64) (bool, uint64, uint64),
 	w *FileWriter, bufMaxVarintLen64 []byte) (
 	offset uint64, err error) {
@@ -409,6 +413,11 @@ func writePostings(postings *roaring.Bitmap, tfEncoder, locEncoder *chunkedIntCo
 		return 0, err
 	}
 
+	impactOffset, err := impactEncoder.writeAt(w)
+	if err != nil {
+		return 0, err
+	}
+
 	var locOffset uint64
 	locOffset, _, err = locEncoder.writeAt(w)
 	if err != nil {
@@ -424,6 +433,12 @@ func writePostings(postings *roaring.Bitmap, tfEncoder, locEncoder *chunkedIntCo
 	}
 
 	n = binary.PutUvarint(bufMaxVarintLen64, locOffset)
+	_, err = w.Write(bufMaxVarintLen64[:n])
+	if err != nil {
+		return 0, err
+	}
+
+	n = binary.PutUvarint(bufMaxVarintLen64, impactOffset)
 	_, err = w.Write(bufMaxVarintLen64[:n])
 	if err != nil {
 		return 0, err

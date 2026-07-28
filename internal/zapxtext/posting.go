@@ -22,6 +22,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
 var reflectStaticSizePostingsList int
@@ -99,6 +100,7 @@ type PostingsList struct {
 	postingsOffset uint64
 	freqOffset     uint64
 	locOffset      uint64
+	impactOffset   uint64
 	postings       *roaring.Bitmap
 	except         *roaring.Bitmap
 
@@ -174,6 +176,7 @@ func (p *PostingsList) iterator(includeFreq, includeNorm, includeLocs bool,
 		nextSegmentLocs := rv.nextSegmentLocs[:0]
 
 		buf := rv.buf
+		impactDecoder := rv.impactDecoder
 
 		*rv = PostingsIterator{} // clear the struct
 
@@ -184,6 +187,11 @@ func (p *PostingsList) iterator(includeFreq, includeNorm, includeLocs bool,
 		rv.nextSegmentLocs = nextSegmentLocs
 
 		rv.buf = buf
+		rv.impactDecoder = impactDecoder
+		if rv.impactDecoder != nil {
+			rv.impactDecoder.initialized = false
+			rv.impactDecoder.data = nil
+		}
 	}
 
 	rv.postings = p
@@ -286,6 +294,9 @@ func (rv *PostingsList) read(postingsOffset uint64, d *Dictionary) error {
 	rv.locOffset, read = binary.Uvarint(d.sb.mem[postingsOffset+n : postingsOffset+n+binary.MaxVarintLen64])
 	n += uint64(read)
 
+	rv.impactOffset, read = binary.Uvarint(d.sb.mem[postingsOffset+n : postingsOffset+n+binary.MaxVarintLen64])
+	n += uint64(read)
+
 	var postingsLen uint64
 	postingsLen, read = binary.Uvarint(d.sb.mem[postingsOffset+n : postingsOffset+n+binary.MaxVarintLen64])
 	n += uint64(read)
@@ -345,6 +356,8 @@ type PostingsIterator struct {
 
 	buf []byte
 
+	impactDecoder *impactDecoder
+
 	includeFreqNorm bool
 	includeLocs     bool
 
@@ -383,6 +396,48 @@ func (i *PostingsIterator) incrementBytesRead(val uint64) {
 
 func (i *PostingsIterator) BytesWritten() uint64 {
 	return 0
+}
+
+// HasImpacts reports whether this term has v2 block impact metadata.
+func (i *PostingsIterator) HasImpacts() bool {
+	return i != nil && i.postings != nil && i.postings.impactOffset != 0
+}
+
+// AdvanceShallow advances only the block metadata cursor.  It does not consume
+// the postings iterator, so callers can skip the block with Advance(blockEnd+1).
+func (i *PostingsIterator) AdvanceShallow(docNum uint64) (
+	uint64, []blugeseg.Impact, bool, error) {
+	if !i.HasImpacts() {
+		return 0, nil, false, nil
+	}
+	if i.impactDecoder == nil {
+		i.impactDecoder = &impactDecoder{}
+	}
+	if !i.impactDecoder.initialized {
+		offset := i.postings.impactOffset
+		mem := i.postings.sb.mem
+		if offset >= uint64(len(mem)) {
+			return 0, nil, false, fmt.Errorf("impact offset %d out of bounds", offset)
+		}
+		length, n := binary.Uvarint(mem[offset:])
+		if n <= 0 {
+			return 0, nil, false, fmt.Errorf("invalid impact length at offset %d", offset)
+		}
+		start := offset + uint64(n)
+		if length > uint64(len(mem))-start {
+			return 0, nil, false, fmt.Errorf("impact length %d out of bounds", length)
+		}
+		encoded := mem[start : start+length]
+		data, err := i.postings.sb.fileReader.process(encoded)
+		if err != nil {
+			return 0, nil, false, fmt.Errorf("process impacts: %w", err)
+		}
+		i.incrementBytesRead(uint64(n) + length)
+		if err := i.impactDecoder.reset(data); err != nil {
+			return 0, nil, false, err
+		}
+	}
+	return i.impactDecoder.advanceShallow(docNum)
 }
 
 func (i *PostingsIterator) loadChunk(chunk int) error {
@@ -748,44 +803,79 @@ func (i *PostingsIterator) nextDocNumAtOrAfterClean(
 	if i.postings != nil && i.postings.chunkSize == 0 {
 		return 0, false, ErrChunkSizeZero
 	}
+	if atOrAfter == 0 {
+		// Next and merge's nextBytes already advance the freq/norm decoder in
+		// lockstep. Re-seeking here would rank and replay the chunk per posting.
+		n := i.Actual.Next()
+		nChunk := n / uint32(i.postings.chunkSize)
+		if i.currChunk != nChunk || i.freqNormReader.isNil() {
+			if err := i.loadChunk(int(nChunk)); err != nil {
+				return 0, false, fmt.Errorf("load sequential freq-norm chunk: %v", err)
+			}
+		}
+		return uint64(n), true, nil
+	}
+	if i.postings.postings.GetCardinality()*2 < i.postings.sb.numDocs {
+		return i.nextDocNumAtOrAfterCleanSparse(atOrAfter)
+	}
 
-	// freq-norm's needed, so maintain freq-norm chunk reader
-	sameChunkNexts := 0 // # of times we called Next() in the same chunk
+	i.Actual.AdvanceIfNeeded(uint32(atOrAfter))
+	if !i.Actual.HasNext() {
+		return 0, false, nil
+	}
+
+	n := i.Actual.Next()
+	nChunk := n / uint32(i.postings.chunkSize)
+	if err := i.loadChunk(int(nChunk)); err != nil {
+		return 0, false, fmt.Errorf("error loading chunk: %v", err)
+	}
+
+	chunkStart := nChunk * uint32(i.postings.chunkSize)
+	var beforeTarget uint64
+	if n > 0 {
+		beforeTarget = i.postings.postings.Rank(n - 1)
+	}
+	if chunkStart > 0 {
+		beforeTarget -= i.postings.postings.Rank(chunkStart - 1)
+	}
+	for j := uint64(0); j < beforeTarget; j++ {
+		if err := i.currChunkNext(nChunk); err != nil {
+			return 0, false, fmt.Errorf("seek freq-norm within chunk: %v", err)
+		}
+	}
+
+	return uint64(n), true, nil
+}
+
+func (i *PostingsIterator) nextDocNumAtOrAfterCleanSparse(
+	atOrAfter uint64) (uint64, bool, error) {
+	sameChunkNexts := 0
 	n := i.Actual.Next()
 	nChunk := n / uint32(i.postings.chunkSize)
 
 	for uint64(n) < atOrAfter && i.Actual.HasNext() {
 		n = i.Actual.Next()
-
-		nChunkPrev := nChunk
+		previousChunk := nChunk
 		nChunk = n / uint32(i.postings.chunkSize)
-
-		if nChunk != nChunkPrev {
+		if nChunk != previousChunk {
 			sameChunkNexts = 0
 		} else {
-			sameChunkNexts += 1
+			sameChunkNexts++
 		}
 	}
-
 	if uint64(n) < atOrAfter {
-		// couldn't find anything
 		return 0, false, nil
 	}
-
 	for j := 0; j < sameChunkNexts; j++ {
-		err := i.currChunkNext(nChunk)
-		if err != nil {
-			return 0, false, fmt.Errorf("error optimized currChunkNext: %v", err)
+		if err := i.currChunkNext(nChunk); err != nil {
+			return 0, false, fmt.Errorf("seek sparse freq-norm within chunk: %v", err)
 		}
 	}
-
 	if i.currChunk != nChunk || i.freqNormReader.isNil() {
-		err := i.loadChunk(int(nChunk))
-		if err != nil {
+		if err := i.loadChunk(int(nChunk)); err != nil {
 			return 0, false, fmt.Errorf("error loading chunk: %v", err)
 		}
 	}
-
 	return uint64(n), true, nil
 }
 

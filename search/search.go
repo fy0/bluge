@@ -15,6 +15,7 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -259,6 +260,20 @@ type Searcher interface {
 	Size() int
 
 	DocumentMatchPoolSize() int
+}
+
+// RawTopNResult is returned by searchers that can produce an exact score-sorted
+// top-N without materializing every match.
+type RawTopNResult struct {
+	Matches          DocumentMatchCollection
+	ScoredCandidates uint64
+	TotalCandidates  uint64
+}
+
+// RawTopNProvider is an optional fast path used only by compatible collectors.
+// A false return leaves the searcher untouched so collection can fall back.
+type RawTopNProvider interface {
+	RawTopN(context.Context, *Context, int) (RawTopNResult, bool, error)
 }
 
 // QueryNormSearcher is optionally implemented by searchers that participate

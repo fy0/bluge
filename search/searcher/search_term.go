@@ -15,6 +15,9 @@
 package searcher
 
 import (
+	"context"
+	"math"
+
 	"github.com/fy0/bluge/search"
 	segment "github.com/fy0/bluge/segment"
 )
@@ -30,6 +33,11 @@ type TermSearcher struct {
 
 type rawNormScorer interface {
 	ScoreRawNorm(freq int, normBits uint64) float64
+}
+
+type impactScorer interface {
+	rawNormScorer
+	ScoreImpactUpperBound([]segment.Impact) float64
 }
 
 type rawNormPosting interface {
@@ -156,6 +164,98 @@ func (s *TermSearcher) DocumentMatchPoolSize() int {
 	return 1
 }
 
+func (s *TermSearcher) RawTopN(ctx context.Context, searchContext *search.Context,
+	size int) (search.RawTopNResult, bool, error) {
+	result := search.RawTopNResult{TotalCandidates: s.reader.Count()}
+	blockReader, ok := s.reader.(segment.ImpactPostingsIterator)
+	blockScorer, scorerOK := s.scorer.(impactScorer)
+	if !ok || !scorerOK || !blockReader.HasImpacts() || s.options.Explain ||
+		s.options.IncludeTermVectors || s.options.Score == "none" {
+		return result, false, nil
+	}
+	if size <= 0 {
+		return result, true, nil
+	}
+
+	matches := make(rawTopNHeap, 0, size)
+	var posting segment.Posting
+	var target uint64
+	var blocksVisited uint64
+	for {
+		blocksVisited++
+		if blocksVisited&1023 == 0 {
+			select {
+			case <-ctx.Done():
+				return result, true, ctx.Err()
+			default:
+			}
+		}
+		blockEnd, impacts, exists, err := blockReader.AdvanceShallow(target)
+		if err != nil {
+			return result, true, err
+		}
+		if !exists {
+			break
+		}
+		if len(impacts) > 0 && len(matches) == size &&
+			blockScorer.ScoreImpactUpperBound(impacts) <= matches[0].Score {
+			if blockEnd == math.MaxUint64 {
+				break
+			}
+			posting = nil
+			target = blockEnd + 1
+			continue
+		}
+
+		if posting == nil {
+			posting, err = s.reader.Advance(target)
+			if err != nil {
+				return result, true, err
+			}
+		}
+		for posting != nil && posting.Number() <= blockEnd {
+			if result.ScoredCandidates&1023 == 0 {
+				select {
+				case <-ctx.Done():
+					return result, true, ctx.Err()
+				default:
+				}
+			}
+			score := s.scorePosting(posting)
+			result.ScoredCandidates++
+			if len(matches) < size || rawTopNBetter(score, posting.Number(), matches[0]) {
+				match := searchContext.DocumentMatchPool.Get()
+				match.SetReader(s.indexReader)
+				match.Number = posting.Number()
+				match.Score = score
+				match.HitNumber = int(match.Number) + 1
+				if removed := rawTopNAdd(&matches, size, match); removed != nil {
+					searchContext.DocumentMatchPool.Put(removed)
+				}
+			}
+			posting, err = s.reader.Next()
+			if err != nil {
+				return result, true, err
+			}
+		}
+		if posting == nil {
+			break
+		}
+		target = posting.Number()
+	}
+	result.Matches = rawTopNSorted(matches)
+	return result, true, nil
+}
+
+func (s *TermSearcher) scorePosting(posting segment.Posting) float64 {
+	if s.rawScorer != nil {
+		if rawPosting, ok := posting.(rawNormPosting); ok {
+			return s.rawScorer.ScoreRawNorm(posting.Frequency(), rawPosting.NormUint64())
+		}
+	}
+	return s.scorer.Score(posting.Frequency(), posting.Norm())
+}
+
 func (s *TermSearcher) Optimize(kind string, octx segment.OptimizableContext) (
 	segment.OptimizableContext, error) {
 	o, ok := s.reader.(segment.Optimizable)
@@ -174,14 +274,8 @@ func (s *TermSearcher) buildDocumentMatch(ctx *search.Context, termMatch segment
 	if s.options.Explain {
 		rv.Explanation = s.scorer.Explain(termMatch.Frequency(), termMatch.Norm())
 		rv.Score = rv.Explanation.Value
-	} else if s.rawScorer != nil {
-		if rawPosting, ok := termMatch.(rawNormPosting); ok {
-			rv.Score = s.rawScorer.ScoreRawNorm(termMatch.Frequency(), rawPosting.NormUint64())
-		} else {
-			rv.Score = s.scorer.Score(termMatch.Frequency(), termMatch.Norm())
-		}
 	} else {
-		rv.Score = s.scorer.Score(termMatch.Frequency(), termMatch.Norm())
+		rv.Score = s.scorePosting(termMatch)
 	}
 
 	if s.options.IncludeTermVectors {

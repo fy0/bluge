@@ -43,6 +43,14 @@ OUTER:
 		case <-s.closeCh:
 			break OUTER
 
+		case done := <-s.mergeDrains:
+			var mergedEpoch uint64
+			mergedEpoch, err = s.convergeMerges(merges)
+			if err == nil {
+				lastEpochMergePlanned = mergedEpoch
+			}
+			done <- err
+
 		case <-ew.notifyCh:
 			// check to see if there is a new snapshot to persist
 			ourSnapshot := s.currentSnapshot()
@@ -53,7 +61,7 @@ OUTER:
 				startTime := time.Now()
 
 				// lets get started
-				err = s.planMergeAtSnapshot(merges, ourSnapshot, s.config.MergePlanOptions)
+				_, err = s.planMergeAtSnapshot(merges, ourSnapshot, s.config.MergePlanOptions)
 				if err != nil {
 					atomic.StoreUint64(&s.stats.mergeEpoch, 0)
 					if err == segment.ErrClosed {
@@ -86,8 +94,29 @@ OUTER:
 	}
 }
 
+// convergeMerges keeps planning the newest root until a plan makes no changes.
+func (s *Writer) convergeMerges(merges chan *segmentMerge) (uint64, error) {
+	for {
+		ourSnapshot := s.currentSnapshot()
+		if ourSnapshot == nil {
+			return 0, segment.ErrClosed
+		}
+		epoch := ourSnapshot.epoch
+		planned, err := s.planMergeAtSnapshot(merges, ourSnapshot, s.config.MergePlanOptions)
+		_ = ourSnapshot.Close()
+		if err != nil {
+			return 0, err
+		}
+
+		atomic.StoreUint64(&s.stats.LastMergedEpoch, epoch)
+		if !planned && s.currentEpoch() == epoch {
+			return epoch, nil
+		}
+	}
+}
+
 func (s *Writer) planMergeAtSnapshot(merges chan *segmentMerge, ourSnapshot *Snapshot,
-	options mergeplan.Options) error {
+	options mergeplan.Options) (bool, error) {
 	// build list of persisted segments in this snapshot
 	var onlyPersistedSnapshots []mergeplan.Segment
 	for _, segmentSnapshot := range ourSnapshot.segment {
@@ -102,12 +131,12 @@ func (s *Writer) planMergeAtSnapshot(merges chan *segmentMerge, ourSnapshot *Sna
 	resultMergePlan, err := mergeplan.Plan(onlyPersistedSnapshots, &options)
 	if err != nil {
 		atomic.AddUint64(&s.stats.TotFileMergePlanErr, 1)
-		return fmt.Errorf("merge planning err: %v", err)
+		return false, fmt.Errorf("merge planning err: %v", err)
 	}
 	if resultMergePlan == nil {
 		// nothing to do
 		atomic.AddUint64(&s.stats.TotFileMergePlanNone, 1)
-		return nil
+		return false, nil
 	}
 	atomic.AddUint64(&s.stats.TotFileMergePlanOk, 1)
 
@@ -117,11 +146,11 @@ func (s *Writer) planMergeAtSnapshot(merges chan *segmentMerge, ourSnapshot *Sna
 	for _, task := range resultMergePlan.Tasks {
 		err := s.executeMergeTask(merges, task)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	return nil
+	return len(resultMergePlan.Tasks) > 0, nil
 }
 
 func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.MergeTask) error {

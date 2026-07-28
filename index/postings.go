@@ -34,6 +34,7 @@ type postingsIterator struct {
 	includeTermVectors bool
 	currPosting        segment.Posting
 	currID             uint64
+	impactState        int8
 	recycle            bool
 }
 
@@ -126,6 +127,69 @@ func (i *postingsIterator) Count() uint64 {
 func (i *postingsIterator) Empty() bool {
 	count := i.Count()
 	return count == 0
+}
+
+func (i *postingsIterator) HasImpacts() bool {
+	if i.impactState != 0 {
+		return i.impactState > 0
+	}
+	foundImpacts := false
+	for _, iterator := range i.iterators {
+		if iterator == nil || iterator.Count() == 0 {
+			continue
+		}
+		impacts, ok := iterator.(segment.ImpactPostingsIterator)
+		if ok && impacts.HasImpacts() {
+			foundImpacts = true
+		}
+	}
+	if foundImpacts {
+		i.impactState = 1
+		return true
+	}
+	i.impactState = -1
+	return false
+}
+
+func (i *postingsIterator) AdvanceShallow(number uint64) (
+	uint64, []segment.Impact, bool, error) {
+	if !i.HasImpacts() || len(i.snapshot.segment) == 0 {
+		return 0, nil, false, nil
+	}
+	last := len(i.snapshot.segment) - 1
+	end := i.snapshot.offsets[last] + i.snapshot.segment[last].segment.Count()
+	if number >= end {
+		return 0, nil, false, nil
+	}
+	segIndex, local := i.snapshot.segmentIndexAndLocalDocNumFromGlobal(number)
+	for ; segIndex < len(i.iterators); segIndex++ {
+		iterator := i.iterators[segIndex]
+		if iterator == nil || iterator.Count() == 0 {
+			local = 0
+			continue
+		}
+		if impacts, ok := iterator.(segment.ImpactPostingsIterator); ok && impacts.HasImpacts() {
+			blockEnd, values, exists, err := impacts.AdvanceShallow(local)
+			if err != nil {
+				return 0, nil, false, err
+			}
+			if exists {
+				i.segmentOffset = segIndex
+				return blockEnd + i.snapshot.offsets[segIndex], values, true, nil
+			}
+		} else {
+			// A low-cardinality term deliberately carries no impact table.  Expose
+			// the remainder of this segment as an unskippable block so other
+			// segments can still use Block-Max.
+			segmentCount := i.snapshot.segment[segIndex].segment.Count()
+			if segmentCount > 0 {
+				i.segmentOffset = segIndex
+				return i.snapshot.offsets[segIndex] + segmentCount - 1, nil, true, nil
+			}
+		}
+		local = 0
+	}
+	return 0, nil, false, nil
 }
 
 func (i *postingsIterator) Close() error {

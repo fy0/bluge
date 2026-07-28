@@ -199,7 +199,7 @@ func plan(segmentsIn []Segment, o *Options) (*MergePlan, error) {
 				}
 			}
 
-			if len(roster) > 0 {
+			if rosterMakesProgress(roster) {
 				rosterScore := scoreSegments(roster, o)
 
 				if len(bestRoster) == 0 || rosterScore < bestRosterScore {
@@ -219,6 +219,14 @@ func plan(segmentsIn []Segment, o *Options) (*MergePlan, error) {
 	}
 
 	return rv, nil
+}
+
+func rosterMakesProgress(roster []Segment) bool {
+	if len(roster) > 1 {
+		return true
+	}
+	// Rewriting one segment is useful only when it physically reclaims deletes.
+	return len(roster) == 1 && roster[0].LiveSize() < roster[0].FullSize()
 }
 
 func findLiveSizesAndEligibles(segments []Segment, o *Options) (minLiveSize, eligiblesLiveSize int64, eligibles []Segment) {

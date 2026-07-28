@@ -39,6 +39,7 @@ func (s *Writer) persisterLoop(merges chan *segmentMerge, persists chan *persist
 	var ew *epochWatcher
 
 	var unpersistedCallbacks []func(error)
+	var persistSyncs []chan struct{}
 
 	// tell the introducer we're waiting for changes after the initial epoch
 	introducerEpochWatcher, err := introducerNotifier.NotifyUsAfter(0, s.closeCh)
@@ -54,6 +55,9 @@ OUTER:
 		select {
 		case <-s.closeCh:
 			break OUTER
+		case done := <-s.persistSyncs:
+			// Acknowledge below only after the local persisted epoch reaches root.
+			persistSyncs = append(persistSyncs, done)
 		case ew = <-persisterNotifier:
 			persistWatchers.Add(ew)
 			lastMergedEpoch = ew.epoch
@@ -150,6 +154,13 @@ OUTER:
 			if err != nil {
 				s.config.AsyncError(err)
 			}
+		}
+
+		if s.currentEpoch() == lastPersistedEpoch {
+			for _, done := range persistSyncs {
+				close(done)
+			}
+			persistSyncs = nil
 		}
 
 		atomic.AddUint64(&s.stats.TotPersistLoopEnd, 1)
