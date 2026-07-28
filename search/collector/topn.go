@@ -53,6 +53,8 @@ type TopNCollector struct {
 	lowestMatchOutsideResults *search.DocumentMatch
 	searchAfter               *search.DocumentMatch
 	scoreSort                 bool
+	scoredCandidates          uint64
+	totalCandidates           uint64
 }
 
 // CheckDoneEvery controls how frequently we check the context deadline
@@ -130,6 +132,12 @@ func (hc *TopNCollector) BackingSize() int {
 	return hc.backingSize
 }
 
+// ScoredCandidates reports how many postings the Raw Top-N path scored.
+func (hc *TopNCollector) ScoredCandidates() uint64 { return hc.scoredCandidates }
+
+// TotalCandidates reports the number of postings before block skipping.
+func (hc *TopNCollector) TotalCandidates() uint64 { return hc.totalCandidates }
+
 // Collect goes to the index to find the matching documents
 func (hc *TopNCollector) Collect(ctx context.Context, aggs search.Aggregations,
 	searcher search.Collectible) (search.DocumentMatchIterator, error) {
@@ -146,6 +154,20 @@ func (hc *TopNCollector) Collect(ctx context.Context, aggs search.Aggregations,
 	// add fields needed by aggregations
 	hc.neededFields = append(hc.neededFields, aggs.Fields()...)
 	bucket := search.NewBucket("", aggs)
+
+	if hc.scoreSort && hc.searchAfter == nil && len(aggs) == 0 {
+		if provider, ok := searcher.(search.RawTopNProvider); ok {
+			raw, used, rawErr := provider.RawTopN(ctx, searchContext, hc.size+hc.skip)
+			if rawErr != nil {
+				return nil, rawErr
+			}
+			if used {
+				hc.scoredCandidates = raw.ScoredCandidates
+				hc.totalCandidates = raw.TotalCandidates
+				return hc.finishRawTopN(raw.Matches, searchContext, bucket)
+			}
+		}
+	}
 
 	var hitNumber int
 	select {
@@ -192,6 +214,31 @@ func (hc *TopNCollector) Collect(ctx context.Context, aggs search.Aggregations,
 		err:     nil,
 	}
 	return rv, nil
+}
+
+func (hc *TopNCollector) finishRawTopN(matches search.DocumentMatchCollection,
+	searchContext *search.Context, bucket *search.Bucket) (search.DocumentMatchIterator, error) {
+	skip := hc.skip
+	if skip > len(matches) {
+		skip = len(matches)
+	}
+	for _, match := range matches[:skip] {
+		searchContext.DocumentMatchPool.Put(match)
+	}
+	matches = matches[skip:]
+	if len(matches) > hc.size {
+		for _, match := range matches[hc.size:] {
+			searchContext.DocumentMatchPool.Put(match)
+		}
+		matches = matches[:hc.size]
+	}
+	for _, match := range matches {
+		match.Complete(nil)
+		hc.sort.Compute(match)
+	}
+	hc.results = matches
+	bucket.Finish()
+	return &TopNIterator{results: hc.results, bucket: bucket}, nil
 }
 
 func (hc *TopNCollector) collectSingle(ctx *search.Context, d *search.DocumentMatch, bucket *search.Bucket) error {

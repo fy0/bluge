@@ -72,6 +72,7 @@ func LoadBytesUsing(data []byte, config map[string]interface{}) (seg.Segment, er
 	sb := &SegmentBase{
 		mem:                 data[:idOffset],
 		memCRC:              binary.BigEndian.Uint32(data[crcOffset:]),
+		version:             version,
 		chunkMode:           binary.BigEndian.Uint32(data[chunkOffset:verOffset]),
 		numDocs:             binary.BigEndian.Uint64(data[numDocsOffset:storedIndexOffsetPos]),
 		storedIndexOffset:   binary.BigEndian.Uint64(data[storedIndexOffsetPos:sectionsIndexOffsetPos]),

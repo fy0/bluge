@@ -16,6 +16,7 @@ package searcher
 
 import (
 	"container/heap"
+	"context"
 
 	segment "github.com/fy0/bluge/segment"
 
@@ -25,6 +26,11 @@ import (
 type searcherCurr struct {
 	searcher search.Searcher
 	curr     *search.DocumentMatch
+}
+
+func (s *DisjunctionHeapSearcher) RawTopN(ctx context.Context, searchContext *search.Context,
+	size int) (search.RawTopNResult, bool, error) {
+	return rawTopNDisjunction(ctx, searchContext, size, s.searchers, s.scorer, s.options, s.min)
 }
 
 type DisjunctionHeapSearcher struct {

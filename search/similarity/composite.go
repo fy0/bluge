@@ -42,6 +42,15 @@ func (c *CompositeSumScorer) ScoreComposite(constituents []*search.DocumentMatch
 	return rv * c.boost
 }
 
+// ScoreCompositeSum applies the composite boost to an already accumulated
+// constituent score.  Non-positive boosts cannot preserve Top-N ordering.
+func (c *CompositeSumScorer) ScoreCompositeSum(sum float64) (float64, bool) {
+	if c.boost <= 0 {
+		return 0, false
+	}
+	return sum * c.boost, true
+}
+
 func (c *CompositeSumScorer) ExplainComposite(constituents []*search.DocumentMatch) *search.Explanation {
 	var sum float64
 	var children []*search.Explanation

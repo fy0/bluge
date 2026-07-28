@@ -82,6 +82,21 @@ type PostingsIterator interface {
 	Close() error
 }
 
+// Impact is one non-dominated frequency and raw-norm pair from a postings
+// block.  Scorers use the pairs to compute an exact upper bound for the block.
+type Impact struct {
+	Frequency uint64
+	Norm      uint64
+}
+
+// ImpactPostingsIterator is optionally implemented by postings iterators that
+// carry block-level impacts.  AdvanceShallow moves only the impact cursor and
+// returns the inclusive end document for the block containing docNum.
+type ImpactPostingsIterator interface {
+	HasImpacts() bool
+	AdvanceShallow(docNum uint64) (blockEnd uint64, impacts []Impact, ok bool, err error)
+}
+
 type OptimizablePostingsIterator interface {
 	ActualBitmap() *roaring.Bitmap
 	DocNum1Hit() (uint64, bool)

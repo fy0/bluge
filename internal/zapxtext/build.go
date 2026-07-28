@@ -25,7 +25,7 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 )
 
-const Version uint32 = 1
+const Version uint32 = 2
 
 const Type string = "zapx-bluge"
 
@@ -172,6 +172,7 @@ func InitSegmentBase(mem []byte, memCRC uint32, chunkMode uint32, numDocs uint64
 	sb := &SegmentBase{
 		mem:                 mem,
 		memCRC:              memCRC,
+		version:             Version,
 		chunkMode:           chunkMode,
 		numDocs:             numDocs,
 		storedIndexOffset:   storedIndexOffset,

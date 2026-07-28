@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"context"
 	"sort"
 
 	segment "github.com/fy0/bluge/segment"
@@ -32,6 +33,11 @@ type DisjunctionSliceSearcher struct {
 	matchingIdxs []int
 	initialized  bool
 	options      search.SearcherOptions
+}
+
+func (s *DisjunctionSliceSearcher) RawTopN(ctx context.Context, searchContext *search.Context,
+	size int) (search.RawTopNResult, bool, error) {
+	return rawTopNDisjunction(ctx, searchContext, size, s.searchers, s.scorer, s.options, s.min)
 }
 
 func newDisjunctionSliceSearcher(qsearchers []search.Searcher, min int, scorer search.CompositeScorer, options search.SearcherOptions,

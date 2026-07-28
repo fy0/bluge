@@ -116,6 +116,7 @@ type SegmentBase struct {
 
 	mem                 []byte
 	memCRC              uint32
+	version             uint32
 	chunkMode           uint32
 	fieldsMap           map[string]uint16                     // fieldName -> fieldID+1
 	fieldsOptions       map[string]index.FieldIndexingOptions // fieldName -> fieldOptions
@@ -142,6 +143,11 @@ type SegmentBase struct {
 	trainedIndexCache *trainedIndexCache
 	synIndexCache     *synonymIndexCache
 	nstIndexCache     *nestedIndexCache
+}
+
+// FormatVersion returns the zapx-bluge on-disk format version.
+func (sb *SegmentBase) FormatVersion() uint32 {
+	return sb.version
 }
 
 func (sb *SegmentBase) Size() int {
@@ -260,6 +266,7 @@ func (s *Segment) loadConfig() error {
 	if s.version != Version {
 		return fmt.Errorf("unsupported version %d != %d", s.version, Version)
 	}
+	s.SegmentBase.version = s.version
 
 	// read 32-bit chunk mode
 	s.chunkMode = binary.BigEndian.Uint32(s.mm[chunkOffset : chunkOffset+4])

@@ -15,6 +15,8 @@
 package searcher
 
 import (
+	"context"
+
 	"github.com/fy0/bluge/search"
 )
 
@@ -31,6 +33,34 @@ type BooleanSearcher struct {
 	initialized     bool
 	done            bool
 	options         search.SearcherOptions
+}
+
+func (s *BooleanSearcher) RawTopN(ctx context.Context, searchContext *search.Context,
+	size int) (search.RawTopNResult, bool, error) {
+	var result search.RawTopNResult
+	if s.mustSearcher != nil || s.mustNotSearcher != nil || s.shouldSearcher == nil ||
+		s.options.Explain || s.options.IncludeTermVectors || s.options.Score == "none" {
+		return result, false, nil
+	}
+	composite, ok := s.scorer.(rawCompositeScorer)
+	if !ok {
+		return result, false, nil
+	}
+	if _, ok := composite.ScoreCompositeSum(1); !ok {
+		return result, false, nil
+	}
+	provider, ok := s.shouldSearcher.(search.RawTopNProvider)
+	if !ok {
+		return result, false, nil
+	}
+	result, used, err := provider.RawTopN(ctx, searchContext, size)
+	if err != nil || !used {
+		return result, used, err
+	}
+	for _, match := range result.Matches {
+		match.Score, _ = composite.ScoreCompositeSum(match.Score)
+	}
+	return result, true, nil
 }
 
 func NewBooleanSearcher(mustSearcher, shouldSearcher, mustNotSearcher search.Searcher,

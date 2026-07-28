@@ -49,10 +49,17 @@ type Writer struct {
 	persistedCallbacks []func(error)
 
 	// control/track goroutines
-	closeCh    chan struct{}
-	asyncTasks sync.WaitGroup
+	closeCh      chan struct{}
+	asyncTasks   sync.WaitGroup
+	asyncStarted bool
+	mergeDrains  chan chan error
+	persistSyncs chan chan struct{}
+
+	mutationLock sync.RWMutex
+	closing      bool
 
 	closeOnce sync.Once
+	closeErr  error
 }
 
 func OpenWriter(config Config) (*Writer, error) {
@@ -61,6 +68,8 @@ func OpenWriter(config Config) (*Writer, error) {
 		deletionPolicy: config.DeletionPolicyFunc(),
 		directory:      config.DirectoryFunc(),
 		closeCh:        make(chan struct{}),
+		mergeDrains:    make(chan chan error),
+		persistSyncs:   make(chan chan struct{}),
 	}
 
 	// start the requested number of analysis workers
@@ -97,6 +106,7 @@ func OpenWriter(config Config) (*Writer, error) {
 		_ = rv.Close()
 		return nil, err2
 	}
+	atomic.StoreUint64(&rv.stats.LastPersistedEpoch, lastPersistedEpoch)
 
 	// initialize nextSegmentID to a safe value
 	existingSegments, err := rv.directory.List(ItemKindSegment)
@@ -129,6 +139,7 @@ func OpenWriter(config Config) (*Writer, error) {
 	go rv.persisterLoop(mergesCh, persistsCh, introducerNotifier, persistNotifier, lastPersistedEpoch)
 	rv.asyncTasks.Add(1)
 	go rv.mergerLoop(mergesCh, persistNotifier)
+	rv.asyncStarted = true
 
 	return rv, nil
 }
@@ -192,20 +203,38 @@ func (s *Writer) fireAsyncError(err error) {
 	atomic.AddUint64(&s.stats.TotOnErrors, 1)
 }
 
-func (s *Writer) Close() (err error) {
+func (s *Writer) Close() error {
 	s.closeOnce.Do(func() {
-		err = s.close()
+		s.closeErr = s.close()
 	})
-	return err
+	return s.closeErr
 }
 
 func (s *Writer) close() (err error) {
+	s.mutationLock.Lock()
+	defer s.mutationLock.Unlock()
+	s.closing = true
+
 	startTime := time.Now()
 	defer func() {
 		s.fireEvent(EventKindClose, time.Since(startTime))
 	}()
 
 	s.fireEvent(EventKindCloseStart, 0)
+
+	// Persisting unsafe batches can introduce a new disk-backed root. Drain on
+	// both sides of the persister barrier so that root is planned as well.
+	var drainErr error
+	if s.asyncStarted {
+		drainErr = s.drainMerges()
+		if drainErr == nil {
+			s.syncPersister()
+			drainErr = s.drainMerges()
+		}
+		if drainErr == nil {
+			s.syncPersister()
+		}
+	}
 
 	// signal to async tasks we want to close
 	close(s.closeCh)
@@ -214,21 +243,48 @@ func (s *Writer) close() (err error) {
 
 	s.replaceRoot(nil, nil, nil)
 
+	cleanupErr := s.deletionPolicy.Cleanup(s.directory)
+
 	err = s.directory.Unlock()
 	if err != nil {
 		return err
+	}
+	if drainErr != nil {
+		return drainErr
+	}
+	if cleanupErr != nil {
+		return cleanupErr
 	}
 
 	return nil
 }
 
+func (s *Writer) drainMerges() error {
+	done := make(chan error, 1)
+	s.mergeDrains <- done
+	return <-done
+}
+
+func (s *Writer) syncPersister() {
+	done := make(chan struct{})
+	s.persistSyncs <- done
+	<-done
+}
+
 // Batch applies a batch of changes to the index atomically
 func (s *Writer) Batch(batch *Batch) (err error) {
+	s.mutationLock.RLock()
+	if s.closing {
+		s.mutationLock.RUnlock()
+		return segment.ErrClosed
+	}
+
 	start := time.Now()
 
 	defer func() {
 		s.fireEvent(EventKindBatchIntroduction, time.Since(start))
 	}()
+	defer s.mutationLock.RUnlock()
 
 	var numUpdates = len(batch.documents)
 	var numDeletes = len(batch.ids)

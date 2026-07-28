@@ -159,6 +159,19 @@ func (b *BM25Scorer) ScoreRawNorm(freq int, normBits uint64) float64 {
 	return b.score(freq, float64(normBits))
 }
 
+// ScoreImpactUpperBound evaluates every non-dominated pair persisted for a
+// block using the same arithmetic as document scoring.
+func (b *BM25Scorer) ScoreImpactUpperBound(impacts []segment.Impact) float64 {
+	var maxScore float64
+	for _, impact := range impacts {
+		score := b.ScoreRawNorm(int(impact.Frequency), impact.Norm)
+		if score > maxScore {
+			maxScore = score
+		}
+	}
+	return maxScore
+}
+
 func (b *BM25Scorer) score(freq int, docLen float64) float64 {
 	if freq <= 0 || b.avgDocLen <= 0 {
 		return 0
