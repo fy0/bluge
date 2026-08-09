@@ -202,7 +202,9 @@ jobs:
           $env:CC = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang-cl.exe"
           $env:CXX = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang++.exe"
           $env:AR = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "llvm-lib.exe"
-          $env:CXXFLAGS = "-std=c++17"
+          $clangTargetFlag = "--target=${{ matrix.target }}"
+          $env:CFLAGS = $clangTargetFlag
+          $env:CXXFLAGS = "$clangTargetFlag -std=c++17"
           if ("${{ matrix.goarch }}" -eq "arm64") {
             # NumKong 7.8 auto-detects x86 kernels from _MSC_VER unless these
             # macros are defined. Keep ARM/NEON probes enabled in the same DLL.
@@ -220,7 +222,7 @@ jobs:
               "NK_TARGET_SIERRA"
             )
             $kernelFlags = ($disabledX86Kernels | ForEach-Object { "-D${_}=0" }) -join " "
-            $env:CFLAGS = $kernelFlags
+            $env:CFLAGS = "$env:CFLAGS $kernelFlags"
             $env:CXXFLAGS = "$env:CXXFLAGS $kernelFlags"
           }
           $linker = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "${{ matrix.linker }}"
