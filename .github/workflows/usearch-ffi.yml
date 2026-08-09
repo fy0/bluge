@@ -196,6 +196,7 @@ jobs:
         working-directory: usearch-ffi
         shell: pwsh
         env:
+          CARGO_TERM_COLOR: never
           RUSTFLAGS: -C target-feature=-crt-static
         run: |
           $env:CC = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang-cl.exe"
@@ -225,9 +226,13 @@ jobs:
           $linker = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "${{ matrix.linker }}"
           Set-Item -Path "Env:${{ matrix.linker_env }}" -Value $linker
           $cargoArguments = @("build", "--locked", "--release", "--target", "${{ matrix.target }}")
-          & cargo +1.90.0 @cargoArguments
-          if ($LASTEXITCODE -ne 0) {
-            throw "cargo build failed with exit code $LASTEXITCODE"
+          & cargo +1.90.0 @cargoArguments 2>&1 | Tee-Object -Variable cargoLog
+          $cargoExitCode = $LASTEXITCODE
+          if ($cargoExitCode -ne 0) {
+            $tail = ($cargoLog | Select-Object -Last 60 | Out-String).Trim()
+            $annotation = $tail.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Host "::error title=vector_engine build failed::$annotation"
+            throw "cargo build failed with exit code $cargoExitCode"
           }
 
       - name: Build Unix library
