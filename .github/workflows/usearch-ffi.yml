@@ -59,7 +59,9 @@ jobs:
             numkong: true
             linker: lld-link.exe
             linker_env: CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
-            compiler: LLVM 20.1.8 + Rust 1.90.0 MSVC target
+            llvm_asset: LLVM-20.1.8-win64.exe
+            llvm_sha256: 3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b
+            compiler: LLVM 20.1.8 Windows x64 + Rust 1.90.0 MSVC target
             runtime: Microsoft VC 14.x dynamic
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
@@ -70,7 +72,9 @@ jobs:
             numkong: true
             linker: lld-link.exe
             linker_env: CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER
-            compiler: LLVM 20.1.8 + Rust 1.90.0 MSVC target
+            llvm_asset: LLVM-20.1.8-woa64.exe
+            llvm_sha256: 7c4ac97eb2ae6b960ca5f9caf3ff6124c8d2a18cc07a7840a4d2ea15537bad8e
+            compiler: LLVM 20.1.8 Windows ARM64 + Rust 1.90.0 MSVC target
             runtime: Microsoft VC 14.x dynamic
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -139,22 +143,26 @@ jobs:
         if: matrix.goos == 'windows'
         shell: pwsh
         run: |
-          $standaloneClang = Join-Path "${env:ProgramFiles}\LLVM\bin" "clang-cl.exe"
-          $clangPath = $standaloneClang
-          if (Test-Path -LiteralPath $clangPath) {
-            $versionText = (& $clangPath --version | Out-String)
+          $installDirectory = Join-Path $env:RUNNER_TEMP "llvm-20.1.8"
+          $installer = Join-Path $env:RUNNER_TEMP "${{ matrix.llvm_asset }}"
+          $downloadUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/${{ matrix.llvm_asset }}"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $installer
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
+          if ($actualHash -ne "${{ matrix.llvm_sha256 }}") {
+            throw "LLVM installer checksum mismatch: $actualHash"
           }
-          if (-not (Test-Path -LiteralPath $clangPath) -or $versionText -notmatch "clang version 20\.1\.8(?:\s|$)") {
-            choco install llvm --version=20.1.8 --allow-downgrade --no-progress --yes
-            $versionText = (& $clangPath --version | Out-String)
+          $installerProcess = Start-Process -FilePath $installer `
+            -ArgumentList @("/S", "/D=$installDirectory") `
+            -WindowStyle Hidden -Wait -PassThru
+          if ($installerProcess.ExitCode -ne 0) {
+            throw "LLVM installer failed with exit code $($installerProcess.ExitCode)"
           }
-          if ([string]::IsNullOrWhiteSpace($clangPath)) {
-            throw "clang-cl.exe was not found after LLVM setup"
-          }
+          $llvmDirectory = Join-Path $installDirectory "bin"
+          $clangPath = Join-Path $llvmDirectory "clang-cl.exe"
+          $versionText = (& $clangPath --version | Out-String)
           if ($versionText -notmatch "clang version 20\.1\.8(?:\s|$)") {
             throw "Expected LLVM Clang 20.1.8, got: $versionText"
           }
-          $llvmDirectory = Split-Path -Parent $clangPath
           foreach ($tool in @("clang-cl.exe", "clang++.exe", "lld-link.exe", "llvm-lib.exe", "llvm-objdump.exe")) {
             if (-not (Test-Path -LiteralPath (Join-Path $llvmDirectory $tool))) {
               throw "LLVM tool was not found: $tool"
