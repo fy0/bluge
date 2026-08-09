@@ -31,6 +31,14 @@ func NewWithNormCalc(results []*blugeidx.Document, normCalc func(string, int) fl
 	return new(ZapPlugin).newWithChunkMode(results, DefaultChunkMode, nil, normCalc)
 }
 
+// NewWithConfig creates a segment while passing opaque section configuration
+// to the segment builder. The ordinary text-only path remains unchanged when
+// config is nil.
+func NewWithConfig(results []*blugeidx.Document, normCalc func(string, int) float32,
+	config map[string]interface{}) (seg.Segment, uint64, error) {
+	return new(ZapPlugin).newWithChunkMode(results, DefaultChunkMode, config, normCalc)
+}
+
 // LoadBytes opens a zapx segment from bytes owned by the caller.
 func LoadBytes(data []byte) (seg.Segment, error) {
 	return LoadBytesUsing(data, nil)

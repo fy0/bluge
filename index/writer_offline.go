@@ -130,7 +130,14 @@ func (s *WriterOffline) buildBatchSegmentErr(segID uint64, docs []segment.Docume
 		doc.Analyze()
 	}
 
-	newSegment, _, err := s.segPlugin.New(docs, s.config.NormCalc)
+	var newSegment segment.Segment
+	var err error
+	if s.segPlugin.NewWithOptions != nil {
+		newSegment, _, err = s.segPlugin.NewWithOptions(docs, s.config.NormCalc,
+			s.config.SegmentOptions)
+	} else {
+		newSegment, _, err = s.segPlugin.New(docs, s.config.NormCalc)
+	}
 	if err != nil {
 		return err
 	}
@@ -245,7 +252,13 @@ func (s *WriterOffline) mergeSegments(mergeIDs []uint64, newID uint64) error {
 	}
 
 	drops := make([]*roaring.Bitmap, len(mergeIDs))
-	merger := s.segPlugin.Merge(mergeSegs, drops, s.config.MergeBufferSize)
+	var merger segment.Merger
+	if s.segPlugin.MergeWithOptions != nil {
+		merger = s.segPlugin.MergeWithOptions(mergeSegs, drops, s.config.MergeBufferSize,
+			s.config.SegmentOptions)
+	} else {
+		merger = s.segPlugin.Merge(mergeSegs, drops, s.config.MergeBufferSize)
+	}
 	if err := s.persist(ItemKindSegment, newID, merger); err != nil {
 		_ = closeOpenedSegs()
 		return fmt.Errorf("error merging segments %v: %w", mergeIDs, err)

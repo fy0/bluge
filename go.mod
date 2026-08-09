@@ -16,6 +16,7 @@ require (
 	github.com/blevesearch/snowballstem v0.9.0
 	github.com/blevesearch/vellum v1.2.0
 	github.com/caio/go-tdigest/v4 v4.1.0
+	github.com/ebitengine/purego v0.10.1
 	github.com/golang/snappy v1.0.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.40.0

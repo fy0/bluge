@@ -1,0 +1,20 @@
+[package]
+name = "bluge-usearch-ffi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Stable C ABI adapter for the USearch Rust crate used by Bluge"
+
+[lib]
+name = "vector_engine"
+crate-type = ["cdylib"]
+
+[features]
+default = ["simd"]
+simd = ["usearch/numkong"]
+
+[dependencies]
+# NumKong packages scalar and architecture-specific kernels in the same native
+# library and selects among them at runtime. We do not publish per-ISA variants.
+usearch = { version = "2.26.0", default-features = false }

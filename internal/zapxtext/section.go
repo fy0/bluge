@@ -57,7 +57,10 @@ type resetable interface {
 
 const (
 	SectionInvertedTextIndex = iota
-	SectionFaissVectorIndex
+	// SectionVectorIndex stores a backend-tagged native vector payload. The
+	// old name is retained as a source compatibility alias because the slot was
+	// originally reserved by the Bleve FAISS integration.
+	SectionVectorIndex
 	SectionSynonymIndex
 
 	// Add new sections above this line.
@@ -65,6 +68,8 @@ const (
 	// and is used to track how many sections can be registered.
 	NumSections
 )
+
+const SectionFaissVectorIndex = SectionVectorIndex
 
 // -----------------------------------------------------------------------------
 

@@ -392,7 +392,13 @@ func (s *Writer) mergeSegmentBases(merges chan *segmentMerge, snapshot *Snapshot
 
 func (s *Writer) merge(segments []segment.Segment, drops []*roaring.Bitmap, id uint64) (
 	[][]uint64, error) {
-	merger := s.segPlugin.Merge(segments, drops, s.config.MergeBufferSize)
+	var merger segment.Merger
+	if s.segPlugin.MergeWithOptions != nil {
+		merger = s.segPlugin.MergeWithOptions(segments, drops, s.config.MergeBufferSize,
+			s.config.SegmentOptions)
+	} else {
+		merger = s.segPlugin.Merge(segments, drops, s.config.MergeBufferSize)
+	}
 
 	err := s.directory.Persist(ItemKindSegment, id, merger, s.closeCh)
 	if err != nil {

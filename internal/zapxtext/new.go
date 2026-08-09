@@ -206,6 +206,13 @@ func (s *interim) convert() (uint64, uint64, error) {
 			s.getOrDefineField(fName)
 			s.FieldsOptions[fName] |= field.Options()
 		})
+		if vectorSegmentBackend(s.config) != nil {
+			result.VisitVectors(func(vector *blugeidx.Vector) {
+				fName = vector.Name()
+				s.getOrDefineField(fName)
+				s.FieldsOptions[fName] |= index.IndexField
+			})
+		}
 	}
 
 	sort.Strings(s.FieldsInv[1:]) // keep _id as first field
@@ -300,6 +307,19 @@ func (s *interim) processDocument(docNum uint32,
 		}
 	}
 	result.VisitFields(visitField)
+
+	if vectorSegmentBackend(s.config) != nil {
+		result.VisitVectors(func(vector *blugeidx.Vector) {
+			fieldID := uint16(s.getOrDefineField(vector.Name()))
+			for _, section := range segmentSections {
+				if vectorProcessor, ok := section.(interface {
+					ProcessVector(map[int]resetable, uint32, *blugeidx.Vector, uint16)
+				}); ok {
+					vectorProcessor.ProcessVector(s.opaque, docNum, vector, fieldID)
+				}
+			}
+		})
+	}
 
 	// given that as part of visiting each field, there may some kind of totalling
 	// or accumulation that can be updated, it becomes necessary to commit or

@@ -20,6 +20,25 @@ type Batch struct {
 	documents         []segment.Document
 	ids               []segment.Term
 	persistedCallback func(error)
+	operations        []BatchOperation
+}
+
+// BatchOperationKind identifies the mutation represented by a BatchOperation.
+type BatchOperationKind uint8
+
+const (
+	BatchOperationInsert BatchOperationKind = iota + 1
+	BatchOperationUpdate
+	BatchOperationDelete
+)
+
+// BatchOperation exposes the document mutations in a batch to optional
+// secondary indexes. The text index continues to use the compact documents
+// and ids slices above.
+type BatchOperation struct {
+	Kind     BatchOperationKind
+	ID       segment.Term
+	Document segment.Document
 }
 
 func NewBatch() *Batch {
@@ -28,21 +47,40 @@ func NewBatch() *Batch {
 
 func (b *Batch) Insert(doc segment.Document) {
 	b.documents = append(b.documents, doc)
+	b.operations = append(b.operations, BatchOperation{
+		Kind:     BatchOperationInsert,
+		Document: doc,
+	})
 }
 
 func (b *Batch) Update(id segment.Term, doc segment.Document) {
 	b.documents = append(b.documents, doc)
 	b.ids = append(b.ids, id)
+	b.operations = append(b.operations, BatchOperation{
+		Kind:     BatchOperationUpdate,
+		ID:       id,
+		Document: doc,
+	})
 }
 
 func (b *Batch) Delete(id segment.Term) {
 	b.ids = append(b.ids, id)
+	b.operations = append(b.operations, BatchOperation{
+		Kind: BatchOperationDelete,
+		ID:   id,
+	})
 }
 
 func (b *Batch) Reset() {
 	b.documents = b.documents[:0]
 	b.ids = b.ids[:0]
+	b.operations = b.operations[:0]
 	b.persistedCallback = nil
+}
+
+// Operations returns a copy of the batch mutations for secondary indexes.
+func (b *Batch) Operations() []BatchOperation {
+	return append([]BatchOperation(nil), b.operations...)
 }
 
 func (b *Batch) SetPersistedCallback(f func(error)) {

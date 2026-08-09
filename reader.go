@@ -16,6 +16,7 @@ package bluge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/fy0/bluge/index"
@@ -28,6 +29,7 @@ import (
 type Reader struct {
 	config Config
 	reader *index.Snapshot
+	vector VectorIndex
 }
 
 func OpenReader(config Config) (*Reader, error) {
@@ -38,6 +40,11 @@ func OpenReader(config Config) (*Reader, error) {
 	rv.reader, err = index.OpenReader(config.indexConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error opening index: %w", err)
+	}
+	rv.vector, err = openVectorIndexForSnapshot(config, rv.reader)
+	if err != nil {
+		_ = rv.reader.Close()
+		return nil, err
 	}
 
 	return rv, nil
@@ -86,6 +93,65 @@ func (r *Reader) Search(ctx context.Context, req SearchRequest) (search.Document
 	return dmItr, nil
 }
 
+// VectorSearch returns the nearest vectors for a field. A non-nil filter is
+// evaluated by Bluge first, then applied to the vector candidates.
+func (r *Reader) VectorSearch(ctx context.Context, field string, query []float32,
+	k int, filter Query) ([]VectorHit, error) {
+	if r.vector == nil {
+		return nil, ErrVectorUnsupported
+	}
+	if filter == nil {
+		return r.vector.Search(field, query, k, nil)
+	}
+	if candidateSearcher, ok := r.vector.(VectorCandidateSearcher); ok {
+		allowed, err := r.vectorFilterIDs(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		return candidateSearcher.SearchCandidates(field, query, k, allowed)
+	}
+	return r.vector.Search(field, query, k, filter)
+}
+
+// SearchVector is kept as a discoverable alias for callers that use verb-first
+// naming alongside Reader.Search.
+func (r *Reader) SearchVector(ctx context.Context, field string, query []float32,
+	k int, filter Query) ([]VectorHit, error) {
+	return r.VectorSearch(ctx, field, query, k, filter)
+}
+
+func (r *Reader) vectorFilterIDs(ctx context.Context, filter Query) (map[Identifier]struct{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	iterator, err := r.Search(ctx, NewAllMatches(filter))
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[Identifier]struct{})
+	for {
+		match, err := iterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		if match == nil {
+			return allowed, nil
+		}
+		var id Identifier
+		err = match.VisitStoredFields(func(field string, value []byte) bool {
+			if field == _idField {
+				id = Identifier(string(value))
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			return nil, err
+		}
+		allowed[id] = struct{}{}
+	}
+}
+
 func (r *Reader) DictionaryIterator(field string, automaton segment.Automaton, start, end []byte) (segment.DictionaryIterator, error) {
 	return r.reader.DictionaryIterator(field, automaton, start, end)
 }
@@ -96,5 +162,5 @@ func (r *Reader) Backup(path string, cancel chan struct{}) error {
 }
 
 func (r *Reader) Close() error {
-	return r.reader.Close()
+	return errors.Join(r.reader.Close(), closeVectorIndex(r.vector))
 }

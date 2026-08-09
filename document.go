@@ -121,7 +121,17 @@ func (d Document) EachField(vf segment.VisitField) {
 // build representation.
 func (d Document) ToBlugeIndexDocument() (*blugeidx.Document, error) {
 	fields := make([]*blugeidx.Field, 0, len(d))
+	vectors := make([]*blugeidx.Vector, 0)
 	for _, field := range d {
+		if vectorField, ok := field.(interface{ VectorValue() []float32 }); ok {
+			similarity := VectorCosine
+			if withSimilarity, ok := field.(interface{ VectorSimilarity() VectorSimilarity }); ok {
+				similarity = withSimilarity.VectorSimilarity()
+			}
+			vectors = append(vectors, blugeidx.NewVector(field.Name(),
+				vectorField.VectorValue(), string(similarity)))
+			continue
+		}
 		options := blugeIndexFieldOptions(field)
 		if field.Name() == _idField {
 			options |= bleveindex.IndexField | bleveindex.StoreField
@@ -141,7 +151,14 @@ func (d Document) ToBlugeIndexDocument() (*blugeidx.Document, error) {
 		}
 		fields = append(fields, indexField)
 	}
-	return blugeidx.NewDocument(fields)
+	doc, err := blugeidx.NewDocument(fields)
+	if err != nil {
+		return nil, err
+	}
+	for _, vector := range vectors {
+		doc.AddVector(vector)
+	}
+	return doc, nil
 }
 
 func blugeIndexFieldOptions(field Field) bleveindex.FieldIndexingOptions {

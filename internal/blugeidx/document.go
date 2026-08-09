@@ -26,10 +26,32 @@ const (
 // analyzed the source document.
 type Document struct {
 	fields             []*Field
+	vectors            []*Vector
 	numPlainTextBytes  uint64
 	storedFieldsBytes  uint64
 	indexedFieldExists bool
 }
+
+// Vector is the segment-build representation of one vector field value.
+// Vector fields stay outside the text Field list so they cannot accidentally
+// enter the inverted index or stored-field stream.
+type Vector struct {
+	name       string
+	values     []float32
+	similarity string
+}
+
+func NewVector(name string, values []float32, similarity string) *Vector {
+	return &Vector{
+		name:       name,
+		values:     append([]float32(nil), values...),
+		similarity: similarity,
+	}
+}
+
+func (v *Vector) Name() string       { return v.name }
+func (v *Vector) Values() []float32  { return v.values }
+func (v *Vector) Similarity() string { return v.similarity }
 
 // FromSegmentDocument preserves native Bluge token frequencies when the field
 // exposes them and falls back to the segment API for custom fields.
@@ -39,6 +61,7 @@ func FromSegmentDocument(doc blugeseg.Document) (*Document, error) {
 	}
 
 	var fields []*Field
+	var vectors []*Vector
 	var conversionErr error
 	doc.EachField(func(field blugeseg.Field) {
 		if conversionErr != nil {
@@ -48,13 +71,23 @@ func FromSegmentDocument(doc blugeseg.Document) (*Document, error) {
 			conversionErr = fmt.Errorf("nil field")
 			return
 		}
+		if vectorField, ok := field.(interface{ VectorValue() []float32 }); ok {
+			similarity := "cosine"
+			vectors = append(vectors, NewVector(field.Name(), vectorField.VectorValue(), similarity))
+			return
+		}
 
 		fields = append(fields, newField(field))
 	})
 	if conversionErr != nil {
 		return nil, conversionErr
 	}
-	return NewDocument(fields)
+	rv, err := NewDocument(fields)
+	if err != nil {
+		return nil, err
+	}
+	rv.vectors = vectors
+	return rv, nil
 }
 
 // NewDocument creates a native build document from already analyzed fields.
@@ -86,6 +119,18 @@ func NewDocument(fields []*Field) (*Document, error) {
 func (d *Document) VisitFields(visitor func(*Field)) {
 	for _, field := range d.fields {
 		visitor(field)
+	}
+}
+
+func (d *Document) VisitVectors(visitor func(*Vector)) {
+	for _, vector := range d.vectors {
+		visitor(vector)
+	}
+}
+
+func (d *Document) AddVector(vector *Vector) {
+	if vector != nil {
+		d.vectors = append(d.vectors, vector)
 	}
 }
 

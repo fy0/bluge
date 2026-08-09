@@ -27,6 +27,12 @@ type Config struct {
 	SegmentType    string
 	SegmentVersion uint32
 
+	// SegmentOptions is opaque to the index lifecycle and is passed to
+	// segment builders and mergers. It allows optional sections, such as the
+	// embedded vector section, to share the same segment transaction without
+	// coupling the index package to a particular backend.
+	SegmentOptions map[string]interface{}
+
 	supportedSegmentPlugins map[string]map[uint32]*SegmentPlugin
 
 	UnsafeBatch        bool
@@ -87,6 +93,11 @@ func (config Config) WithSegmentType(typ string) Config {
 
 func (config Config) WithSegmentVersion(ver uint32) Config {
 	config.SegmentVersion = ver
+	return config
+}
+
+func (config Config) WithSegmentOptions(options map[string]interface{}) Config {
+	config.SegmentOptions = options
 	return config
 }
 
@@ -221,11 +232,13 @@ func defaultConfig() Config {
 	}
 
 	rv.WithSegmentPlugin(&SegmentPlugin{
-		Type:    zapxbluge.Type,
-		Version: zapxbluge.Version,
-		New:     zapxbluge.New,
-		Load:    zapxbluge.Load,
-		Merge:   zapxbluge.Merge,
+		Type:             zapxbluge.Type,
+		Version:          zapxbluge.Version,
+		New:              zapxbluge.New,
+		NewWithOptions:   zapxbluge.NewWithOptions,
+		Load:             zapxbluge.Load,
+		Merge:            zapxbluge.Merge,
+		MergeWithOptions: zapxbluge.MergeWithOptions,
 	})
 
 	return rv

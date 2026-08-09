@@ -27,8 +27,15 @@ type SegmentPlugin struct {
 	Type    string
 	Version uint32
 	New     func(results []segment.Document, normCalc func(string, int) float32) (segment.Segment, uint64, error)
-	Load    func(*segment.Data) (segment.Segment, error)
-	Merge   func([]segment.Segment, []*roaring.Bitmap, int) segment.Merger
+	// NewWithOptions is an optional extension for segment implementations that
+	// need opaque backend configuration while preserving the old plugin API.
+	NewWithOptions func(results []segment.Document, normCalc func(string, int) float32,
+		options map[string]interface{}) (segment.Segment, uint64, error)
+	Load  func(*segment.Data) (segment.Segment, error)
+	Merge func([]segment.Segment, []*roaring.Bitmap, int) segment.Merger
+	// MergeWithOptions is the merge counterpart to NewWithOptions.
+	MergeWithOptions func(segments []segment.Segment, drops []*roaring.Bitmap, bufferSize int,
+		options map[string]interface{}) segment.Merger
 }
 
 func supportedSegmentTypes(supportedSegmentPlugins map[string]map[uint32]*SegmentPlugin) (rv []string) {
@@ -69,7 +76,15 @@ func loadSegmentPlugin(supportedSegmentPlugins map[string]map[uint32]*SegmentPlu
 }
 
 func (s *Writer) newSegment(results []segment.Document) (*segmentWrapper, uint64, error) {
-	seg, count, err := s.segPlugin.New(results, s.config.NormCalc)
+	var seg segment.Segment
+	var count uint64
+	var err error
+	if s.segPlugin.NewWithOptions != nil {
+		seg, count, err = s.segPlugin.NewWithOptions(results, s.config.NormCalc,
+			s.config.SegmentOptions)
+	} else {
+		seg, count, err = s.segPlugin.New(results, s.config.NormCalc)
+	}
 	return &segmentWrapper{
 		Segment:    seg,
 		refCounter: noOpRefCounter{},
@@ -82,6 +97,17 @@ type segmentWrapper struct {
 	refCounter
 	persisted bool
 	inMemory  bool
+}
+
+// UnderlyingSegment exposes the concrete segment to optional readers that
+// need extension sections beyond the base segment interface. The wrapper
+// still owns reference counting and must not be closed by the caller through
+// the returned value.
+func (s *segmentWrapper) UnderlyingSegment() segment.Segment {
+	if s == nil {
+		return nil
+	}
+	return s.Segment
 }
 
 func (s segmentWrapper) Persisted() bool {

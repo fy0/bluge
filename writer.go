@@ -15,6 +15,7 @@
 package bluge
 
 import (
+	"errors"
 	"fmt"
 
 	segment "github.com/fy0/bluge/segment"
@@ -25,6 +26,7 @@ import (
 type Writer struct {
 	config Config
 	chill  *index.Writer
+	vector VectorIndex
 }
 
 func OpenWriter(config Config) (*Writer, error) {
@@ -33,8 +35,17 @@ func OpenWriter(config Config) (*Writer, error) {
 	}
 
 	var err error
+	if !usesSegmentVectorBackend(config) {
+		rv.vector, err = openVectorIndex(config)
+	}
+	if err != nil {
+		return nil, err
+	}
 	rv.chill, err = index.OpenWriter(config.indexConfigForWriting())
 	if err != nil {
+		if rv.vector != nil {
+			_ = rv.vector.Close()
+		}
 		return nil, fmt.Errorf("error opening index: %w", err)
 	}
 
@@ -60,11 +71,34 @@ func (w *Writer) Delete(id segment.Term) error {
 }
 
 func (w *Writer) Batch(batch *index.Batch) error {
-	return w.chill.Batch(batch)
+	changes, hasVectors, err := vectorChangesForBatch(batch)
+	if err != nil {
+		return err
+	}
+	if hasVectors && w.vector == nil && !usesSegmentVectorBackend(w.config) {
+		return ErrVectorUnsupported
+	}
+	if usesSegmentVectorBackend(w.config) {
+		if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
+			if err := validator.ValidateVectorChanges(changes); err != nil {
+				return err
+			}
+		}
+	} else if err := validateVectorChanges(w.vector, changes, hasVectors); err != nil {
+		return err
+	}
+
+	if err := w.chill.Batch(batch); err != nil {
+		return err
+	}
+	if usesSegmentVectorBackend(w.config) {
+		return nil
+	}
+	return applyVectorChanges(w.vector, changes, hasVectors)
 }
 
 func (w *Writer) Close() error {
-	return w.chill.Close()
+	return errors.Join(w.chill.Close(), closeVectorIndex(w.vector))
 }
 
 func (w *Writer) Reader() (*Reader, error) {
@@ -72,8 +106,27 @@ func (w *Writer) Reader() (*Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error getting nreal time reader: %w", err)
 	}
+	var vector VectorIndex
+	if usesSegmentVectorBackend(w.config) {
+		vector, err = openVectorIndexForSnapshot(w.config, r)
+		if err != nil {
+			_ = r.Close()
+			return nil, err
+		}
+	} else if w.vector != nil {
+		if snapshotter, ok := w.vector.(VectorSnapshotter); ok {
+			vector = snapshotter.SnapshotVectorIndex()
+		} else {
+			vector, err = openVectorIndexForSnapshot(w.config, r)
+			if err != nil {
+				_ = r.Close()
+				return nil, err
+			}
+		}
+	}
 	return &Reader{
 		config: w.config,
 		reader: r,
+		vector: vector,
 	}, nil
 }

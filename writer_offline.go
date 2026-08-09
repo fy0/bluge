@@ -15,6 +15,7 @@
 package bluge
 
 import (
+	"errors"
 	"fmt"
 
 	segment "github.com/fy0/bluge/segment"
@@ -23,7 +24,10 @@ import (
 )
 
 type OfflineWriter struct {
-	writer *index.WriterOffline
+	config               Config
+	writer               *index.WriterOffline
+	vector               VectorIndex
+	pendingVectorChanges []VectorChange
 
 	batchSize  int
 	batch      *index.Batch
@@ -39,14 +43,22 @@ func OpenOfflineWriter(config Config, batchSize, maxSegmentsToMerge int) (*Offli
 		return nil, fmt.Errorf("max segments to merge must be at least 2")
 	}
 	rv := &OfflineWriter{
+		config:    config,
 		batchSize: batchSize,
 		batch:     index.NewBatch(),
 	}
 
 	var err error
+	rv.vector, err = openVectorIndex(config)
+	if err != nil {
+		return nil, err
+	}
 	rv.writer, err = index.OpenOfflineWriterWithMergeMax(
 		config.indexConfigForWriting(), maxSegmentsToMerge)
 	if err != nil {
+		if rv.vector != nil {
+			_ = rv.vector.Close()
+		}
 		return nil, fmt.Errorf("error opening index: %w", err)
 	}
 
@@ -65,9 +77,28 @@ func (w *OfflineWriter) Insert(doc segment.Document) error {
 	w.batch.Insert(doc)
 	w.batchCount++
 	if w.batchCount >= w.batchSize {
-		err := w.writer.Batch(w.batch)
+		changes, hasVectors, err := vectorChangesForBatch(w.batch)
 		if err != nil {
 			return err
+		}
+		if hasVectors && w.vector == nil && !usesSegmentVectorBackend(w.config) {
+			return ErrVectorUnsupported
+		}
+		if usesSegmentVectorBackend(w.config) {
+			if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
+				if err := validator.ValidateVectorChanges(changes); err != nil {
+					return err
+				}
+			}
+		} else if err := validateVectorChanges(w.vector, changes, hasVectors); err != nil {
+			return err
+		}
+		err = w.writer.Batch(w.batch)
+		if err != nil {
+			return err
+		}
+		if _, ok := w.vector.(VectorBatcher); ok {
+			w.pendingVectorChanges = append(w.pendingVectorChanges, changes...)
 		}
 		w.batch.Reset()
 		w.batchCount = 0
@@ -82,11 +113,34 @@ func (w *OfflineWriter) Close() error {
 	w.closed = true
 	var batchErr error
 	if w.batchCount > 0 {
-		batchErr = w.writer.Batch(w.batch)
+		changes, hasVectors, err := vectorChangesForBatch(w.batch)
+		if err != nil {
+			batchErr = err
+		} else if hasVectors && w.vector == nil && !usesSegmentVectorBackend(w.config) {
+			batchErr = ErrVectorUnsupported
+		} else {
+			if usesSegmentVectorBackend(w.config) {
+				if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
+					batchErr = validator.ValidateVectorChanges(changes)
+				}
+			} else {
+				batchErr = validateVectorChanges(w.vector, changes, hasVectors)
+			}
+			if batchErr == nil {
+				batchErr = w.writer.Batch(w.batch)
+			}
+			if batchErr == nil {
+				if _, ok := w.vector.(VectorBatcher); ok {
+					w.pendingVectorChanges = append(w.pendingVectorChanges, changes...)
+				}
+			}
+		}
 	}
 	closeErr := w.writer.Close()
-	if batchErr != nil {
-		return batchErr
+	var vectorErr error
+	if closeErr == nil && len(w.pendingVectorChanges) > 0 {
+		vectorErr = applyVectorChanges(w.vector, w.pendingVectorChanges, true)
 	}
-	return closeErr
+	vectorCloseErr := closeVectorIndex(w.vector)
+	return errors.Join(batchErr, closeErr, vectorErr, vectorCloseErr)
 }

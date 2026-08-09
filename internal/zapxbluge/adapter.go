@@ -51,6 +51,27 @@ func New(results []blugeseg.Document, normCalc func(string, int) float32) (bluge
 	return &segmentAdapter{inner: seg}, bytesWritten, nil
 }
 
+func NewWithOptions(results []blugeseg.Document, normCalc func(string, int) float32,
+	options map[string]interface{}) (blugeseg.Segment, uint64, error) {
+	zapDocs := make([]*blugeidx.Document, len(results))
+	for i, doc := range results {
+		var err error
+		if exporter, ok := doc.(blugeIndexDocumentExporter); ok {
+			zapDocs[i], err = exporter.ToBlugeIndexDocument()
+		} else {
+			zapDocs[i], err = blugeidx.FromSegmentDocument(doc)
+		}
+		if err != nil {
+			return nil, 0, fmt.Errorf("zapx-bluge: document %d (%T): %w", i, doc, err)
+		}
+	}
+	seg, bytesWritten, err := zapxtext.NewWithConfig(zapDocs, normCalc, options)
+	if err != nil {
+		return nil, 0, err
+	}
+	return &segmentAdapter{inner: seg}, bytesWritten, nil
+}
+
 func Load(data *blugeseg.Data) (blugeseg.Segment, error) {
 	if data == nil {
 		return nil, fmt.Errorf("nil segment data")
@@ -179,6 +200,15 @@ func (s *segmentAdapter) Type() string {
 
 func (s *segmentAdapter) Version() uint32 {
 	return Version
+}
+
+func (s *segmentAdapter) VectorPayload(field string) (zapxtext.VectorPayload, error) {
+	if payloader, ok := s.inner.(interface {
+		VectorPayload(string) (zapxtext.VectorPayload, error)
+	}); ok {
+		return payloader.VectorPayload(field)
+	}
+	return zapxtext.VectorPayload{}, zapxtext.ErrVectorPayloadNotFound
 }
 
 type collectionStats struct {
@@ -477,6 +507,7 @@ type merger struct {
 	segments    []scorchseg.Segment
 	drops       []*roaring.Bitmap
 	documentMap [][]uint64
+	options     map[string]interface{}
 }
 
 func (m *merger) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
@@ -485,12 +516,28 @@ func (m *merger) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
 			return 0, fmt.Errorf("cannot merge non-zapx segment at index %d", i)
 		}
 	}
-	docNums, bytesWritten, err := zapxtext.MergeToWriter(m.segments, m.drops, w, closeCh)
+	docNums, bytesWritten, err := zapxtext.MergeToWriterUsing(m.segments, m.drops, w,
+		closeCh, nil, m.options)
 	if err != nil {
 		return 0, err
 	}
 	m.documentMap = docNums
 	return int64(bytesWritten), nil
+}
+
+func MergeWithOptions(segments []blugeseg.Segment, drops []*roaring.Bitmap,
+	mergeBufferSize int, options map[string]interface{}) blugeseg.Merger {
+	zapSegments := make([]scorchseg.Segment, len(segments))
+	for i, segment := range segments {
+		if adapter, ok := segment.(*segmentAdapter); ok {
+			zapSegments[i] = adapter.inner
+		}
+	}
+	return &merger{
+		segments: zapSegments,
+		drops:    drops,
+		options:  options,
+	}
 }
 
 func (m *merger) DocumentNumbers() [][]uint64 {
