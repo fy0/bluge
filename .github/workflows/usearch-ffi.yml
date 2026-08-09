@@ -202,6 +202,26 @@ jobs:
           $env:CXX = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang++.exe"
           $env:AR = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "llvm-lib.exe"
           $env:CXXFLAGS = "-std=c++17"
+          if ("${{ matrix.goarch }}" -eq "arm64") {
+            # NumKong 7.8 auto-detects x86 kernels from _MSC_VER unless these
+            # macros are defined. Keep ARM/NEON probes enabled in the same DLL.
+            $disabledX86Kernels = @(
+              "NK_TARGET_HASWELL",
+              "NK_TARGET_SKYLAKE",
+              "NK_TARGET_ICELAKE",
+              "NK_TARGET_GENOA",
+              "NK_TARGET_SAPPHIRE",
+              "NK_TARGET_SAPPHIREAMX",
+              "NK_TARGET_GRANITEAMX",
+              "NK_TARGET_DIAMOND",
+              "NK_TARGET_TURIN",
+              "NK_TARGET_ALDER",
+              "NK_TARGET_SIERRA"
+            )
+            $kernelFlags = ($disabledX86Kernels | ForEach-Object { "-D${_}=0" }) -join " "
+            $env:CFLAGS = $kernelFlags
+            $env:CXXFLAGS = "$env:CXXFLAGS $kernelFlags"
+          }
           $linker = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "${{ matrix.linker }}"
           Set-Item -Path "Env:${{ matrix.linker_env }}" -Value $linker
           $cargoArguments = @("build", "--locked", "--release", "--target", "${{ matrix.target }}")
