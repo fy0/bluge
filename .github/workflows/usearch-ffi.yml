@@ -199,23 +199,61 @@ jobs:
           echo "DEVELOPER_DIR=$developer_directory" >> "$GITHUB_ENV"
           DEVELOPER_DIR="$developer_directory" xcrun clang --version
 
+      - name: Verify Windows compiler target
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang-cl.exe"
+          $objdump = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "llvm-objdump.exe"
+          $source = Join-Path $env:RUNNER_TEMP "vector-engine-target-probe.c"
+          $object = Join-Path $env:RUNNER_TEMP "vector-engine-target-probe.obj"
+          @'
+          #include <windows.h>
+          int vector_engine_target_probe(void) { return (int)sizeof(void *); }
+          '@ | Set-Content -Encoding ascii -LiteralPath $source
+
+          $compilerArguments = @(
+            "--target=${{ matrix.target }}",
+            "/nologo",
+            "/c",
+            $source,
+            "/Fo$object"
+          )
+          if ("${{ matrix.goarch }}" -eq "arm64") {
+            # clang-cl defines _M_ARM64 but not the SDK-facing _ARM64_ macro
+            # when invoked by cc-rs outside a Visual Studio CMake generator.
+            $compilerArguments = @("/D_ARM64_=1") + $compilerArguments
+          }
+          & $compiler @compilerArguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "LLVM target probe compilation failed"
+          }
+
+          $objectInfo = (& $objdump -f $object | Out-String)
+          $objectInfo.Trim()
+          $expectedFormat = if ("${{ matrix.goarch }}" -eq "arm64") { "coff-arm64" } else { "coff-x86-64" }
+          if ($objectInfo -notmatch [regex]::Escape($expectedFormat)) {
+            throw "Expected $expectedFormat object from LLVM target probe"
+          }
+
       - name: Build Windows library
         if: matrix.goos == 'windows'
         working-directory: usearch-ffi
         shell: pwsh
         env:
           CARGO_TERM_COLOR: never
+          CC_ENABLE_DEBUG_OUTPUT: "1"
           RUSTFLAGS: -C target-feature=-crt-static
         run: |
-          $env:CC = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang-cl.exe"
-          $env:CXX = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang++.exe"
-          $env:AR = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "llvm-lib.exe"
+          $cc = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang-cl.exe"
+          $cxx = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang++.exe"
+          $archiver = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "llvm-lib.exe"
           $clangTargetFlag = "--target=${{ matrix.target }}"
-          $env:CFLAGS = $clangTargetFlag
-          $env:CXXFLAGS = "$clangTargetFlag -std=c++17"
+          $cFlags = $clangTargetFlag
+          $cxxFlags = "$clangTargetFlag -std=c++17"
           if ("${{ matrix.goarch }}" -eq "arm64") {
-            # NumKong 7.8 auto-detects x86 kernels from _MSC_VER unless these
-            # macros are defined. Keep ARM/NEON probes enabled in the same DLL.
+            # NumKong 7.8 needs the SDK-facing architecture macro when cc-rs
+            # invokes clang-cl directly, and otherwise mistakes MSVC for x86.
             $disabledX86Kernels = @(
               "NK_TARGET_HASWELL",
               "NK_TARGET_SKYLAKE",
@@ -229,16 +267,35 @@ jobs:
               "NK_TARGET_ALDER",
               "NK_TARGET_SIERRA"
             )
-            $kernelFlags = ($disabledX86Kernels | ForEach-Object { "-D${_}=0" }) -join " "
-            $env:CFLAGS = "$env:CFLAGS $kernelFlags"
-            $env:CXXFLAGS = "$env:CXXFLAGS $kernelFlags"
+            $compatibilityFlags = @("-D_ARM64_=1") +
+              ($disabledX86Kernels | ForEach-Object { "-D${_}=0" })
+            $cFlags = "$cFlags $($compatibilityFlags -join ' ')"
+            $cxxFlags = "$cxxFlags $($compatibilityFlags -join ' ')"
           }
+
+          $targetEnvironmentSuffix = "${{ matrix.target }}".Replace("-", "_")
+          Set-Item -Path "Env:CC_$targetEnvironmentSuffix" -Value $cc
+          Set-Item -Path "Env:CXX_$targetEnvironmentSuffix" -Value $cxx
+          Set-Item -Path "Env:AR_$targetEnvironmentSuffix" -Value $archiver
+          Set-Item -Path "Env:CFLAGS_$targetEnvironmentSuffix" -Value $cFlags
+          Set-Item -Path "Env:CXXFLAGS_$targetEnvironmentSuffix" -Value $cxxFlags
           $linker = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "${{ matrix.linker }}"
           Set-Item -Path "Env:${{ matrix.linker_env }}" -Value $linker
           $cargoArguments = @("build", "--locked", "--release", "--target", "${{ matrix.target }}")
           & cargo +1.90.0 @cargoArguments 2>&1 | Tee-Object -Variable cargoLog
           $cargoExitCode = $LASTEXITCODE
           if ($cargoExitCode -ne 0) {
+            $commandDiagnostics = ($cargoLog |
+              Where-Object {
+                $_ -match "running:|CC_|CFLAGS|CXX_|CXXFLAGS|command did not execute|clang-cl|clang\+\+|numkong\.c"
+              } |
+              Select-Object -Last 80 |
+              Out-String).Trim()
+            if ($commandDiagnostics.Length -gt 3500) {
+              $commandDiagnostics = $commandDiagnostics.Substring($commandDiagnostics.Length - 3500)
+            }
+            $commandAnnotation = $commandDiagnostics.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Host "::error title=vector_engine compiler diagnostics::$commandAnnotation"
             $tail = ($cargoLog | Select-Object -Last 60 | Out-String).Trim()
             $annotation = $tail.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
             Write-Host "::error title=vector_engine build failed::$annotation"
