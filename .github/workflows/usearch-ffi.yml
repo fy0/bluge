@@ -1,0 +1,399 @@
+name: Vector Engine Native Libraries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - vector/native-ffi
+    paths:
+      - "usearch-ffi/**"
+      - "vector*.go"
+      - "reader.go"
+      - "writer*.go"
+      - "document.go"
+      - "index/**"
+      - "internal/blugeidx/**"
+      - "internal/zapxbluge/**"
+      - "internal/zapxtext/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/usearch-ffi.yml"
+  pull_request:
+    paths:
+      - "usearch-ffi/**"
+      - "vector*.go"
+      - "reader.go"
+      - "writer*.go"
+      - "document.go"
+      - "index/**"
+      - "internal/blugeidx/**"
+      - "internal/zapxbluge/**"
+      - "internal/zapxtext/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/usearch-ffi.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vector-engine-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-library:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }} (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            goos: windows
+            goarch: amd64
+            binary: vector_engine.dll
+            artifact: windows-amd64
+            numkong: true
+            linker: lld-link.exe
+            linker_env: CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
+            compiler: LLVM 20.1.8 + Rust 1.90.0 MSVC target
+            runtime: Microsoft VC 14.x dynamic
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            goos: windows
+            goarch: arm64
+            binary: vector_engine.dll
+            artifact: windows-arm64
+            numkong: true
+            linker: lld-link.exe
+            linker_env: CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER
+            compiler: LLVM 20.1.8 + Rust 1.90.0 MSVC target
+            runtime: Microsoft VC 14.x dynamic
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            goos: linux
+            goarch: amd64
+            binary: libvector_engine.so
+            artifact: linux-amd64
+            numkong: true
+            cc: gcc-13
+            cxx: g++-13
+            linker: gcc-13
+            linker_env: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+            compiler: GCC 13 + Rust 1.90.0 GNU target
+            runtime: glibc + libstdc++ dynamic
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            goos: linux
+            goarch: arm64
+            binary: libvector_engine.so
+            artifact: linux-arm64
+            numkong: true
+            cc: gcc-13
+            cxx: g++-13
+            linker: gcc-13
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            compiler: GCC 13 + Rust 1.90.0 GNU target
+            runtime: glibc + libstdc++ dynamic
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            goos: darwin
+            goarch: amd64
+            binary: libvector_engine.dylib
+            artifact: darwin-amd64
+            numkong: true
+            cc: clang
+            cxx: clang++
+            linker: clang
+            linker_env: CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER
+            compiler: Xcode 16.4 Apple Clang + Rust 1.90.0 Darwin target
+            runtime: macOS system libc++
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            goos: darwin
+            goarch: arm64
+            binary: libvector_engine.dylib
+            artifact: darwin-arm64
+            numkong: true
+            cc: clang
+            cxx: clang++
+            linker: clang
+            linker_env: CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER
+            compiler: Xcode 16.4 Apple Clang + Rust 1.90.0 Darwin target
+            runtime: macOS system libc++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Go
+        if: matrix.goos == 'windows'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.6"
+          cache: true
+
+      - name: Configure LLVM on Windows
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $standaloneClang = Join-Path "${env:ProgramFiles}\LLVM\bin" "clang-cl.exe"
+          $clangPath = $standaloneClang
+          if (Test-Path -LiteralPath $clangPath) {
+            $versionText = (& $clangPath --version | Out-String)
+          }
+          if (-not (Test-Path -LiteralPath $clangPath) -or $versionText -notmatch "clang version 20\.1\.8(?:\s|$)") {
+            choco install llvm --version=20.1.8 --allow-downgrade --no-progress --yes
+            $versionText = (& $clangPath --version | Out-String)
+          }
+          if ([string]::IsNullOrWhiteSpace($clangPath)) {
+            throw "clang-cl.exe was not found after LLVM setup"
+          }
+          if ($versionText -notmatch "clang version 20\.1\.8(?:\s|$)") {
+            throw "Expected LLVM Clang 20.1.8, got: $versionText"
+          }
+          $llvmDirectory = Split-Path -Parent $clangPath
+          foreach ($tool in @("clang-cl.exe", "clang++.exe", "lld-link.exe", "llvm-lib.exe", "llvm-objdump.exe")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $llvmDirectory $tool))) {
+              throw "LLVM tool was not found: $tool"
+            }
+          }
+          "VECTOR_ENGINE_LLVM_BIN=$llvmDirectory" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $llvmDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $versionText.Trim()
+
+      - name: Configure Rust target
+        working-directory: usearch-ffi
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --no-self-update
+          rustup target add --toolchain 1.90.0 "${{ matrix.target }}"
+          rustc +1.90.0 --version
+          cargo +1.90.0 --version
+
+      - name: Verify Linux compiler
+        if: matrix.goos == 'linux'
+        shell: bash
+        run: |
+          gcc-13 --version | head -n 1
+          g++-13 --version | head -n 1
+          test "$(gcc-13 -dumpversion)" = "13"
+          test "$(g++-13 -dumpversion)" = "13"
+
+      - name: Select Xcode
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          developer_directory="/Applications/Xcode_16.4.app/Contents/Developer"
+          test -d "$developer_directory"
+          echo "DEVELOPER_DIR=$developer_directory" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$developer_directory" xcrun clang --version
+
+      - name: Build Windows library
+        if: matrix.goos == 'windows'
+        working-directory: usearch-ffi
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=-crt-static
+        run: |
+          $env:CC = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang-cl.exe"
+          $env:CXX = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "clang++.exe"
+          $env:AR = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "llvm-lib.exe"
+          $env:CXXFLAGS = "-std=c++17"
+          $linker = Join-Path $env:VECTOR_ENGINE_LLVM_BIN "${{ matrix.linker }}"
+          Set-Item -Path "Env:${{ matrix.linker_env }}" -Value $linker
+          $cargoArguments = @("build", "--locked", "--release", "--target", "${{ matrix.target }}")
+          & cargo +1.90.0 @cargoArguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build Unix library
+        if: matrix.goos != 'windows'
+        working-directory: usearch-ffi
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cargo_target="${{ matrix.target }}"
+          export "${{ matrix.linker_env }}=${{ matrix.linker }}"
+          cargo +1.90.0 build --locked --release --target "$cargo_target"
+
+      - name: Probe Windows library
+        if: matrix.goos == 'windows'
+        working-directory: usearch-ffi
+        shell: pwsh
+        run: |
+          $library = Resolve-Path "target\${{ matrix.target }}\release\${{ matrix.binary }}"
+          $probe = .\probe.ps1 -LibraryPath $library.Path | ConvertFrom-Json
+          if ($probe.abi_version -ne 1) {
+            throw "Unexpected vector engine ABI version: $($probe.abi_version)"
+          }
+          if ("${{ matrix.numkong }}" -eq "true" -and $probe.compiled -eq "serial") {
+            throw "NumKong artifact did not compile SIMD kernels"
+          }
+          Write-Host "Compiled ISA: $($probe.compiled)"
+          Write-Host "Available ISA: $($probe.available)"
+
+      - name: Smoke test Windows integration with CGO disabled
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          $library = Resolve-Path "usearch-ffi\target\${{ matrix.target }}\release\${{ matrix.binary }}"
+          $env:BLUGE_USEARCH_LIBRARY_PATH = $library.Path
+          go test -run 'Test(Embedded)?USearchVectorBackendWindows$' -count=1 .
+
+      - name: Verify Windows runtime dependencies
+        if: matrix.goos == 'windows'
+        working-directory: usearch-ffi
+        shell: pwsh
+        run: |
+          $library = Resolve-Path "target\${{ matrix.target }}\release\${{ matrix.binary }}"
+          $objdump = Get-Command llvm-objdump.exe -ErrorAction Stop
+          $imports = & $objdump.Source -p $library.Path | Select-String "DLL Name"
+          $imports
+          $importText = $imports | Out-String
+          if ($importText -notmatch "(?i)VCRUNTIME140(?:_1)?\.dll") {
+            throw "MSVC artifact does not import the VC 14.x runtime"
+          }
+          if ($importText -match "(?i)libstdc\+\+|libgcc(?:_s)?(?:-\d+)?\.dll") {
+            throw "MSVC artifact unexpectedly imports a GNU runtime DLL"
+          }
+
+      - name: Probe Unix library
+        if: matrix.goos != 'windows'
+        id: unix-probe
+        working-directory: usearch-ffi
+        shell: bash
+        run: |
+          library="$(pwd)/target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          test -f "$library"
+          file "$library"
+          if [[ "${{ matrix.goos }}" == "linux" ]]; then
+            ldd "$library" | tee /tmp/vector-engine-dependencies.txt
+            if grep -q "not found" /tmp/vector-engine-dependencies.txt; then
+              exit 1
+            fi
+            nm -D --defined-only "$library" | grep "bluge_usearch_abi_version"
+          else
+            otool -L "$library"
+            nm -gU "$library" | grep "bluge_usearch_abi_version"
+          fi
+          probe_json="$(python3 - "$library" <<'PY'
+          import ctypes
+          import json
+          import sys
+
+          library = ctypes.CDLL(sys.argv[1])
+          library.bluge_usearch_abi_version.restype = ctypes.c_uint32
+          library.bluge_usearch_hardware_acceleration_compiled.restype = ctypes.c_char_p
+          library.bluge_usearch_hardware_acceleration_available.restype = ctypes.c_char_p
+          print(json.dumps({
+              "abi_version": library.bluge_usearch_abi_version(),
+              "compiled": library.bluge_usearch_hardware_acceleration_compiled().decode("ascii"),
+              "available": library.bluge_usearch_hardware_acceleration_available().decode("ascii"),
+          }))
+          PY
+          )"
+          echo "$probe_json"
+          if [[ "$(jq -r '.abi_version' <<<"$probe_json")" != "1" ]]; then
+            exit 1
+          fi
+          compiled="$(jq -r '.compiled' <<<"$probe_json")"
+          available="$(jq -r '.available' <<<"$probe_json")"
+          if [[ "${{ matrix.numkong }}" == "true" && "$compiled" == "serial" ]]; then
+            exit 1
+          fi
+          echo "compiled=$compiled" >> "$GITHUB_OUTPUT"
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+
+      - name: Package Windows artifact
+        if: matrix.goos == 'windows'
+        working-directory: usearch-ffi
+        shell: pwsh
+        run: |
+          $library = Resolve-Path "target\${{ matrix.target }}\release\${{ matrix.binary }}"
+          $metadata = cargo +1.90.0 metadata --locked --format-version 1 | ConvertFrom-Json
+          $usearchPackage = $metadata.packages |
+            Where-Object { $_.name -eq "usearch" } |
+            Select-Object -First 1
+          if ($null -eq $usearchPackage) {
+            throw "The resolved Cargo graph does not contain the usearch package"
+          }
+          $outputDirectory = Join-Path $PWD "artifact\${{ matrix.artifact }}"
+          New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+          Copy-Item $library (Join-Path $outputDirectory "${{ matrix.binary }}")
+          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $library
+          "$($hash.Hash.ToLowerInvariant())  ${{ matrix.binary }}" |
+            Set-Content -Encoding ascii -LiteralPath (Join-Path $outputDirectory "${{ matrix.binary }}.sha256")
+          $probe = .\probe.ps1 -LibraryPath $library.Path | ConvertFrom-Json
+          $hardwareCompiled = $probe.compiled
+          $hardwareAvailable = $probe.available
+          @{
+            abi_version = 1
+            binary = "${{ matrix.binary }}"
+            engine = "usearch"
+            usearch_version = $usearchPackage.version
+            target = "${{ matrix.target }}"
+            goos = "${{ matrix.goos }}"
+            goarch = "${{ matrix.goarch }}"
+            compiler = "${{ matrix.compiler }}"
+            runtime = "${{ matrix.runtime }}"
+            numkong = ("${{ matrix.numkong }}" -eq "true")
+            hardware_compiled = $hardwareCompiled
+            hardware_available = $hardwareAvailable
+          } | ConvertTo-Json | Set-Content -Encoding utf8 -LiteralPath (Join-Path $outputDirectory "manifest.json")
+
+      - name: Package Unix artifact
+        if: matrix.goos != 'windows'
+        working-directory: usearch-ffi
+        shell: bash
+        run: |
+          library="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          output_directory="artifact/${{ matrix.artifact }}"
+          mkdir -p "$output_directory"
+          cp "$library" "$output_directory/${{ matrix.binary }}"
+          hash="$(shasum -a 256 "$library" | awk '{print $1}')"
+          printf '%s  %s\n' "$hash" "${{ matrix.binary }}" > "$output_directory/${{ matrix.binary }}.sha256"
+          usearch_version="$(cargo +1.90.0 metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "usearch") | .version' | head -n 1)"
+          test -n "$usearch_version"
+          jq -n \
+            --arg binary "${{ matrix.binary }}" \
+            --arg engine "usearch" \
+            --arg usearch_version "$usearch_version" \
+            --arg target "${{ matrix.target }}" \
+            --arg goos "${{ matrix.goos }}" \
+            --arg goarch "${{ matrix.goarch }}" \
+            --arg compiler "${{ matrix.compiler }}" \
+            --arg runtime "${{ matrix.runtime }}" \
+            --arg hardware_compiled "${{ steps.unix-probe.outputs.compiled }}" \
+            --arg hardware_available "${{ steps.unix-probe.outputs.available }}" \
+            --argjson numkong "${{ matrix.numkong }}" \
+            '{
+              abi_version: 1,
+              binary: $binary,
+              engine: $engine,
+              usearch_version: $usearch_version,
+              target: $target,
+              goos: $goos,
+              goarch: $goarch,
+              compiler: $compiler,
+              runtime: $runtime,
+              numkong: $numkong,
+              hardware_compiled: $hardware_compiled,
+              hardware_available: $hardware_available
+            }' > "$output_directory/manifest.json"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vector-engine-${{ matrix.artifact }}
+          path: usearch-ffi/artifact/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 30
