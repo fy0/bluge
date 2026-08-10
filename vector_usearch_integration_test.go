@@ -49,6 +49,10 @@ func TestUSearchVectorBackend(t *testing.T) {
 		AddField(NewVectorFieldWithSimilarity("l2", []float32{0, 1}, VectorL2))); err != nil {
 		t.Fatal(err)
 	}
+	if err := writer.Insert(NewDocument("green").
+		AddField(NewTextField("color", "green"))); err != nil {
+		t.Fatal(err)
+	}
 
 	reader, err := writer.Reader()
 	if err != nil {
@@ -90,6 +94,14 @@ func TestUSearchVectorBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertVectorIDs(t, filtered, "blue")
+	withoutVector, err := reader.VectorSearch(context.Background(), "embedding", []float32{0.9, 0.1}, 2,
+		NewTermQuery("green").SetField("color"))
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	assertVectorIDs(t, withoutVector)
 	if err := reader.Close(); err != nil {
 		_ = writer.Close()
 		t.Fatal(err)
@@ -149,6 +161,11 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 		AddField(NewVectorField("embedding", []float32{0, 1}))); err != nil {
 		t.Fatal(err)
 	}
+	if err := writer.Insert(NewDocument("green").
+		AddField(NewTextField("color", "green note")).
+		AddField(NewKeywordField("kind", "metadata"))); err != nil {
+		t.Fatal(err)
+	}
 
 	reader, err := writer.Reader()
 	if err != nil {
@@ -170,6 +187,14 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertVectorIDs(t, filtered, "blue")
+	withoutVector, err := reader.VectorSearch(context.Background(), "embedding", []float32{0.9, 0.1}, 2,
+		NewTermQuery("metadata").SetField("kind"))
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	assertVectorIDs(t, withoutVector)
 	hybrid, err := reader.HybridSearch(context.Background(), NewHybridSearchRequest(
 		NewMatchQuery("apple").SetField("color"),
 		NewVectorSearchRequest("embedding", []float32{0, 1}),

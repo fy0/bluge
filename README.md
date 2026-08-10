@@ -171,8 +171,11 @@ hybridHits, err := reader.HybridSearch(ctx, hybrid)
 ```
 
 `HybridSearch` supports a Bluge filter, weighted score fusion, and reciprocal
-rank fusion. The USearch native library is built and published independently by
-the `usearch-ffi` GitHub Actions workflow; it is not compiled by `go build`.
+rank fusion. Bluge evaluates filters against the text snapshot and pushes the
+resulting native key set into USearch's filtered HNSW traversal without native
+callbacks into Go. The USearch native library is built and published
+independently by the `usearch-ffi` GitHub Actions workflow; it is not compiled
+by `go build`.
 
 ### BM25 Scoring Modes
 

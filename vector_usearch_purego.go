@@ -15,7 +15,7 @@ import (
 )
 
 const usearchLibraryPathEnv = "BLUGE_USEARCH_LIBRARY_PATH"
-const usearchABIVersion = 1
+const usearchABIVersion = 2
 
 var (
 	usearchLibraryMu sync.Mutex
@@ -46,6 +46,7 @@ type puregoUSearchAPI struct {
 	indexCompact                    func(unsafe.Pointer) int32
 	indexSave                       func(unsafe.Pointer, string) int32
 	indexSearch                     func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
+	indexSearchFiltered             func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr, unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
 	indexLastError                  func(unsafe.Pointer, unsafe.Pointer, uintptr) uintptr
 }
 
@@ -117,6 +118,7 @@ func (l *puregoUSearchAPI) register() (err error) {
 	register(&l.indexCompact, "bluge_usearch_index_compact")
 	register(&l.indexSave, "bluge_usearch_index_save")
 	register(&l.indexSearch, "bluge_usearch_index_search")
+	register(&l.indexSearchFiltered, "bluge_usearch_index_search_filtered")
 	register(&l.indexLastError, "bluge_usearch_index_last_error")
 
 	registerOptionalUSearchFunc(&l.hardwareAccelerationCompiledFn, l.handle,
@@ -174,6 +176,13 @@ func bytePointer(buffer []byte) unsafe.Pointer {
 		return nil
 	}
 	return unsafe.Pointer(&buffer[0])
+}
+
+func uint64Pointer(values []uint64) unsafe.Pointer {
+	if len(values) == 0 {
+		return nil
+	}
+	return unsafe.Pointer(&values[0])
 }
 
 func (l *puregoUSearchAPI) create(dimensions, metric, connectivity,
@@ -259,8 +268,21 @@ func (l *puregoUSearchAPI) search(handle unsafe.Pointer, query []float32, count 
 	keys []uint64, distances []float32) (int32, int) {
 	var resultCount uintptr
 	status := l.indexSearch(handle, vectorPointer(query), uintptr(len(query)), uintptr(count),
-		unsafe.Pointer(&keys[0]), unsafe.Pointer(&distances[0]), &resultCount)
+		uint64Pointer(keys), vectorPointer(distances), &resultCount)
 	runtime.KeepAlive(query)
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(distances)
+	return status, int(resultCount)
+}
+
+func (l *puregoUSearchAPI) searchFiltered(handle unsafe.Pointer, query []float32, count int,
+	allowedKeys, keys []uint64, distances []float32) (int32, int) {
+	var resultCount uintptr
+	status := l.indexSearchFiltered(handle, vectorPointer(query), uintptr(len(query)), uintptr(count),
+		uint64Pointer(allowedKeys), uintptr(len(allowedKeys)), uint64Pointer(keys),
+		vectorPointer(distances), &resultCount)
+	runtime.KeepAlive(query)
+	runtime.KeepAlive(allowedKeys)
 	runtime.KeepAlive(keys)
 	runtime.KeepAlive(distances)
 	return status, int(resultCount)

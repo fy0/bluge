@@ -19,7 +19,9 @@ the search algorithm. This adapter depends on that crate and adds the stable
 
 The Rust layer handles ownership and error conversion outside the search hot
 loop. Vector data and result buffers cross the boundary without per-element
-translation.
+translation. For filtered queries, Go passes candidate keys as one array and
+Rust builds the `HashSet` consumed by USearch's predicate; native code never
+calls back into Go.
 
 ## Loading from Go
 
@@ -76,8 +78,9 @@ packaged as separate downloads.
 ## Versioning
 
 `Cargo.lock` pins the exact USearch dependency compiled into an artifact. The
-C ABI has its own version returned by `bluge_usearch_abi_version`; Bluge rejects
-libraries with an incompatible ABI before opening an index.
+C ABI has its own version returned by `bluge_usearch_abi_version`; the current
+filtered-search contract is ABI 2, and Bluge rejects incompatible libraries
+before opening an index.
 
 The workflow currently uploads Actions artifacts. Attaching the same validated
 artifacts to GitHub Releases is intentionally a separate publishing step.

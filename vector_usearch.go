@@ -172,6 +172,8 @@ type usearchNativeAPI interface {
 	compact(handle unsafe.Pointer) int32
 	save(handle unsafe.Pointer, path string) int32
 	search(handle unsafe.Pointer, query []float32, count int, keys []uint64, distances []float32) (int32, int)
+	searchFiltered(handle unsafe.Pointer, query []float32, count int, allowedKeys, keys []uint64,
+		distances []float32) (int32, int)
 	errorMessage(handle unsafe.Pointer) string
 }
 
@@ -479,16 +481,29 @@ func (u *usearchVectorIndex) SearchCandidates(field string, query []float32, k i
 		return []VectorHit{}, nil
 	}
 
-	count := k
+	var allowedKeys []uint64
 	if allowed != nil {
-		count = u.api.size(handle)
+		allowedKeys = make([]uint64, 0, len(allowed))
+		for id := range allowed {
+			if key, exists := u.manifest.IDs[string(id)]; exists {
+				allowedKeys = append(allowedKeys, key)
+			}
+		}
+		if len(allowedKeys) == 0 {
+			return []VectorHit{}, nil
+		}
 	}
-	if count < 1 {
-		return []VectorHit{}, nil
-	}
+
+	count := k
 	keys := make([]uint64, count)
 	distances := make([]float32, count)
-	status, resultCount := u.api.search(handle, query, count, keys, distances)
+	var status int32
+	var resultCount int
+	if allowedKeys != nil {
+		status, resultCount = u.api.searchFiltered(handle, query, count, allowedKeys, keys, distances)
+	} else {
+		status, resultCount = u.api.search(handle, query, count, keys, distances)
+	}
 	if err := u.nativeStatus(handle, status, "search"); err != nil {
 		return nil, err
 	}

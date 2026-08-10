@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/fy0/bluge/index"
 
@@ -103,6 +104,13 @@ func (r *Reader) VectorSearch(ctx context.Context, field string, query []float32
 	if filter == nil {
 		return r.vector.Search(field, query, k, nil)
 	}
+	if candidateSearcher, ok := r.vector.(vectorDocumentCandidateSearcher); ok {
+		allowed, err := r.vectorFilterDocumentNumbers(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		return candidateSearcher.searchDocumentCandidates(field, query, k, allowed)
+	}
 	if candidateSearcher, ok := r.vector.(VectorCandidateSearcher); ok {
 		allowed, err := r.vectorFilterIDs(ctx, filter)
 		if err != nil {
@@ -118,6 +126,28 @@ func (r *Reader) VectorSearch(ctx context.Context, field string, query []float32
 func (r *Reader) SearchVector(ctx context.Context, field string, query []float32,
 	k int, filter Query) ([]VectorHit, error) {
 	return r.VectorSearch(ctx, field, query, k, filter)
+}
+
+func (r *Reader) vectorFilterDocumentNumbers(ctx context.Context, filter Query) ([]uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	iterator, err := r.Search(ctx, NewAllMatches(filter))
+	if err != nil {
+		return nil, err
+	}
+	allowed := make([]uint64, 0)
+	for {
+		match, err := iterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		if match == nil {
+			sort.Slice(allowed, func(i, j int) bool { return allowed[i] < allowed[j] })
+			return allowed, nil
+		}
+		allowed = append(allowed, match.Number)
+	}
 }
 
 func (r *Reader) vectorFilterIDs(ctx context.Context, filter Query) (map[Identifier]struct{}, error) {

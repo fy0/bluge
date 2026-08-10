@@ -65,6 +65,16 @@ int32_t bluge_usearch_index_search(
     uint64_t *out_keys,
     float *out_distances,
     size_t *out_count);
+int32_t bluge_usearch_index_search_filtered(
+    bluge_usearch_index *handle,
+    const float *query,
+    size_t query_len,
+    size_t count,
+    const uint64_t *allowed_keys,
+    size_t allowed_count,
+    uint64_t *out_keys,
+    float *out_distances,
+    size_t *out_count);
 
 /* Returns the required byte count. Copies at most capacity bytes. */
 size_t bluge_usearch_index_last_error(

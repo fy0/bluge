@@ -320,7 +320,7 @@ jobs:
         run: |
           $library = Resolve-Path "target\${{ matrix.target }}\release\${{ matrix.binary }}"
           $probe = .\probe.ps1 -LibraryPath $library.Path | ConvertFrom-Json
-          if ($probe.abi_version -ne 1) {
+          if ($probe.abi_version -ne 2) {
             throw "Unexpected vector engine ABI version: $($probe.abi_version)"
           }
           if ("${{ matrix.numkong }}" -eq "true" -and $probe.compiled -eq "serial") {
@@ -393,7 +393,7 @@ jobs:
           PY
           )"
           echo "$probe_json"
-          if [[ "$(jq -r '.abi_version' <<<"$probe_json")" != "1" ]]; then
+          if [[ "$(jq -r '.abi_version' <<<"$probe_json")" != "2" ]]; then
             exit 1
           fi
           compiled="$(jq -r '.compiled' <<<"$probe_json")"
@@ -439,7 +439,7 @@ jobs:
           $hardwareCompiled = $probe.compiled
           $hardwareAvailable = $probe.available
           @{
-            abi_version = 1
+            abi_version = 2
             binary = "${{ matrix.binary }}"
             engine = "usearch"
             usearch_version = $usearchPackage.version
@@ -479,7 +479,7 @@ jobs:
             --arg hardware_available "${{ steps.unix-probe.outputs.available }}" \
             --argjson numkong "${{ matrix.numkong }}" \
             '{
-              abi_version: 1,
+              abi_version: 2,
               binary: $binary,
               engine: $engine,
               usearch_version: $usearch_version,

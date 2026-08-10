@@ -239,11 +239,12 @@ type embeddedUSearchVectorIndex struct {
 }
 
 type embeddedUSearchSegment struct {
-	api     usearchNativeAPI
-	handle  unsafe.Pointer
-	payload zapxtext.VectorPayload
-	offset  uint64
-	deleted *roaring.Bitmap
+	api           usearchNativeAPI
+	handle        unsafe.Pointer
+	payload       zapxtext.VectorPayload
+	offset        uint64
+	documentCount uint64
+	deleted       *roaring.Bitmap
 }
 
 type snapshotSegmentAccess interface {
@@ -298,17 +299,24 @@ func (b *EmbeddedUSearchVectorBackend) OpenSnapshot(snapshot *index.Snapshot) (V
 				_ = rv.Close()
 				return nil, fmt.Errorf("unsupported embedded vector backend %q", payload.Backend)
 			}
+			if !sort.SliceIsSorted(payload.DocIDs, func(i, j int) bool {
+				return payload.DocIDs[i] < payload.DocIDs[j]
+			}) {
+				_ = rv.Close()
+				return nil, fmt.Errorf("embedded vector field %q has unsorted document mapping", field)
+			}
 			handle := api.openBuffer(payload.Data)
 			if handle == nil {
 				_ = rv.Close()
 				return nil, fmt.Errorf("open embedded vector field %q failed", field)
 			}
 			rv.fields[field] = append(rv.fields[field], embeddedUSearchSegment{
-				api:     api,
-				handle:  handle,
-				payload: payload,
-				offset:  offset,
-				deleted: access.Deleted(),
+				api:           api,
+				handle:        handle,
+				payload:       payload,
+				offset:        offset,
+				documentCount: inner.Count(),
+				deleted:       access.Deleted(),
 			})
 		}
 		offset += inner.Count()
@@ -337,21 +345,31 @@ func (e *embeddedUSearchVectorIndex) Search(field string, query []float32, k int
 	if filter != nil {
 		return nil, ErrVectorFilterUnsupported
 	}
-	return e.searchCandidates(field, query, k, nil)
+	return e.searchCandidates(field, query, k, nil, nil)
 }
 
 func (e *embeddedUSearchVectorIndex) SearchCandidates(field string, query []float32,
 	k int, allowed map[Identifier]struct{}) ([]VectorHit, error) {
-	return e.searchCandidates(field, query, k, allowed)
+	return e.searchCandidates(field, query, k, allowed, nil)
+}
+
+func (e *embeddedUSearchVectorIndex) searchDocumentCandidates(field string, query []float32,
+	k int, allowed []uint64) ([]VectorHit, error) {
+	return e.searchCandidates(field, query, k, nil, allowed)
 }
 
 func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []float32,
-	k int, allowed map[Identifier]struct{}) ([]VectorHit, error) {
+	k int, allowedIDs map[Identifier]struct{}, allowedDocs []uint64) ([]VectorHit, error) {
 	if k <= 0 {
 		return nil, ErrVectorInvalidK
 	}
 	if len(query) == 0 {
 		return nil, ErrVectorInvalidDimension
+	}
+	for _, value := range query {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return nil, ErrVectorInvalidValue
+		}
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -362,24 +380,44 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 	if len(segments) == 0 {
 		return nil, fmt.Errorf("%w: %q", ErrVectorFieldNotFound, field)
 	}
-	hits := make([]VectorHit, 0, len(segments)*k)
 	for _, segment := range segments {
 		if int(segment.payload.Dimensions) != len(query) {
 			return nil, fmt.Errorf("%w: field %q has %d dimensions, got %d",
 				ErrVectorInvalidDimension, field, segment.payload.Dimensions, len(query))
 		}
+	}
+	if (allowedIDs != nil && len(allowedIDs) == 0) ||
+		(allowedDocs != nil && len(allowedDocs) == 0) {
+		return []VectorHit{}, nil
+	}
+	hits := make([]VectorHit, 0, len(segments)*k)
+	for _, segment := range segments {
 		count := k
-		if allowed != nil || (segment.deleted != nil && !segment.deleted.IsEmpty()) {
+		if allowedIDs != nil {
 			count = len(segment.payload.DocIDs)
 		}
 		if count == 0 {
 			continue
 		}
+		allowedKeys, filtered := segment.allowedKeys(allowedDocs)
+		if filtered && len(allowedKeys) == 0 {
+			continue
+		}
 		keys := make([]uint64, count)
 		distances := make([]float32, count)
-		status, resultCount := segment.api.search(segment.handle, query, count, keys, distances)
+		var status int32
+		var resultCount int
+		if filtered {
+			status, resultCount = segment.api.searchFiltered(segment.handle, query, count,
+				allowedKeys, keys, distances)
+		} else {
+			status, resultCount = segment.api.search(segment.handle, query, count, keys, distances)
+		}
 		if err := usearchNativeStatus(segment.api, segment.handle, status, "search"); err != nil {
 			return nil, err
+		}
+		if resultCount < 0 || resultCount > len(keys) || resultCount > len(distances) {
+			return nil, fmt.Errorf("embedded usearch returned invalid result count %d", resultCount)
 		}
 		for i := 0; i < resultCount; i++ {
 			if keys[i] == 0 || keys[i]-1 >= uint64(len(segment.payload.DocIDs)) {
@@ -394,8 +432,8 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 			if err != nil {
 				return nil, err
 			}
-			if allowed != nil {
-				if _, ok := allowed[id]; !ok {
+			if allowedIDs != nil {
+				if _, ok := allowedIDs[id]; !ok {
 					continue
 				}
 			}
@@ -415,6 +453,44 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 		hits = hits[:k]
 	}
 	return hits, nil
+}
+
+func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, bool) {
+	if allowedDocs == nil {
+		if s.deleted == nil || s.deleted.IsEmpty() {
+			return nil, false
+		}
+		keys := make([]uint64, 0, len(s.payload.DocIDs))
+		for key, localDoc := range s.payload.DocIDs {
+			if !s.deleted.Contains(localDoc) {
+				keys = append(keys, uint64(key+1))
+			}
+		}
+		return keys, true
+	}
+
+	first := sort.Search(len(allowedDocs), func(i int) bool {
+		return allowedDocs[i] >= s.offset
+	})
+	limit := s.offset + s.documentCount
+	last := sort.Search(len(allowedDocs), func(i int) bool {
+		return allowedDocs[i] >= limit
+	})
+	keys := make([]uint64, 0, last-first)
+	for _, globalDoc := range allowedDocs[first:last] {
+		localDoc := uint32(globalDoc - s.offset)
+		if s.deleted != nil && s.deleted.Contains(localDoc) {
+			continue
+		}
+		key := sort.Search(len(s.payload.DocIDs), func(i int) bool {
+			return s.payload.DocIDs[i] >= localDoc
+		})
+		for key < len(s.payload.DocIDs) && s.payload.DocIDs[key] == localDoc {
+			keys = append(keys, uint64(key+1))
+			key++
+		}
+	}
+	return keys, true
 }
 
 func embeddedDocumentID(snapshot *index.Snapshot, globalDoc uint64) (Identifier, error) {
@@ -437,3 +513,4 @@ func embeddedDocumentID(snapshot *index.Snapshot, globalDoc uint64) (Identifier,
 var _ VectorBackend = (*EmbeddedUSearchVectorBackend)(nil)
 var _ zapxtext.VectorSegmentBackend = (*EmbeddedUSearchVectorBackend)(nil)
 var _ VectorCandidateSearcher = (*embeddedUSearchVectorIndex)(nil)
+var _ vectorDocumentCandidateSearcher = (*embeddedUSearchVectorIndex)(nil)

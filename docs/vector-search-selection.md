@@ -142,9 +142,11 @@ backend 名称、维度、similarity、segment-local docID 映射和 USearch
 旧 payload 中的向量并重建新 payload，因此写入阶段是 segment 追加，重建成本
 集中到 merge。
 
-过滤由 Bluge 先执行，再把允许的 `_id` 集合传给 backend。这保证了过滤语义
-不需要复制到 FAISS/Rust/WASM backend，但过滤量很大时会增加一次文本搜索和
-ID 集合分配。
+过滤仍由 Bluge 先执行，因此 native backend 不需要复制 Bluge Query 语义。
+sidecar backend 把允许的 `_id` 映射成 USearch key；Embedded USearch 直接把
+命中的全局文档号二分映射成 segment-local key，并同时排除删除位图。key 数组
+一次性传入 Rust，由 Rust `HashSet` 驱动 USearch filtered search；native 不会
+回调 Go，Go 也不再为过滤查询取回整个 field 的距离结果。
 
 ## 已知边界
 
@@ -162,9 +164,9 @@ ID 集合分配。
   旁和操作系统动态库搜索路径。部署契约是放在主程序旁，不是当前 work dir。
 - 已有嵌入式 index 在读取时找不到 native library 会降级为 text-only reader；
   这不会静默接受新的 vector 写入，写入仍要求 native artifact。
-- native search 的 Bluge filter 路径会请求该 field 的全部候选，再在 Go 中
-  应用允许的 ID 集合。它保证过滤语义，但大过滤集合可能增加查询内存和延迟；
-  后续可以将允许集合下沉为 USearch predicate。
+- filtered search 属于 ANN 图内过滤；过滤极为稀疏时，召回率和延迟仍受
+  `ExpansionSearch` 影响，需要按知识库数据分布测试并调参。文本过滤查询及
+  允许 key 集合本身也仍有成本。
 - zapx 原先预留的 `SectionFaissVectorIndex` 槽位现命名为通用的
   `SectionVectorIndex`，并保留旧名称作为兼容别名。payload 带 backend 标识，
   当前由 Embedded USearch 使用，不把 segment 格式绑定到 FAISS 或 USearch。

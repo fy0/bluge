@@ -94,6 +94,15 @@ type VectorCandidateSearcher interface {
 		allowed map[Identifier]struct{}) ([]VectorHit, error)
 }
 
+// vectorDocumentCandidateSearcher is reserved for snapshot-integrated
+// backends whose native keys can be derived directly from global document
+// numbers. Reader uses it to avoid materializing stored identifiers solely for
+// filter pushdown.
+type vectorDocumentCandidateSearcher interface {
+	searchDocumentCandidates(field string, query []float32, k int,
+		allowed []uint64) ([]VectorHit, error)
+}
+
 type VectorBackend interface {
 	Name() string
 	Open(config Config) (VectorIndex, error)

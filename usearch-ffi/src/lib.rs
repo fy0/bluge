@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -10,7 +11,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 const METRIC_L2: u32 = 1;
 const METRIC_DOT: u32 = 2;
 const METRIC_COSINE: u32 = 3;
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 
 static HARDWARE_COMPILED: OnceLock<CString> = OnceLock::new();
 static HARDWARE_AVAILABLE: OnceLock<CString> = OnceLock::new();
@@ -413,6 +414,81 @@ pub unsafe extern "C" fn bluge_usearch_index_search(
         Ok(Ok(())) => 0,
         Ok(Err(error)) => handle.set_error(error),
         Err(_) => handle.set_error("native index operation panicked"),
+    }
+}
+
+/// Searches while admitting only keys present in `allowed_keys`.
+///
+/// # Safety
+///
+/// `handle`, `query`, `allowed_keys`, and the output buffers must remain valid
+/// for the duration of this call. Output buffers must have room for `count`
+/// entries, and `allowed_keys` must have room for `allowed_count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bluge_usearch_index_search_filtered(
+    handle: *mut IndexHandle,
+    query: *const f32,
+    query_len: usize,
+    count: usize,
+    allowed_keys: *const u64,
+    allowed_count: usize,
+    out_keys: *mut u64,
+    out_distances: *mut f32,
+    out_count: *mut usize,
+) -> i32 {
+    let handle = match handle_ref(handle) {
+        Ok(handle) => handle,
+        Err(_) => return -1,
+    };
+    if out_count.is_null() {
+        return handle.set_error("output count is null");
+    }
+    unsafe { *out_count = 0 };
+    handle.clear_error();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let query = vector(query, query_len, handle.index.dimensions())?;
+        if count == 0 {
+            return Err("search count must be greater than zero".to_owned());
+        }
+        if allowed_count == 0 {
+            return Ok(());
+        }
+        if allowed_keys.is_null() {
+            return Err("allowed key buffer is null".to_owned());
+        }
+        let allowed_keys = unsafe { slice::from_raw_parts(allowed_keys, allowed_count) };
+        let allowed_keys = allowed_keys.iter().copied().collect::<HashSet<_>>();
+        let matches = handle
+            .index
+            .filtered_search(query, count, |key| allowed_keys.contains(&key))
+            .map_err(|error| error.to_string())?;
+        if matches.keys.len() != matches.distances.len() {
+            return Err("native filtered search returned mismatched result buffers".to_owned());
+        }
+        if matches.keys.len() > count {
+            return Err("native filtered search returned too many results".to_owned());
+        }
+        if !matches.keys.is_empty() && (out_keys.is_null() || out_distances.is_null()) {
+            return Err("filtered search output buffer is null".to_owned());
+        }
+        if !matches.keys.is_empty() {
+            unsafe {
+                ptr::copy_nonoverlapping(matches.keys.as_ptr(), out_keys, matches.keys.len());
+                ptr::copy_nonoverlapping(
+                    matches.distances.as_ptr(),
+                    out_distances,
+                    matches.distances.len(),
+                );
+                *out_count = matches.keys.len();
+            }
+        }
+        Ok(())
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => handle.set_error(error),
+        Err(_) => handle.set_error("native filtered search operation panicked"),
     }
 }
 
