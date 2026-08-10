@@ -49,7 +49,8 @@ func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
 				hasVector = true
 			}
 			if hasDocVectors && !hasID {
-				return nil, false, fmt.Errorf("vector document is missing %q", _idField)
+				iterationErr = fmt.Errorf("vector document is missing %q", _idField)
+				return false
 			}
 
 			if operation.Kind == index.BatchOperationUpdate && operation.ID.Field() == _idField {
