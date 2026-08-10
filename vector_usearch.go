@@ -113,7 +113,7 @@ func (b *USearchVectorBackend) WithLibraryPath(libraryPath string) *USearchVecto
 	return &copy
 }
 
-func (b *USearchVectorBackend) Name() string { return "usearch" }
+func (b *USearchVectorBackend) Name() string { return vectorBackendUSearchName }
 
 func (b *USearchVectorBackend) Open(_ Config) (VectorIndex, error) {
 	if b == nil || b.path == "" {
@@ -159,6 +159,7 @@ type usearchHardwareAPI interface {
 const (
 	usearchBatchTargetFloats = 1 << 20
 	usearchBatchMaxRows      = 4096
+	usearchNativeFailed      = "native operation failed"
 )
 
 type usearchBatchAdder struct {
@@ -219,7 +220,7 @@ func (b *usearchBatchAdder) Flush() error {
 }
 
 type usearchNativeAPI interface {
-	create(dimensions, metric, connectivity, expansionAdd, expansionSearch uintptr) unsafe.Pointer
+	create(dimensions uintptr, metric uint32, connectivity, expansionAdd, expansionSearch uintptr) unsafe.Pointer
 	open(path string) unsafe.Pointer
 	openBuffer(data []byte) unsafe.Pointer
 	destroy(handle unsafe.Pointer)
@@ -306,7 +307,7 @@ func openUSearchVectorIndex(api usearchNativeAPI, root string,
 	return index, nil
 }
 
-func (u *usearchVectorIndex) Name() string { return "usearch" }
+func (u *usearchVectorIndex) Name() string { return vectorBackendUSearchName }
 
 func (u *usearchVectorIndex) Close() error {
 	u.mu.Lock()
@@ -537,17 +538,17 @@ func usearchNativeStatus(api usearchNativeAPI, handle unsafe.Pointer,
 	if status == 0 {
 		return nil
 	}
-	message := "native operation failed"
+	message := usearchNativeFailed
 	if api != nil {
 		message = api.errorMessage(handle)
 		if message == "" {
-			message = "native operation failed"
+			message = usearchNativeFailed
 		}
 	}
 	return fmt.Errorf("usearch %s: %s", operation, message)
 }
 
-func usearchMetric(similarity VectorSimilarity) uintptr {
+func usearchMetric(similarity VectorSimilarity) uint32 {
 	switch similarity {
 	case VectorL2:
 		return 1

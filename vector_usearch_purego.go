@@ -47,9 +47,11 @@ type puregoUSearchAPI struct {
 	indexRemoveBatch                func(unsafe.Pointer, unsafe.Pointer, uintptr) int32
 	indexCompact                    func(unsafe.Pointer) int32
 	indexSave                       func(unsafe.Pointer, string) int32
-	indexSearch                     func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
-	indexSearchFiltered             func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr, unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
-	indexLastError                  func(unsafe.Pointer, unsafe.Pointer, uintptr) uintptr
+	indexSearch                     func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr,
+		unsafe.Pointer, unsafe.Pointer, *uintptr) int32
+	indexSearchFiltered func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr,
+		unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
+	indexLastError func(unsafe.Pointer, unsafe.Pointer, uintptr) uintptr
 }
 
 func loadUSearchAPI(path string) (usearchNativeAPI, error) {
@@ -132,14 +134,11 @@ func (l *puregoUSearchAPI) register() (err error) {
 	return nil
 }
 
-func registerOptionalUSearchFunc(function any, handle uintptr, name string) (registered bool) {
+func registerOptionalUSearchFunc(function any, handle uintptr, name string) {
 	defer func() {
-		if recover() != nil {
-			registered = false
-		}
+		_ = recover()
 	}()
 	purego.RegisterLibFunc(function, handle, name)
-	return true
 }
 
 func usearchLibraryCandidates(explicit string) []string {
@@ -189,9 +188,9 @@ func uint64Pointer(values []uint64) unsafe.Pointer {
 	return unsafe.Pointer(&values[0])
 }
 
-func (l *puregoUSearchAPI) create(dimensions, metric, connectivity,
+func (l *puregoUSearchAPI) create(dimensions uintptr, metric uint32, connectivity,
 	expansionAdd, expansionSearch uintptr) unsafe.Pointer {
-	return l.indexCreate(dimensions, uint32(metric), connectivity, expansionAdd, expansionSearch)
+	return l.indexCreate(dimensions, metric, connectivity, expansionAdd, expansionSearch)
 }
 
 func (l *puregoUSearchAPI) open(path string) unsafe.Pointer {

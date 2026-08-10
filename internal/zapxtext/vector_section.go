@@ -8,10 +8,14 @@ import (
 	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/fy0/bluge/internal/blugeidx"
 )
 
-const vectorPayloadVersion uint64 = 1
+const (
+	vectorPayloadVersion uint64 = 1
+	vectorFieldsMapKey          = "fieldsMap"
+)
 
 var ErrVectorPayloadNotFound = errors.New("vector payload was not found")
 
@@ -122,7 +126,7 @@ func (v *vectorIndexSection) InitOpaque(args map[string]interface{}) resetable {
 	config, _ := args["config"].(map[string]interface{})
 	return &vectorIndexOpaque{
 		backend:   vectorSegmentBackend(config),
-		fieldsMap: copyVectorFieldsMap(args["fieldsMap"]),
+		fieldsMap: copyVectorFieldsMap(args[vectorFieldsMapKey]),
 		records:   make(map[string][]VectorRecord),
 		addrs:     make(map[int]int),
 	}
@@ -149,7 +153,7 @@ func (v *vectorIndexOpaque) Set(key string, value interface{}) {
 	case "config":
 		config, _ := value.(map[string]interface{})
 		v.backend = vectorSegmentBackend(config)
-	case "fieldsMap":
+	case vectorFieldsMapKey:
 		v.fieldsMap = copyVectorFieldsMap(value)
 	}
 }
@@ -221,7 +225,18 @@ func (sb *SegmentBase) VectorPayload(field string) (VectorPayload, error) {
 	if addr == 0 {
 		return VectorPayload{}, ErrVectorPayloadNotFound
 	}
-	return readVectorPayload(sb, int(addr))
+	pos, err := vectorUint64ToInt(addr, "offset")
+	if err != nil {
+		return VectorPayload{}, err
+	}
+	return readVectorPayload(sb, pos)
+}
+
+func vectorUint64ToInt(value uint64, label string) (int, error) {
+	if value > uint64(^uint(0)>>1) {
+		return 0, fmt.Errorf("vector payload %s %d exceeds platform limits", label, value)
+	}
+	return int(value), nil
 }
 
 func readVectorPayload(sb *SegmentBase, pos int) (VectorPayload, error) {
@@ -241,14 +256,18 @@ func readVectorPayload(sb *SegmentBase, pos int) (VectorPayload, error) {
 		if err != nil {
 			return nil, err
 		}
-		if length > uint64(len(sb.mem)-pos) {
-			return nil, fmt.Errorf("vector payload length %d exceeds segment", length)
-		}
-		data, err := sb.fileReader.process(sb.mem[pos : pos+int(length)])
+		size, err := vectorUint64ToInt(length, "length")
 		if err != nil {
 			return nil, err
 		}
-		pos += int(length)
+		if size > len(sb.mem)-pos {
+			return nil, fmt.Errorf("vector payload length %d exceeds segment", length)
+		}
+		data, err := sb.fileReader.process(sb.mem[pos : pos+size])
+		if err != nil {
+			return nil, err
+		}
+		pos += size
 		return data, nil
 	}
 
@@ -273,6 +292,9 @@ func readVectorPayload(sb *SegmentBase, pos int) (VectorPayload, error) {
 	if err != nil {
 		return VectorPayload{}, err
 	}
+	if dimensions == 0 || dimensions > math.MaxUint32 {
+		return VectorPayload{}, fmt.Errorf("vector payload has invalid dimensions %d", dimensions)
+	}
 	backend, err := readBytes()
 	if err != nil {
 		return VectorPayload{}, err
@@ -290,10 +312,14 @@ func readVectorPayload(sb *SegmentBase, pos int) (VectorPayload, error) {
 		return VectorPayload{}, err
 	}
 
-	if count > uint64(len(sb.mem)) {
+	documentCount, err := vectorUint64ToInt(count, "document count")
+	if err != nil {
+		return VectorPayload{}, err
+	}
+	if documentCount > len(sb.mem) {
 		return VectorPayload{}, fmt.Errorf("vector payload has unreasonable document count %d", count)
 	}
-	docIDs := make([]uint32, 0, int(count))
+	docIDs := make([]uint32, 0, documentCount)
 	docPos := 0
 	for docPos < len(docBytes) && uint64(len(docIDs)) < count {
 		docID, n := binary.Uvarint(docBytes[docPos:])

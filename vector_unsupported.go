@@ -11,7 +11,7 @@ package bluge
 type unsupportedVectorBackend struct{}
 
 func (unsupportedVectorBackend) Name() string {
-	return "unsupported"
+	return vectorBackendUnsupportedName
 }
 
 func (unsupportedVectorBackend) Open(config Config) (VectorIndex, error) {

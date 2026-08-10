@@ -30,7 +30,7 @@ type fakeUSearchAPI struct {
 	singleRemoveCalls int
 }
 
-func (f *fakeUSearchAPI) create(dimensions, _, _, _, _ uintptr) unsafe.Pointer {
+func (f *fakeUSearchAPI) create(dimensions uintptr, _ uint32, _, _, _ uintptr) unsafe.Pointer {
 	handle := &fakeUSearchHandle{
 		dimensions: int(dimensions),
 		vectors:    make(map[uint64][]float32),

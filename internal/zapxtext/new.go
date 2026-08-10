@@ -310,7 +310,8 @@ func (s *interim) processDocument(docNum uint32,
 
 	if vectorSegmentBackend(s.config) != nil {
 		result.VisitVectors(func(vector *blugeidx.Vector) {
-			fieldID := uint16(s.getOrDefineField(vector.Name()))
+			// Segment field IDs are defined by the existing uint16 field table.
+			fieldID := uint16(s.getOrDefineField(vector.Name())) //nolint:gosec
 			for _, section := range segmentSections {
 				if vectorProcessor, ok := section.(interface {
 					ProcessVector(map[int]resetable, uint32, *blugeidx.Vector, uint16)

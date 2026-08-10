@@ -26,6 +26,24 @@ const (
 	maxVectorBlobSize = 64 << 20
 )
 
+func checkedVectorUint32(value int, label string) (uint32, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("%s cannot be negative: %d", label, value)
+	}
+	unsigned := uint64(value)
+	if unsigned > math.MaxUint32 {
+		return 0, fmt.Errorf("%s exceeds uint32: %d", label, value)
+	}
+	return uint32(unsigned), nil
+}
+
+func checkedVectorUint32ToInt(value uint32, label string) (int, error) {
+	if uint64(value) > uint64(^uint(0)>>1) {
+		return 0, fmt.Errorf("%s exceeds platform limits: %d", label, value)
+	}
+	return int(value), nil
+}
+
 // FlatVectorBackend is the cgo-free exact-search backend. A non-empty path
 // persists the vector sidecar; an empty path keeps the index in memory.
 //
@@ -384,7 +402,11 @@ func encodeFlatVectorData(vectors map[string]map[Identifier]flatVectorRecord,
 	if err := binary.Write(&buf, binary.LittleEndian, flatVectorVersion); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(&buf, binary.LittleEndian, uint32(len(fields))); err != nil {
+	fieldCount, err := checkedVectorUint32(len(fields), "vector field count")
+	if err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&buf, binary.LittleEndian, fieldCount); err != nil {
 		return nil, err
 	}
 	for _, field := range fields {
@@ -392,7 +414,11 @@ func encodeFlatVectorData(vectors map[string]map[Identifier]flatVectorRecord,
 		if err := writeVectorString(&buf, field); err != nil {
 			return nil, err
 		}
-		if err := binary.Write(&buf, binary.LittleEndian, uint32(spec.Dims)); err != nil {
+		dimensions, err := checkedVectorUint32(spec.Dims, "vector dimensions")
+		if err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&buf, binary.LittleEndian, dimensions); err != nil {
 			return nil, err
 		}
 		if err := writeVectorString(&buf, string(spec.Similarity)); err != nil {
@@ -422,13 +448,14 @@ func encodeFlatVectorData(vectors map[string]map[Identifier]flatVectorRecord,
 }
 
 func writeVectorString(w io.Writer, value string) error {
-	if uint64(len(value)) > uint64(^uint32(0)) {
-		return fmt.Errorf("vector string is too large")
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(value))); err != nil {
+	length, err := checkedVectorUint32(len(value), "vector string length")
+	if err != nil {
 		return err
 	}
-	_, err := io.WriteString(w, value)
+	if err := binary.Write(w, binary.LittleEndian, length); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, value)
 	return err
 }
 
@@ -451,7 +478,11 @@ func (f *flatVectorIndex) decode(data []byte) error {
 	if err := binary.Read(reader, binary.LittleEndian, &fieldCount); err != nil {
 		return err
 	}
-	if fieldCount > uint32(len(data)) {
+	fieldCountValue, err := checkedVectorUint32ToInt(fieldCount, "vector field count")
+	if err != nil {
+		return err
+	}
+	if fieldCountValue > len(data) {
 		return fmt.Errorf("invalid field count %d", fieldCount)
 	}
 	for i := uint32(0); i < fieldCount; i++ {
@@ -480,7 +511,8 @@ func (f *flatVectorIndex) decode(data []byte) error {
 			return err
 		}
 		minRecordSize := uint64(4) + uint64(dims)*4
-		if minRecordSize == 0 || recordCount > uint64(reader.Len())/minRecordSize {
+		remaining := uint64(reader.Len()) //nolint:gosec // bytes.Reader.Len is always non-negative.
+		if minRecordSize == 0 || recordCount > remaining/minRecordSize {
 			return fmt.Errorf("invalid record count for field %q", field)
 		}
 		records := make(map[Identifier]flatVectorRecord, int(recordCount))
@@ -523,10 +555,14 @@ func readVectorString(reader *bytes.Reader) (string, error) {
 	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
 		return "", err
 	}
-	if length > maxVectorBlobSize || uint64(length) > uint64(reader.Len()) {
+	if length > maxVectorBlobSize {
 		return "", fmt.Errorf("invalid vector string length %d", length)
 	}
-	value := make([]byte, length)
+	size := int(length)
+	if size > reader.Len() {
+		return "", fmt.Errorf("invalid vector string length %d", length)
+	}
+	value := make([]byte, size)
 	if _, err := io.ReadFull(reader, value); err != nil {
 		return "", err
 	}

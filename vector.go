@@ -35,6 +35,11 @@ const (
 	VectorCosine VectorSimilarity = "cosine"
 )
 
+const (
+	vectorBackendUnsupportedName = "unsupported"
+	vectorBackendUSearchName     = "usearch"
+)
+
 type VectorFieldSpec struct {
 	Name       string
 	Dims       int
@@ -129,7 +134,7 @@ func usesSegmentVectorBackend(config Config) bool {
 }
 
 func openVectorIndex(config Config) (VectorIndex, error) {
-	if config.VectorBackend == nil || config.VectorBackend.Name() == "unsupported" ||
+	if config.VectorBackend == nil || config.VectorBackend.Name() == vectorBackendUnsupportedName ||
 		usesSegmentVectorBackend(config) {
 		return nil, nil
 	}

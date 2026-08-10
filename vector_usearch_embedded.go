@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/fy0/bluge/index"
 	zapxtext "github.com/fy0/bluge/internal/zapxtext"
 	segment "github.com/fy0/bluge/segment"
@@ -28,7 +29,7 @@ func NewEmbeddedUSearchVectorBackend() *EmbeddedUSearchVectorBackend {
 	return &EmbeddedUSearchVectorBackend{options: defaultUSearchVectorOptions()}
 }
 
-func (b *EmbeddedUSearchVectorBackend) Name() string { return "usearch" }
+func (b *EmbeddedUSearchVectorBackend) Name() string { return vectorBackendUSearchName }
 
 func (b *EmbeddedUSearchVectorBackend) SegmentVectorBackend() {}
 
@@ -77,6 +78,10 @@ func (b *EmbeddedUSearchVectorBackend) BuildVectorPayload(field string,
 	if dimensions == 0 {
 		return zapxtext.VectorPayload{}, ErrVectorInvalidDimension
 	}
+	encodedDimensions, err := checkedVectorUint32(dimensions, "embedded vector dimensions")
+	if err != nil {
+		return zapxtext.VectorPayload{}, err
+	}
 	for _, record := range records {
 		if len(record.Values) != dimensions || VectorSimilarity(record.Similarity) != similarity {
 			return zapxtext.VectorPayload{}, fmt.Errorf("field %q has inconsistent vector shape", field)
@@ -115,7 +120,7 @@ func (b *EmbeddedUSearchVectorBackend) BuildVectorPayload(field string,
 	}
 	return zapxtext.VectorPayload{
 		Backend:    b.Name(),
-		Dimensions: uint32(dimensions),
+		Dimensions: encodedDimensions,
 		Similarity: string(similarity),
 		DocIDs:     docIDs,
 		Data:       data,
@@ -181,6 +186,11 @@ func (b *EmbeddedUSearchVectorBackend) MergeVectorPayload(field string,
 			if newDocID == math.MaxUint64 {
 				continue
 			}
+			if newDocID > math.MaxUint32 {
+				api.destroy(source)
+				return zapxtext.VectorPayload{}, fmt.Errorf(
+					"field %q has out-of-range merged document number %d", field, newDocID)
+			}
 			vector := make([]float32, dimensions)
 			if status := api.get(source, uint64(sourceKey+1), vector); status != 0 {
 				nativeErr := usearchNativeStatus(api, source, status, "get merge")
@@ -205,7 +215,7 @@ func (b *EmbeddedUSearchVectorBackend) MergeVectorPayload(field string,
 	}
 	return zapxtext.VectorPayload{
 		Backend:    b.Name(),
-		Dimensions: uint32(dimensions),
+		Dimensions: first.Dimensions,
 		Similarity: string(similarity),
 		DocIDs:     docIDs,
 		Data:       data,
@@ -471,7 +481,11 @@ func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, boo
 	})
 	keys := make([]uint64, 0, last-first)
 	for _, globalDoc := range allowedDocs[first:last] {
-		localDoc := uint32(globalDoc - s.offset)
+		localOffset := globalDoc - s.offset
+		if localOffset > math.MaxUint32 {
+			continue
+		}
+		localDoc := uint32(localOffset)
 		if s.deleted != nil && s.deleted.Contains(localDoc) {
 			continue
 		}
@@ -479,7 +493,8 @@ func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, boo
 			return s.payload.DocIDs[i] >= localDoc
 		})
 		for key < len(s.payload.DocIDs) && s.payload.DocIDs[key] == localDoc {
-			keys = append(keys, uint64(key+1))
+			// sort.Search returns a non-negative slice index.
+			keys = append(keys, uint64(key+1)) //nolint:gosec
 			key++
 		}
 	}
