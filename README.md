@@ -140,9 +140,10 @@ application supplies a vector backend.
 
 The repository also includes opt-in vector backends. `FlatVectorBackend` is a
 cgo-free exact baseline with sidecar persistence, updates, deletes, and Bluge
-query filters. `USearchVectorBackend` is the first ANN integration: on Windows,
-it loads a separately-built USearch 2.26 native DLL through `purego`, so the Go
-package remains buildable and runnable with `CGO_ENABLED=0`. See the [vector
+query filters. `USearchVectorBackend` is the first ANN integration. On 64-bit
+Windows, Linux, and macOS it loads a separately-built USearch 2.26 native
+library through `purego`, so the Go package remains buildable and runnable with
+`CGO_ENABLED=0`. See the [vector
 search selection and implementation notes](docs/vector-search-selection.md) and
 the [USearch native adapter instructions](usearch-ffi/README.md) before
 deploying the ANN backend.
@@ -151,10 +152,10 @@ deploying the ANN backend.
 read/write knowledge-base path. It stores one serialized USearch payload and
 its local-doc mapping in the zapx vector section of each segment; it does not
 create a per-field `.usearch` sidecar. Segment merges rebuild that payload
-after applying deletes and doc-number remapping. If the DLL is missing while
-opening an existing index, text search remains available and vector search
-returns `ErrVectorUnsupported`; writing new vector documents still requires
-the native artifact.
+after applying deletes and doc-number remapping. If the native library is
+missing while opening an existing index, text search remains available and
+vector search returns `ErrVectorUnsupported`; writing new vector documents
+still requires the native artifact.
 
 Vector requests can be composed without changing the text search API:
 
@@ -170,8 +171,8 @@ hybridHits, err := reader.HybridSearch(ctx, hybrid)
 ```
 
 `HybridSearch` supports a Bluge filter, weighted score fusion, and reciprocal
-rank fusion. The USearch DLL is built and published independently by the
-`usearch-ffi` GitHub Actions workflow; it is not compiled by `go build`.
+rank fusion. The USearch native library is built and published independently by
+the `usearch-ffi` GitHub Actions workflow; it is not compiled by `go build`.
 
 ### BM25 Scoring Modes
 

@@ -7,7 +7,7 @@ embedded zapx vector section.
 
 The Go module does not invoke Cargo, a C++ compiler, or cgo during `go build`.
 Native libraries are built independently by GitHub Actions and loaded at
-runtime. The Windows integration uses `purego` and remains compatible with
+runtime. All supported Go integrations use `purego` and remain compatible with
 `CGO_ENABLED=0`.
 
 ## Implementation boundary
@@ -20,6 +20,20 @@ the search algorithm. This adapter depends on that crate and adds the stable
 The Rust layer handles ownership and error conversion outside the search hot
 loop. Vector data and result buffers cross the boundary without per-element
 translation.
+
+## Loading from Go
+
+The shared Go binding uses `purego.RegisterLibFunc` for typed C calls on every
+supported platform. Only opening and closing the native library differs:
+Windows delegates to `LoadLibrary`, while Linux and macOS delegate to
+`purego.Dlopen`. This is the same thin platform boundary used by zvec's pure-Go
+binding; Bluge does not implement a PE, ELF, or Mach-O loader.
+
+`WithLibraryPath` is authoritative when set. Otherwise Bluge checks
+`BLUGE_USEARCH_LIBRARY_PATH`, the Go executable's directory, and finally the
+operating system's native library search path. Deployment should normally put
+the matching library beside the main executable. The process working directory
+is not the placement contract.
 
 ## GitHub Actions artifacts
 

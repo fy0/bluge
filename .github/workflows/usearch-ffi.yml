@@ -133,7 +133,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure Go
-        if: matrix.goos == 'windows'
         uses: actions/setup-go@v5
         with:
           go-version: "1.24.6"
@@ -339,7 +338,7 @@ jobs:
         run: |
           $library = Resolve-Path "usearch-ffi\target\${{ matrix.target }}\release\${{ matrix.binary }}"
           $env:BLUGE_USEARCH_LIBRARY_PATH = $library.Path
-          go test -run 'Test(Embedded)?USearchVectorBackendWindows$' -count=1 .
+          go test -run 'Test(Embedded)?USearchVectorBackend$' -count=1 .
 
       - name: Verify Windows runtime dependencies
         if: matrix.goos == 'windows'
@@ -404,6 +403,18 @@ jobs:
           fi
           echo "compiled=$compiled" >> "$GITHUB_OUTPUT"
           echo "available=$available" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test Unix integration with CGO disabled
+        if: matrix.goos != 'windows'
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          library="$(pwd)/usearch-ffi/target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          test -f "$library"
+          BLUGE_USEARCH_LIBRARY_PATH="$library" \
+            go test -run 'Test(Embedded)?USearchVectorBackend$' -count=1 .
 
       - name: Package Windows artifact
         if: matrix.goos == 'windows'

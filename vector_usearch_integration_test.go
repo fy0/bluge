@@ -1,4 +1,4 @@
-//go:build windows
+//go:build (windows || linux || darwin) && (amd64 || arm64)
 
 package bluge
 
@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestUSearchVectorBackendWindows(t *testing.T) {
+func TestUSearchVectorBackend(t *testing.T) {
 	libraryPath := os.Getenv(usearchLibraryPathEnv)
 	if libraryPath == "" {
 		t.Skip("set BLUGE_USEARCH_LIBRARY_PATH to run the native USearch integration test")
@@ -119,7 +119,7 @@ func TestUSearchVectorBackendWindows(t *testing.T) {
 	assertVectorIDs(t, hits, "red")
 }
 
-func TestEmbeddedUSearchVectorBackendWindows(t *testing.T) {
+func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 	libraryPath := os.Getenv(usearchLibraryPathEnv)
 	if libraryPath == "" {
 		t.Skip("set BLUGE_USEARCH_LIBRARY_PATH to run the native USearch integration test")
@@ -234,10 +234,10 @@ func TestEmbeddedUSearchVectorBackendWindows(t *testing.T) {
 	// Text segments remain readable when the optional native artifact is absent.
 	t.Setenv(usearchLibraryPathEnv, "")
 	degradedConfig := DefaultConfig(indexPath).WithVectorBackend(
-		backend.WithLibraryPath(filepath.Join(root, "missing-usearch.dll")))
+		backend.WithLibraryPath(filepath.Join(root, "missing-"+usearchLibraryName())))
 	degradedReader, err := OpenReader(degradedConfig)
 	if err != nil {
-		t.Fatalf("text reader did not degrade without native DLL: %v", err)
+		t.Fatalf("text reader did not degrade without the native library: %v", err)
 	}
 	if _, err := degradedReader.Search(context.Background(),
 		NewTopNSearch(1, NewMatchQuery("updated").SetField("color"))); err != nil {
@@ -246,7 +246,7 @@ func TestEmbeddedUSearchVectorBackendWindows(t *testing.T) {
 	}
 	if _, err := degradedReader.VectorSearch(context.Background(), "embedding", []float32{0, 1}, 1, nil); !errors.Is(err, ErrVectorUnsupported) {
 		_ = degradedReader.Close()
-		t.Fatalf("expected vector search to be unavailable without DLL, got %v", err)
+		t.Fatalf("expected vector search to be unavailable without the native library, got %v", err)
 	}
 	if err := degradedReader.Close(); err != nil {
 		t.Fatal(err)

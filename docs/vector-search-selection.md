@@ -1,19 +1,19 @@
 # Bluge 向量搜索技术选型
 
-日期：2026-08-09
+日期：2026-08-10
 
 ## 结论
 
 没有脱离约束的“当前最优”方案。对这个仓库，当前更重要的约束是：复用
-成熟 ANN 实现、Windows 可构建、Go 默认构建保持 `CGO_ENABLED=0`，并且不把
-向量算法复制到 Bluge 中。
+成熟 ANN 实现、主流 64 位桌面/服务器平台可构建、Go 默认构建保持
+`CGO_ENABLED=0`，并且不把向量算法复制到 Bluge 中。
 
 本分支的实际选择是 `USearchVectorBackend`：USearch 2.26 负责 HNSW 图、距离
 计算、删除、压缩和序列化；我们只维护 Bluge 文档 ID 到 `uint64` key 的映射，
 以及每个 vector field 的 manifest。Rust adapter 位于仓库根部的独立
-`usearch-ffi` 子项目，编译为独立 DLL，Go 通过
-`purego`/Windows loader 调用窄 C ABI。已在 Windows 上验证了插入、ANN 查询、
-Bluge Query 过滤、更新、删除、重开和 `CGO_ENABLED=0`。
+`usearch-ffi` 子项目，编译为独立动态库，Go 通过 `purego` 调用窄 C ABI。
+GitHub Actions 在 Windows、Linux 和 macOS 的 amd64/arm64 原生 runner 上验证
+插入、ANN 查询、Bluge Query 过滤、更新、删除、重开和 `CGO_ENABLED=0`。
 
 FAISS 仍然是生态和索引类型最强的候选，但在本次 Windows 约束下，它需要先
 解决 FAISS C API DLL、BLAS/编译器和分发矩阵；因此保留为下一条对照 backend，
@@ -31,8 +31,8 @@ FAISS 仍然是生态和索引类型最强的候选，但在本次 Windows 约�
   generator 配置 CPU/C API 构建时，配置在 `FindBLAS` 阶段停止：本机没有
   可用 BLAS 库。FAISS 的实际 DLL、BLAS 和工具链分发闭环尚未形成。
 
-所以 FAISS 仍是长期生态优先级更高的对照，但当前实现选择了已经在同一台
-Windows 机器上完成 DLL 构建和 Go FFI 验证的 USearch；这是一项可验证的工程
+所以 FAISS 仍是长期生态优先级更高的对照，但当前实现选择了已经形成六平台
+原生库构建和 Go FFI 验证闭环的 USearch；这是一项可验证的工程
 选择，不是声称 USearch 的总体生态超过 FAISS。
 
 `FlatVectorBackend` 保留为精确 recall@k 和分数语义基线。它不是大规模数据的
@@ -43,17 +43,18 @@ Windows 机器上完成 DLL 构建和 Go FFI 验证的 USearch；这是一项可
 | 方案 | 成熟度/生态 | cgo-free | 适合当前仓库的程度 | 主要问题 |
 | --- | --- | --- | --- | --- |
 | FAISS + `go-faiss` | 很高，索引类型最全 | `go-faiss` 默认依赖 cgo；独立 C API DLL 可做到 Go cgo-free | 下一阶段 native 对照 | C++ ABI、BLAS、Windows 构建和分发矩阵复杂 |
-| USearch 2.26 + Rust C ABI | 主流度低于 FAISS，但跨语言生态和单文件 HNSW 清晰 | 是，Go 只用 `purego` 加载 DLL | 当前 Windows 首选 | Rust crate 内部通过 `cxx` 调用 USearch C++ 核心，native DLL 需要单独分发 |
+| USearch 2.26 + Rust C ABI | 主流度低于 FAISS，但跨语言生态和单文件 HNSW 清晰 | 是，Go 只用 `purego` 加载动态库 | 当前首选 | Rust crate 内部通过 `cxx` 调用 USearch C++ 核心，native library 需要单独分发 |
 | Rust `hnsw_rs` | Rust ANN 生态中较成熟 | FFI 直接嵌入否；WASM 可行 | 后续纯 Rust 对照 | 需要自定义稳定 ABI、持久化和更新语义 |
 | Rust `instant-distance` + WASM | 纯 Rust、API 小 | 是，使用 wazero | 可作为无 native runtime 的后续实验 | ANN 功能、更新语义和运维生态弱于 USearch/FAISS |
 | ZVEC C API + purego | 本机已有 Windows DLL 和验证过的 wrapper | 是，Go 可 cgo-free | FFI 参考和备选 | 它是完整向量数据库引擎，不是窄 ANN 库；会重复 collection/schema/persistence |
-| C/C++/Rust C ABI + Go | native 库选择多 | 可以；ABI 与 Go 的动态加载是两个问题 | 适合作为可选 backend | 需要平台 loader、生命周期、内存和 DLL 分发契约 |
+| C/C++/Rust C ABI + Go | native 库选择多 | 可以；ABI 与 Go 的动态加载是两个问题 | 适合作为可选 backend | 需要薄平台加载层、生命周期、内存和动态库分发契约 |
 | 精确 flat | 算法简单、结果可验证 | 是 | 当前已实现 | `O(N * D)` 查询，不适合百万级以上高并发 ANN |
 
 这里的 `cgo-free` 指 `CGO_ENABLED=0` 下 Go 仍可构建和运行；它不等于底层
-算法必须用 Go 重写，也不等于不能使用 C/C++/Rust。稳定 C ABI、Windows
-`LoadLibrary` 和 `purego.SyscallN` 共同解决了“独立编译 native DLL + Go
-调用”的闭环。代价是每个平台都要维护 loader 和 native artifact 分发。
+算法必须用 Go 重写，也不等于不能使用 C/C++/Rust。稳定 C ABI 和
+`purego.RegisterLibFunc` 共同解决了“独立编译 native library + Go 调用”的
+闭环。平台差异只剩打开/关闭动态库：Windows 委托 `LoadLibrary`，Linux/macOS
+委托 `purego.Dlopen`；这几行 shim 与 zvec 的 pure-Go binding 一致。
 
 ## USearch 的性能边界
 
@@ -155,12 +156,12 @@ ID 集合分配。
   规模数据，不适合高写入吞吐。
 - 向量 field 的维度和 similarity 在首次写入后固定；变更会在文本 batch
   之前返回错误。
-- USearch native DLL 与 Go 程序是两个 artifact，版本升级必须重新构建并验证
-  C ABI；默认 Go 包不会自动下载 DLL。显式 `WithLibraryPath` 会覆盖环境和
+- USearch native library 与 Go 程序是两个 artifact，版本升级必须重新构建并
+  验证 C ABI；默认 Go 包不会自动下载动态库。显式 `WithLibraryPath` 会覆盖环境和
   默认候选路径，未指定路径时才尝试 `BLUGE_USEARCH_LIBRARY_PATH`、可执行文件
-  旁和默认 DLL 名。
-- 已有嵌入式 index 在读取时找不到 DLL 会降级为 text-only reader；这不会
-  静默接受新的 vector 写入，写入仍要求 native artifact。
+  旁和操作系统动态库搜索路径。部署契约是放在主程序旁，不是当前 work dir。
+- 已有嵌入式 index 在读取时找不到 native library 会降级为 text-only reader；
+  这不会静默接受新的 vector 写入，写入仍要求 native artifact。
 - native search 的 Bluge filter 路径会请求该 field 的全部候选，再在 Go 中
   应用允许的 ID 集合。它保证过滤语义，但大过滤集合可能增加查询内存和延迟；
   后续可以将允许集合下沉为 USearch predicate。

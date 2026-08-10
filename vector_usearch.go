@@ -32,7 +32,7 @@ type USearchVectorOptions struct {
 	ExpansionSearch int
 }
 
-// USearchHardwareInfo reports the ISA families compiled into the native DLL
+// USearchHardwareInfo reports the ISA families compiled into the native library
 // and the subset available on the current CPU. It is useful for diagnosing a
 // serial fallback or a mismatched release artifact.
 type USearchHardwareInfo struct {
@@ -66,7 +66,7 @@ func (o USearchVectorOptions) normalized() (USearchVectorOptions, error) {
 }
 
 // USearchVectorBackend stores one USearch HNSW index per vector field. path is
-// a directory containing the manifest and native index files. The native DLL
+// a directory containing the manifest and native index files. The native library
 // is loaded through a small C ABI and can be supplied explicitly with
 // NewUSearchVectorBackendWithLibrary or BLUGE_USEARCH_LIBRARY_PATH.
 //
