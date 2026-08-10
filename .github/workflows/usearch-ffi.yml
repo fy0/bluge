@@ -597,29 +597,20 @@ jobs:
               echo "Native dependency versions differ across platforms" >&2
               exit 1
             fi
-            archive="$PWD/dist/bluge-${version}-vector-engine-${platform}.zip"
+            archive="$PWD/dist/vector-engine-abi3-${platform}.zip"
             (cd "$directory" && zip -q -r "$archive" .)
           done
           (cd dist && sha256sum ./*.zip > SHA256SUMS)
           cat > dist/RELEASE_NOTES.md <<EOF
-          Bluge $tag
+          ## Vector Engine
 
-          Install the Go module with:
+          Prebuilt vector search libraries for Bluge $tag.
 
-              go get github.com/fy0/bluge@$tag
-
-          Optional native vector-search packages are attached for every supported
-          64-bit OS/architecture pair. Each ZIP contains one native library,
-          its SHA-256 checksum, the Apache-2.0 license, and a manifest describing
-          Bluge $version, vector adapter $adapter_version, USearch $usearch_version,
-          C ABI 3, the compiler, runtime, target, and SIMD capabilities.
-
-          Put the matching native library beside the application executable or
-          configure BLUGE_USEARCH_LIBRARY_PATH. Vector search remains opt-in;
-          text-only applications do not need a native package.
+          Download the archive for your platform and place the library next to the
+          application executable, or set BLUGE_USEARCH_LIBRARY_PATH.
           EOF
 
-      - name: Create or update GitHub release
+      - name: Recreate GitHub release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -628,13 +619,9 @@ jobs:
           tag="$GITHUB_REF_NAME"
           assets=(dist/*.zip dist/SHA256SUMS)
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" \
-              --title "Bluge $tag" \
-              --notes-file dist/RELEASE_NOTES.md
-            gh release upload "$tag" "${assets[@]}" --clobber
-          else
-            gh release create "$tag" "${assets[@]}" \
-              --verify-tag \
-              --title "Bluge $tag" \
-              --notes-file dist/RELEASE_NOTES.md
+            gh release delete "$tag" --yes
           fi
+          gh release create "$tag" "${assets[@]}" \
+            --verify-tag \
+            --title "Bluge $tag" \
+            --notes-file dist/RELEASE_NOTES.md

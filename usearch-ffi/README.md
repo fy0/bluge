@@ -64,9 +64,9 @@ license.
 
 Branch and pull-request builds remain temporary Actions artifacts. Pushing a
 semantic Bluge tag such as `v0.6.0` waits for all six native builds and their
-complete `CGO_ENABLED=0` Go test suites, then creates or updates the
+complete `CGO_ENABLED=0` Go test suites, then publishes the
 corresponding GitHub Release. Release assets use names such as
-`bluge-0.6.0-vector-engine-windows-amd64.zip` and are accompanied by a single
+`vector-engine-abi3-windows-amd64.zip` and are accompanied by a single
 `SHA256SUMS` file. GitHub also provides the normal source archives for the Go
 module in the same release.
 
