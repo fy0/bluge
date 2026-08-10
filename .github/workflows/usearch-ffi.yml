@@ -6,6 +6,8 @@ on:
     branches:
       - master
       - vector/native-ffi
+    tags:
+      - "v*"
     paths:
       - "usearch-ffi/**"
       - "vector*.go"
@@ -338,7 +340,11 @@ jobs:
         run: |
           $library = Resolve-Path "usearch-ffi\target\${{ matrix.target }}\release\${{ matrix.binary }}"
           $env:BLUGE_USEARCH_LIBRARY_PATH = $library.Path
-          go test -run 'Test(Embedded)?USearchVectorBackend$' -count=1 .
+          if ("${{ github.ref_type }}" -eq "tag") {
+            go test -count=1 ./...
+          } else {
+            go test -run 'Test(Embedded)?USearchVectorBackend$' -count=1 .
+          }
 
       - name: Verify Windows runtime dependencies
         if: matrix.goos == 'windows'
@@ -413,8 +419,12 @@ jobs:
         run: |
           library="$(pwd)/usearch-ffi/target/${{ matrix.target }}/release/${{ matrix.binary }}"
           test -f "$library"
-          BLUGE_USEARCH_LIBRARY_PATH="$library" \
-            go test -run 'Test(Embedded)?USearchVectorBackend$' -count=1 .
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            BLUGE_USEARCH_LIBRARY_PATH="$library" go test -count=1 ./...
+          else
+            BLUGE_USEARCH_LIBRARY_PATH="$library" \
+              go test -run 'Test(Embedded)?USearchVectorBackend$' -count=1 .
+          fi
 
       - name: Package Windows artifact
         if: matrix.goos == 'windows'
@@ -429,9 +439,20 @@ jobs:
           if ($null -eq $usearchPackage) {
             throw "The resolved Cargo graph does not contain the usearch package"
           }
+          $adapterPackage = $metadata.packages |
+            Where-Object { $_.name -eq "bluge-usearch-ffi" } |
+            Select-Object -First 1
+          if ($null -eq $adapterPackage) {
+            throw "Cargo metadata does not contain the vector engine adapter package"
+          }
+          $blugeVersion = "development"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $blugeVersion = "${{ github.ref_name }}" -replace '^v', ''
+          }
           $outputDirectory = Join-Path $PWD "artifact\${{ matrix.artifact }}"
           New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
           Copy-Item $library (Join-Path $outputDirectory "${{ matrix.binary }}")
+          Copy-Item (Resolve-Path "..\LICENSE") (Join-Path $outputDirectory "LICENSE")
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $library
           "$($hash.Hash.ToLowerInvariant())  ${{ matrix.binary }}" |
             Set-Content -Encoding ascii -LiteralPath (Join-Path $outputDirectory "${{ matrix.binary }}.sha256")
@@ -440,8 +461,11 @@ jobs:
           $hardwareAvailable = $probe.available
           @{
             abi_version = 3
+            adapter_version = $adapterPackage.version
             binary = "${{ matrix.binary }}"
+            bluge_version = $blugeVersion
             engine = "usearch"
+            source_commit = "${{ github.sha }}"
             usearch_version = $usearchPackage.version
             target = "${{ matrix.target }}"
             goos = "${{ matrix.goos }}"
@@ -462,13 +486,23 @@ jobs:
           output_directory="artifact/${{ matrix.artifact }}"
           mkdir -p "$output_directory"
           cp "$library" "$output_directory/${{ matrix.binary }}"
+          cp ../LICENSE "$output_directory/LICENSE"
           hash="$(shasum -a 256 "$library" | awk '{print $1}')"
           printf '%s  %s\n' "$hash" "${{ matrix.binary }}" > "$output_directory/${{ matrix.binary }}.sha256"
+          adapter_version="$(cargo +1.90.0 metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "bluge-usearch-ffi") | .version' | head -n 1)"
           usearch_version="$(cargo +1.90.0 metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "usearch") | .version' | head -n 1)"
+          test -n "$adapter_version"
           test -n "$usearch_version"
+          bluge_version="development"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            bluge_version="${GITHUB_REF_NAME#v}"
+          fi
           jq -n \
+            --arg adapter_version "$adapter_version" \
             --arg binary "${{ matrix.binary }}" \
+            --arg bluge_version "$bluge_version" \
             --arg engine "usearch" \
+            --arg source_commit "${{ github.sha }}" \
             --arg usearch_version "$usearch_version" \
             --arg target "${{ matrix.target }}" \
             --arg goos "${{ matrix.goos }}" \
@@ -480,8 +514,11 @@ jobs:
             --argjson numkong "${{ matrix.numkong }}" \
             '{
               abi_version: 3,
+              adapter_version: $adapter_version,
               binary: $binary,
+              bluge_version: $bluge_version,
               engine: $engine,
+              source_commit: $source_commit,
               usearch_version: $usearch_version,
               target: $target,
               goos: $goos,
@@ -500,3 +537,104 @@ jobs:
           path: usearch-ffi/artifact/${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish Bluge release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: native-library
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download validated native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vector-engine-*
+          path: release-artifacts
+
+      - name: Verify and archive release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag is not semantic: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          platforms=(
+            windows-amd64
+            windows-arm64
+            linux-amd64
+            linux-arm64
+            darwin-amd64
+            darwin-arm64
+          )
+          mkdir -p dist
+          usearch_version=""
+          adapter_version=""
+          for platform in "${platforms[@]}"; do
+            directory="release-artifacts/vector-engine-$platform"
+            manifest="$directory/manifest.json"
+            test -f "$manifest"
+            jq -e \
+              --arg version "$version" \
+              --arg source_commit "$GITHUB_SHA" \
+              '.abi_version == 3 and
+               .bluge_version == $version and
+               .source_commit == $source_commit' \
+              "$manifest" >/dev/null
+            current_usearch="$(jq -r '.usearch_version' "$manifest")"
+            current_adapter="$(jq -r '.adapter_version' "$manifest")"
+            if [[ -z "$usearch_version" ]]; then
+              usearch_version="$current_usearch"
+              adapter_version="$current_adapter"
+            elif [[ "$current_usearch" != "$usearch_version" || "$current_adapter" != "$adapter_version" ]]; then
+              echo "Native dependency versions differ across platforms" >&2
+              exit 1
+            fi
+            archive="$PWD/dist/bluge-${version}-vector-engine-${platform}.zip"
+            (cd "$directory" && zip -q -r "$archive" .)
+          done
+          (cd dist && sha256sum ./*.zip > SHA256SUMS)
+          cat > dist/RELEASE_NOTES.md <<EOF
+          Bluge $tag
+
+          Install the Go module with:
+
+              go get github.com/fy0/bluge@$tag
+
+          Optional native vector-search packages are attached for every supported
+          64-bit OS/architecture pair. Each ZIP contains one native library,
+          its SHA-256 checksum, the Apache-2.0 license, and a manifest describing
+          Bluge $version, vector adapter $adapter_version, USearch $usearch_version,
+          C ABI 3, the compiler, runtime, target, and SIMD capabilities.
+
+          Put the matching native library beside the application executable or
+          configure BLUGE_USEARCH_LIBRARY_PATH. Vector search remains opt-in;
+          text-only applications do not need a native package.
+          EOF
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          assets=(dist/*.zip dist/SHA256SUMS)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --title "Bluge $tag" \
+              --notes-file dist/RELEASE_NOTES.md
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --verify-tag \
+              --title "Bluge $tag" \
+              --notes-file dist/RELEASE_NOTES.md
+          fi

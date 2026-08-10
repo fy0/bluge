@@ -229,9 +229,19 @@ native library 统一由 `Vector Engine Native Libraries` GitHub Actions workflo
 MSVC ABI，Linux 固定 GCC 13，macOS 固定 Xcode 16.4，Rust 固定 1.90.0；不发布
 Clang/GCC/Zig 或 baseline/SSE/AVX 的平行变体。
 
-推送相关改动会自动触发，也可以手动触发：
+分支和 PR 构建上传 30 天有效的 Actions artifact。从 `v0.6.0` 开始，推送 Bluge
+语义化 tag 后，workflow 只在六个平台全部通过 ABI probe 和 `CGO_ENABLED=0`
+集成测试时创建同名 GitHub Release。Release 长期附带六个带版本的平台 ZIP 和总
+`SHA256SUMS`；每个 ZIP 内含 native library、单文件校验、Apache-2.0 license 和
+完整 manifest。合入向量分支前的 `master` 原提交只打 `v0.5.0` tag 作为版本节点，
+不回写代码或发布规则；将 `vector/native-ffi` 合入同一个 `master` 后，再给合入结果
+打 `v0.6.0` tag。由于 Go module 仍处于 0.x，新增公开能力对应 minor 版本递增。
+
+推送相关改动会自动触发，也可以手动触发。正式发布使用标准 Bluge tag：
 
 ```console
 gh workflow run usearch-ffi.yml --ref vector/native-ffi
 gh run list --workflow usearch-ffi.yml
+git tag -a v0.6.0 -m "Bluge v0.6.0"
+git push origin v0.6.0
 ```

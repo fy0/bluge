@@ -57,8 +57,18 @@ artifacts:
 | `vector-engine-darwin-arm64` | macOS ARM64 | `libvector_engine.dylib` |
 
 Each artifact also contains `manifest.json` and a SHA256 file. The manifest
-records the ABI version, resolved USearch version, Rust target, runtime model,
-and compiled/runtime-available SIMD families.
+records the Bluge version, source commit, adapter and ABI versions, resolved
+USearch version, Rust target, runtime model, and compiled/runtime-available
+SIMD families. Tagged Bluge builds also include the repository's Apache-2.0
+license.
+
+Branch and pull-request builds remain temporary Actions artifacts. Pushing a
+semantic Bluge tag such as `v0.6.0` waits for all six native builds and their
+complete `CGO_ENABLED=0` Go test suites, then creates or updates the
+corresponding GitHub Release. Release assets use names such as
+`bluge-0.6.0-vector-engine-windows-amd64.zip` and are accompanied by a single
+`SHA256SUMS` file. GitHub also provides the normal source archives for the Go
+module in the same release.
 
 32-bit Windows, 32-bit Linux, and 32-bit ARM are intentionally unsupported.
 
@@ -82,10 +92,16 @@ packaged as separate downloads.
 
 ## Versioning
 
-`Cargo.lock` pins the exact USearch dependency compiled into an artifact. The
-C ABI has its own version returned by `bluge_usearch_abi_version`; the current
-filtered-search and bulk-mutation contract is ABI 3, and Bluge rejects
-incompatible libraries before opening an index.
+Bluge tags version the Go module. The pre-vector `master` commit is tagged
+`v0.5.0` only as a version marker; no files or release automation are added
+retroactively to that commit. After the native vector-search branch is merged
+into the same `master`, the resulting commit is tagged `v0.6.0`. Starting with
+`v0.6.0`, the tag workflow also publishes the matching optional native assets.
+The minor increment reflects new public vector APIs in a pre-1.0 module.
 
-The workflow currently uploads Actions artifacts. Attaching the same validated
-artifacts to GitHub Releases is intentionally a separate publishing step.
+The native adapter and its dependencies retain independent compatibility
+identifiers inside `manifest.json`. `Cargo.toml` versions the adapter,
+`Cargo.lock` pins the exact USearch dependency compiled into an artifact, and
+`bluge_usearch_abi_version` identifies the C contract. The current release uses
+adapter 0.1.0, USearch 2.26.0, and ABI 3. Bluge rejects an incompatible ABI
+before opening an index, regardless of the filenames or release tag.
