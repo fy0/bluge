@@ -83,6 +83,24 @@ func (b *Batch) Operations() []BatchOperation {
 	return append([]BatchOperation(nil), b.operations...)
 }
 
+// OperationCount returns the number of document mutations in this batch.
+func (b *Batch) OperationCount() int {
+	return len(b.operations)
+}
+
+// VisitOperations visits batch mutations without allocating a copy. Returning
+// false stops iteration.
+func (b *Batch) VisitOperations(visitor func(BatchOperation) bool) {
+	if visitor == nil {
+		return
+	}
+	for _, operation := range b.operations {
+		if !visitor(operation) {
+			return
+		}
+	}
+}
+
 func (b *Batch) SetPersistedCallback(f func(error)) {
 	b.persistedCallback = f
 }

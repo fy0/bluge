@@ -35,22 +35,20 @@ func TestUSearchVectorBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Insert(NewDocument("red").
-		AddField(NewTextField("color", "red")).
-		AddField(NewVectorField("embedding", []float32{1, 0})).
-		AddField(NewVectorFieldWithSimilarity("dot", []float32{1, 0}, VectorDot)).
-		AddField(NewVectorFieldWithSimilarity("l2", []float32{1, 0}, VectorL2))); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Insert(NewDocument("blue").
-		AddField(NewTextField("color", "blue")).
-		AddField(NewVectorField("embedding", []float32{0, 1})).
-		AddField(NewVectorFieldWithSimilarity("dot", []float32{0, 1}, VectorDot)).
-		AddField(NewVectorFieldWithSimilarity("l2", []float32{0, 1}, VectorL2))); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Insert(NewDocument("green").
-		AddField(NewTextField("color", "green"))); err != nil {
+	if err := writer.InsertMany([]*Document{
+		NewDocument("red").
+			AddField(NewTextField("color", "red")).
+			AddField(NewVectorField("embedding", []float32{1, 0})).
+			AddField(NewVectorFieldWithSimilarity("dot", []float32{1, 0}, VectorDot)).
+			AddField(NewVectorFieldWithSimilarity("l2", []float32{1, 0}, VectorL2)),
+		NewDocument("blue").
+			AddField(NewTextField("color", "blue")).
+			AddField(NewVectorField("embedding", []float32{0, 1})).
+			AddField(NewVectorFieldWithSimilarity("dot", []float32{0, 1}, VectorDot)).
+			AddField(NewVectorFieldWithSimilarity("l2", []float32{0, 1}, VectorL2)),
+		NewDocument("green").
+			AddField(NewTextField("color", "green")),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,9 +105,9 @@ func TestUSearchVectorBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writer.Update(Identifier("red"), NewDocument("red").
+	if err := writer.UpdateMany([]*Document{NewDocument("red").
 		AddField(NewTextField("color", "red")).
-		AddField(NewVectorField("embedding", []float32{0, 1}))); err != nil {
+		AddField(NewVectorField("embedding", []float32{0, 1}))}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Delete(Identifier("blue")); err != nil {
@@ -149,21 +147,19 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writer.Insert(NewDocument("red").
-		AddField(NewTextField("color", "red apple")).
-		AddField(NewKeywordField("kind", "fruit")).
-		AddField(NewVectorField("embedding", []float32{1, 0}))); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Insert(NewDocument("blue").
-		AddField(NewTextField("color", "blue car")).
-		AddField(NewKeywordField("kind", "vehicle")).
-		AddField(NewVectorField("embedding", []float32{0, 1}))); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Insert(NewDocument("green").
-		AddField(NewTextField("color", "green note")).
-		AddField(NewKeywordField("kind", "metadata"))); err != nil {
+	if err := writer.InsertMany([]*Document{
+		NewDocument("red").
+			AddField(NewTextField("color", "red apple")).
+			AddField(NewKeywordField("kind", "fruit")).
+			AddField(NewVectorField("embedding", []float32{1, 0})),
+		NewDocument("blue").
+			AddField(NewTextField("color", "blue car")).
+			AddField(NewKeywordField("kind", "vehicle")).
+			AddField(NewVectorField("embedding", []float32{0, 1})),
+		NewDocument("green").
+			AddField(NewTextField("color", "green note")).
+			AddField(NewKeywordField("kind", "metadata")),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -212,10 +208,10 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writer.Update(Identifier("red"), NewDocument("red").
+	if err := writer.UpdateMany([]*Document{NewDocument("red").
 		AddField(NewTextField("color", "red apple updated")).
 		AddField(NewKeywordField("kind", "fruit")).
-		AddField(NewVectorField("embedding", []float32{0, 1}))); err != nil {
+		AddField(NewVectorField("embedding", []float32{0, 1}))}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Delete(Identifier("blue")); err != nil {
@@ -280,19 +276,17 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 	offlineRoot := filepath.Join(root, "offline")
 	offlineConfig := DefaultConfig(offlineRoot).WithVectorBackend(
 		NewEmbeddedUSearchVectorBackend().WithLibraryPath(libraryPath))
-	offline, err := OpenOfflineWriter(offlineConfig, 1, 2)
+	offline, err := OpenOfflineWriter(offlineConfig, 2, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, doc := range []*Document{
+	if err := offline.InsertMany([]*Document{
 		NewDocument("offline-red").AddField(NewVectorField("embedding", []float32{1, 0})),
 		NewDocument("offline-blue").AddField(NewVectorField("embedding", []float32{0, 1})),
 		NewDocument("offline-green").AddField(NewVectorField("embedding", []float32{0.8, 0.2})),
-	} {
-		if err := offline.Insert(doc); err != nil {
-			_ = offline.Close()
-			t.Fatal(err)
-		}
+	}); err != nil {
+		_ = offline.Close()
+		t.Fatal(err)
 	}
 	if err := offline.Close(); err != nil {
 		t.Fatal(err)

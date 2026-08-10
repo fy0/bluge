@@ -30,13 +30,13 @@ func TestOfflineWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	documents := make([]*Document, 0, 10)
 	for i := 0; i < 10; i++ {
-		doc := NewDocument(fmt.Sprintf("%d", i)).
-			AddField(NewKeywordField("name", "hello"))
-		err = b.Insert(doc)
-		if err != nil {
-			t.Fatal(err)
-		}
+		documents = append(documents, NewDocument(fmt.Sprintf("%d", i)).
+			AddField(NewKeywordField("name", "hello")))
+	}
+	if err := b.InsertMany(documents); err != nil {
+		t.Fatal(err)
 	}
 
 	err = b.Close()

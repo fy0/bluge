@@ -23,6 +23,11 @@ translation. For filtered queries, Go passes candidate keys as one array and
 Rust builds the `HashSet` consumed by USearch's predicate; native code never
 calls back into Go.
 
+ABI 3 also accepts row-major vector additions and key removals in batches. The
+Go adapter bounds each addition call to roughly 4 MiB of `float32` values and
+at most 4096 rows; USearch still owns each HNSW insertion, but the process no
+longer pays one Go-to-native transition per vector.
+
 ## Loading from Go
 
 The shared Go binding uses `purego.RegisterLibFunc` for typed C calls on every
@@ -79,8 +84,8 @@ packaged as separate downloads.
 
 `Cargo.lock` pins the exact USearch dependency compiled into an artifact. The
 C ABI has its own version returned by `bluge_usearch_abi_version`; the current
-filtered-search contract is ABI 2, and Bluge rejects incompatible libraries
-before opening an index.
+filtered-search and bulk-mutation contract is ABI 3, and Bluge rejects
+incompatible libraries before opening an index.
 
 The workflow currently uploads Actions artifacts. Attaching the same validated
 artifacts to GitHub Releases is intentionally a separate publishing step.

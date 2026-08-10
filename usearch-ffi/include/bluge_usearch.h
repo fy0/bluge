@@ -48,6 +48,12 @@ int32_t bluge_usearch_index_add(
     uint64_t key,
     const float *data,
     size_t len);
+int32_t bluge_usearch_index_add_batch(
+    bluge_usearch_index *handle,
+    const uint64_t *keys,
+    const float *vectors,
+    size_t count,
+    size_t dimensions);
 int32_t bluge_usearch_index_get(
     bluge_usearch_index *handle,
     uint64_t key,
@@ -55,6 +61,10 @@ int32_t bluge_usearch_index_get(
     size_t capacity,
     size_t *out_count);
 int32_t bluge_usearch_index_remove(bluge_usearch_index *handle, uint64_t key);
+int32_t bluge_usearch_index_remove_batch(
+    bluge_usearch_index *handle,
+    const uint64_t *keys,
+    size_t count);
 int32_t bluge_usearch_index_compact(bluge_usearch_index *handle);
 int32_t bluge_usearch_index_save(bluge_usearch_index *handle, const char *path);
 int32_t bluge_usearch_index_search(

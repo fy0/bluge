@@ -77,32 +77,80 @@ func (w *OfflineWriter) Insert(doc segment.Document) error {
 	w.batch.Insert(doc)
 	w.batchCount++
 	if w.batchCount >= w.batchSize {
-		changes, hasVectors, err := vectorChangesForBatch(w.batch)
+		return w.flushBatch()
+	}
+	return nil
+}
+
+// InsertMany transfers documents to the offline writer. Documents are grouped
+// into the configured batch size so segment construction remains bounded and
+// can run concurrently.
+func (w *OfflineWriter) InsertMany(documents []*Document) error {
+	if w.closed {
+		return fmt.Errorf("offline writer is closed")
+	}
+	for i, document := range documents {
+		if document == nil {
+			return fmt.Errorf("cannot insert nil document at index %d", i)
+		}
+	}
+	for _, document := range documents {
+		w.batch.Insert(document)
+		w.batchCount++
+		if w.batchCount >= w.batchSize {
+			if err := w.flushBatch(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (w *OfflineWriter) flushBatch() error {
+	if w.batchCount == 0 {
+		return nil
+	}
+	segmentVectors := usesSegmentVectorBackend(w.config)
+	if w.vector == nil && !segmentVectors {
+		hasVectors, err := batchContainsVectors(w.batch)
 		if err != nil {
 			return err
 		}
-		if hasVectors && w.vector == nil && !usesSegmentVectorBackend(w.config) {
+		if hasVectors {
 			return ErrVectorUnsupported
 		}
-		if usesSegmentVectorBackend(w.config) {
-			if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
-				if err := validator.ValidateVectorChanges(changes); err != nil {
-					return err
-				}
-			}
-		} else if err := validateVectorChanges(w.vector, changes, hasVectors); err != nil {
+		if err := w.writer.Batch(w.batch); err != nil {
 			return err
-		}
-		err = w.writer.Batch(w.batch)
-		if err != nil {
-			return err
-		}
-		if _, ok := w.vector.(VectorBatcher); ok {
-			w.pendingVectorChanges = append(w.pendingVectorChanges, changes...)
 		}
 		w.batch.Reset()
 		w.batchCount = 0
+		return nil
 	}
+
+	changes, hasVectors, err := vectorChangesForBatch(w.batch)
+	if err != nil {
+		return err
+	}
+	if hasVectors && w.vector == nil && !segmentVectors {
+		return ErrVectorUnsupported
+	}
+	if segmentVectors {
+		if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
+			if err := validator.ValidateVectorChanges(changes); err != nil {
+				return err
+			}
+		}
+	} else if err := validateVectorChanges(w.vector, changes, hasVectors); err != nil {
+		return err
+	}
+	if err := w.writer.Batch(w.batch); err != nil {
+		return err
+	}
+	if _, ok := w.vector.(VectorBatcher); ok {
+		w.pendingVectorChanges = append(w.pendingVectorChanges, changes...)
+	}
+	w.batch.Reset()
+	w.batchCount = 0
 	return nil
 }
 
@@ -113,28 +161,7 @@ func (w *OfflineWriter) Close() error {
 	w.closed = true
 	var batchErr error
 	if w.batchCount > 0 {
-		changes, hasVectors, err := vectorChangesForBatch(w.batch)
-		if err != nil {
-			batchErr = err
-		} else if hasVectors && w.vector == nil && !usesSegmentVectorBackend(w.config) {
-			batchErr = ErrVectorUnsupported
-		} else {
-			if usesSegmentVectorBackend(w.config) {
-				if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
-					batchErr = validator.ValidateVectorChanges(changes)
-				}
-			} else {
-				batchErr = validateVectorChanges(w.vector, changes, hasVectors)
-			}
-			if batchErr == nil {
-				batchErr = w.writer.Batch(w.batch)
-			}
-			if batchErr == nil {
-				if _, ok := w.vector.(VectorBatcher); ok {
-					w.pendingVectorChanges = append(w.pendingVectorChanges, changes...)
-				}
-			}
-		}
+		batchErr = w.flushBatch()
 	}
 	closeErr := w.writer.Close()
 	var vectorErr error

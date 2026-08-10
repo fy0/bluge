@@ -11,7 +11,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 const METRIC_L2: u32 = 1;
 const METRIC_DOT: u32 = 2;
 const METRIC_COSINE: u32 = 3;
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 
 static HARDWARE_COMPILED: OnceLock<CString> = OnceLock::new();
 static HARDWARE_AVAILABLE: OnceLock<CString> = OnceLock::new();
@@ -283,6 +283,51 @@ pub extern "C" fn bluge_usearch_index_add(
     })
 }
 
+/// Adds row-major vectors in one FFI call.
+///
+/// # Safety
+///
+/// `keys` must contain `count` entries and `vectors` must contain
+/// `count * dimensions` entries for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bluge_usearch_index_add_batch(
+    handle: *mut IndexHandle,
+    keys: *const u64,
+    vectors: *const f32,
+    count: usize,
+    dimensions: usize,
+) -> i32 {
+    status(handle, |handle| {
+        if dimensions != handle.index.dimensions() {
+            return Err(format!(
+                "batch vectors have {dimensions} dimensions, expected {}",
+                handle.index.dimensions()
+            ));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if dimensions == 0 {
+            return Err("batch vector dimensions must be greater than zero".to_owned());
+        }
+        if keys.is_null() || vectors.is_null() {
+            return Err("batch input buffer is null".to_owned());
+        }
+        let value_count = count
+            .checked_mul(dimensions)
+            .ok_or_else(|| "batch vector length overflow".to_owned())?;
+        let keys = unsafe { slice::from_raw_parts(keys, count) };
+        let vectors = unsafe { slice::from_raw_parts(vectors, value_count) };
+        for (key, vector) in keys.iter().zip(vectors.chunks_exact(dimensions)) {
+            handle
+                .index
+                .add(*key, vector)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+}
+
 /// # Safety
 ///
 /// `handle`, `output`, and `out_count` must remain valid for the duration of
@@ -337,6 +382,35 @@ pub extern "C" fn bluge_usearch_index_remove(handle: *mut IndexHandle, key: u64)
             .remove(key)
             .map(|_| ())
             .map_err(|error| error.to_string())
+    })
+}
+
+/// Removes multiple keys in one FFI call.
+///
+/// # Safety
+///
+/// `keys` must contain `count` entries for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bluge_usearch_index_remove_batch(
+    handle: *mut IndexHandle,
+    keys: *const u64,
+    count: usize,
+) -> i32 {
+    status(handle, |handle| {
+        if count == 0 {
+            return Ok(());
+        }
+        if keys.is_null() {
+            return Err("batch key buffer is null".to_owned());
+        }
+        let keys = unsafe { slice::from_raw_parts(keys, count) };
+        for key in keys {
+            handle
+                .index
+                .remove(*key)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     })
 }
 

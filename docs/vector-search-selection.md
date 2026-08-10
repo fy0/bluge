@@ -85,6 +85,46 @@ haswell` 可用。若只报告 `serial`，workflow 会拒绝发布该 artifact�
 
 ## 当前实践
 
+### RAG 数据模型与批量导入
+
+知识库使用与 LanceDB、zvec 相同的 chunk-row 模型：一个 Bluge `Document`
+就是一个可召回 chunk，同一个 `_id` 同时拥有 chunk 文本、embedding 和
+metadata。BM25 与 ANN 因而在同一组 chunk ID 上召回和融合，不需要维护“整篇
+文档 ID 到多个旁车向量 ID”的第二套关联关系。
+
+推荐把 `source_id`、`chunk_index`、章节和权限等信息作为 keyword/numeric/stored
+field 放在 chunk 文档上。完整原文默认保留在外部 source store；命中后应用可以
+读取当前 chunk、相邻 chunk 或整篇原文。Bluge 不负责切块，也不调用 embedding
+模型，写入方必须提供已经切好的文本和对应向量。
+
+```go
+chunks := []*bluge.Document{
+    bluge.NewDocument("source-7:0").
+        AddField(bluge.NewKeywordField("source_id", "source-7").StoreValue()).
+        AddField(bluge.NewTextField("body", firstChunk)).
+        AddField(bluge.NewVectorField("embedding", firstEmbedding)),
+    bluge.NewDocument("source-7:1").
+        AddField(bluge.NewKeywordField("source_id", "source-7").StoreValue()).
+        AddField(bluge.NewTextField("body", secondChunk)).
+        AddField(bluge.NewVectorField("embedding", secondEmbedding)),
+}
+if err := writer.InsertMany(chunks); err != nil {
+    return err
+}
+```
+
+`Writer.InsertMany` 和 `Writer.UpdateMany` 各自只提交一个 text batch，并把整批
+向量 mutation 交给 backend。首次构建大语料时优先使用
+`OfflineWriter.InsertMany`：它按配置的 batch size 构建 segment，再并行合并。
+USearch 的新增和删除通过 ABI 3 批量传递；新增向量使用 row-major 缓冲区，并按
+约 4 MiB 或最多 4096 行切分单次 FFI 调用。没有配置向量 backend 的传统文本
+`Insert`/`Batch` 路径不会提取 `_id`、复制向量或分配 `VectorChange`，同时仍会
+在提交前拒绝误加的 vector field。
+
+Embedded backend 的 payload 只保存实际带有该 vector field 的 segment-local
+docID，不存在每个 source 预留一个固定 vector 槽。一个 chunk 可以只有文本、
+只有向量，或同时拥有两者；RAG 的默认推荐是文本和向量共存，以便统一召回基准。
+
 向量字段通过 `NewVectorField` 加到 Bluge 文档中。对于 flat/USearch 旁车
 backend，它不会进入 zapx 的文本倒排和 stored-field 数据；对于
 `EmbeddedUSearchVectorBackend`，字段名会进入 segment 的字段目录，真正的

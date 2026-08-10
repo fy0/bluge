@@ -26,10 +26,11 @@ func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
 	}
 
 	var (
-		changes   []VectorChange
-		hasVector bool
+		changes      = make([]VectorChange, 0, batch.OperationCount()*2)
+		hasVector    bool
+		iterationErr error
 	)
-	for _, operation := range batch.Operations() {
+	batch.VisitOperations(func(operation index.BatchOperation) bool {
 		switch operation.Kind {
 		case index.BatchOperationDelete:
 			if operation.ID.Field() == _idField {
@@ -39,10 +40,10 @@ func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
 				})
 			}
 		case index.BatchOperationInsert, index.BatchOperationUpdate:
-			docID, hasID := documentIdentifier(operation.Document)
-			vectors, hasDocVectors, err := documentVectors(operation.Document)
+			docID, hasID, vectors, hasDocVectors, err := documentVectorData(operation.Document)
 			if err != nil {
-				return nil, false, err
+				iterationErr = err
+				return false
 			}
 			if hasDocVectors {
 				hasVector = true
@@ -70,10 +71,41 @@ func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
 				})
 			}
 		default:
-			return nil, false, fmt.Errorf("unknown batch operation %d", operation.Kind)
+			iterationErr = fmt.Errorf("unknown batch operation %d", operation.Kind)
+			return false
 		}
+		return true
+	})
+	if iterationErr != nil {
+		return nil, false, iterationErr
 	}
 	return changes, hasVector, nil
+}
+
+func batchContainsVectors(batch *index.Batch) (bool, error) {
+	if batch == nil {
+		return false, fmt.Errorf("nil batch")
+	}
+	var iterationErr error
+	var hasVectors bool
+	batch.VisitOperations(func(operation index.BatchOperation) bool {
+		switch operation.Kind {
+		case index.BatchOperationDelete:
+			return true
+		case index.BatchOperationInsert, index.BatchOperationUpdate:
+			var err error
+			hasVectors, err = documentHasVectors(operation.Document)
+			if err != nil {
+				iterationErr = err
+				return false
+			}
+			return !hasVectors
+		default:
+			iterationErr = fmt.Errorf("unknown batch operation %d", operation.Kind)
+			return false
+		}
+	})
+	return hasVectors, iterationErr
 }
 
 type documentVector struct {
@@ -82,54 +114,116 @@ type documentVector struct {
 	similarity VectorSimilarity
 }
 
-func documentVectors(doc segment.Document) ([]documentVector, bool, error) {
-	if doc == nil {
-		return nil, false, fmt.Errorf("nil document")
-	}
+func documentVectorData(doc segment.Document) (Identifier, bool, []documentVector, bool, error) {
 	var (
+		id      Identifier
+		hasID   bool
 		vectors []documentVector
 		err     error
 	)
-	doc.EachField(func(field segment.Field) {
+	visitErr := visitDocumentFields(doc, func(field segment.Field) bool {
 		if err != nil {
-			return
+			return false
 		}
 		if field == nil {
 			err = fmt.Errorf("nil field")
-			return
+			return false
+		}
+		name := field.Name()
+		if !hasID && name == _idField {
+			id = Identifier(string(field.Value()))
+			hasID = true
 		}
 		vectorField, ok := field.(vectorFieldValue)
 		if !ok {
-			return
+			return true
 		}
-		if field.Name() == "" {
+		if name == "" {
 			err = ErrVectorInvalidField
-			return
+			return false
 		}
 		vectors = append(vectors, documentVector{
-			field:      field.Name(),
+			field:      name,
 			vector:     append([]float32(nil), vectorField.VectorValue()...),
 			similarity: vectorField.VectorSimilarity(),
 		})
+		return true
 	})
-	return vectors, len(vectors) > 0, err
+	if visitErr != nil {
+		return "", false, nil, false, visitErr
+	}
+	return id, hasID, vectors, len(vectors) > 0, err
 }
 
-func documentIdentifier(doc segment.Document) (Identifier, bool) {
-	if doc == nil {
-		return "", false
-	}
+func documentHasVectors(doc segment.Document) (bool, error) {
 	var (
-		id    Identifier
 		found bool
+		err   error
 	)
-	doc.EachField(func(field segment.Field) {
-		if !found && field.Name() == _idField {
+	visitErr := visitDocumentFields(doc, func(field segment.Field) bool {
+		if field == nil {
+			err = fmt.Errorf("nil field")
+			return false
+		}
+		if _, ok := field.(vectorFieldValue); ok {
+			found = true
+			return false
+		}
+		return true
+	})
+	if visitErr != nil {
+		return false, visitErr
+	}
+	return found, err
+}
+
+func documentIdentifier(doc segment.Document) (Identifier, bool, error) {
+	var id Identifier
+	var found bool
+	err := visitDocumentFields(doc, func(field segment.Field) bool {
+		if field == nil {
+			return true
+		}
+		if field.Name() == _idField {
 			id = Identifier(string(field.Value()))
 			found = true
+			return false
+		}
+		return true
+	})
+	return id, found, err
+}
+
+func visitDocumentFields(doc segment.Document, visitor func(segment.Field) bool) error {
+	if doc == nil {
+		return fmt.Errorf("nil document")
+	}
+	switch document := doc.(type) {
+	case *Document:
+		if document == nil {
+			return fmt.Errorf("nil document")
+		}
+		for _, field := range *document {
+			if !visitor(field) {
+				break
+			}
+		}
+		return nil
+	case Document:
+		for _, field := range document {
+			if !visitor(field) {
+				break
+			}
+		}
+		return nil
+	}
+	keepVisiting := true
+	doc.EachField(func(field segment.Field) {
+		if keepVisiting {
+			keepVisiting = visitor(field)
 		}
 	})
-	return id, found
+	return nil
 }
 
 func applyVectorChanges(vector VectorIndex, changes []VectorChange, hasVectors bool) error {

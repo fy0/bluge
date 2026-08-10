@@ -15,7 +15,7 @@ import (
 )
 
 const usearchLibraryPathEnv = "BLUGE_USEARCH_LIBRARY_PATH"
-const usearchABIVersion = 2
+const usearchABIVersion = 3
 
 var (
 	usearchLibraryMu sync.Mutex
@@ -41,8 +41,10 @@ type puregoUSearchAPI struct {
 	indexSaveBuffer                 func(unsafe.Pointer, unsafe.Pointer, uintptr) int32
 	indexReserve                    func(unsafe.Pointer, uintptr) int32
 	indexAdd                        func(unsafe.Pointer, uint64, unsafe.Pointer, uintptr) int32
+	indexAddBatch                   func(unsafe.Pointer, unsafe.Pointer, unsafe.Pointer, uintptr, uintptr) int32
 	indexGet                        func(unsafe.Pointer, uint64, unsafe.Pointer, uintptr, *uintptr) int32
 	indexRemove                     func(unsafe.Pointer, uint64) int32
+	indexRemoveBatch                func(unsafe.Pointer, unsafe.Pointer, uintptr) int32
 	indexCompact                    func(unsafe.Pointer) int32
 	indexSave                       func(unsafe.Pointer, string) int32
 	indexSearch                     func(unsafe.Pointer, unsafe.Pointer, uintptr, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
@@ -113,8 +115,10 @@ func (l *puregoUSearchAPI) register() (err error) {
 	register(&l.indexSaveBuffer, "bluge_usearch_index_save_buffer")
 	register(&l.indexReserve, "bluge_usearch_index_reserve")
 	register(&l.indexAdd, "bluge_usearch_index_add")
+	register(&l.indexAddBatch, "bluge_usearch_index_add_batch")
 	register(&l.indexGet, "bluge_usearch_index_get")
 	register(&l.indexRemove, "bluge_usearch_index_remove")
+	register(&l.indexRemoveBatch, "bluge_usearch_index_remove_batch")
 	register(&l.indexCompact, "bluge_usearch_index_compact")
 	register(&l.indexSave, "bluge_usearch_index_save")
 	register(&l.indexSearch, "bluge_usearch_index_search")
@@ -237,6 +241,15 @@ func (l *puregoUSearchAPI) add(handle unsafe.Pointer, key uint64, vector []float
 	return status
 }
 
+func (l *puregoUSearchAPI) addBatch(handle unsafe.Pointer, keys []uint64,
+	vectors []float32, dimensions int) int32 {
+	status := l.indexAddBatch(handle, uint64Pointer(keys), vectorPointer(vectors),
+		uintptr(len(keys)), uintptr(dimensions))
+	runtime.KeepAlive(keys)
+	runtime.KeepAlive(vectors)
+	return status
+}
+
 func (l *puregoUSearchAPI) get(handle unsafe.Pointer, key uint64, vector []float32) int32 {
 	var resultCount uintptr
 	status := l.indexGet(handle, key, vectorPointer(vector), uintptr(len(vector)), &resultCount)
@@ -254,6 +267,12 @@ func (l *puregoUSearchAPI) get(handle unsafe.Pointer, key uint64, vector []float
 
 func (l *puregoUSearchAPI) remove(handle unsafe.Pointer, key uint64) int32 {
 	return l.indexRemove(handle, key)
+}
+
+func (l *puregoUSearchAPI) removeBatch(handle unsafe.Pointer, keys []uint64) int32 {
+	status := l.indexRemoveBatch(handle, uint64Pointer(keys), uintptr(len(keys)))
+	runtime.KeepAlive(keys)
+	return status
 }
 
 func (l *puregoUSearchAPI) compact(handle unsafe.Pointer) int32 {

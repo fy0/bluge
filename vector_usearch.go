@@ -156,6 +156,68 @@ type usearchHardwareAPI interface {
 	hardwareAccelerationAvailable() string
 }
 
+const (
+	usearchBatchTargetFloats = 1 << 20
+	usearchBatchMaxRows      = 4096
+)
+
+type usearchBatchAdder struct {
+	api        usearchNativeAPI
+	handle     unsafe.Pointer
+	dimensions int
+	keys       []uint64
+	vectors    []float32
+}
+
+func newUSearchBatchAdder(api usearchNativeAPI, handle unsafe.Pointer,
+	dimensions int) *usearchBatchAdder {
+	rows := 1
+	if dimensions > 0 {
+		rows = usearchBatchTargetFloats / dimensions
+		if rows < 1 {
+			rows = 1
+		}
+		if rows > usearchBatchMaxRows {
+			rows = usearchBatchMaxRows
+		}
+	}
+	return &usearchBatchAdder{
+		api:        api,
+		handle:     handle,
+		dimensions: dimensions,
+		keys:       make([]uint64, 0, rows),
+		vectors:    make([]float32, 0, rows*dimensions),
+	}
+}
+
+func (b *usearchBatchAdder) Add(key uint64, vector []float32) error {
+	if len(vector) != b.dimensions {
+		return fmt.Errorf("%w: batch vector has %d dimensions, expected %d",
+			ErrVectorInvalidDimension, len(vector), b.dimensions)
+	}
+	if len(b.keys) == cap(b.keys) {
+		if err := b.Flush(); err != nil {
+			return err
+		}
+	}
+	b.keys = append(b.keys, key)
+	b.vectors = append(b.vectors, vector...)
+	return nil
+}
+
+func (b *usearchBatchAdder) Flush() error {
+	if len(b.keys) == 0 {
+		return nil
+	}
+	status := b.api.addBatch(b.handle, b.keys, b.vectors, b.dimensions)
+	if err := usearchNativeStatus(b.api, b.handle, status, "add batch"); err != nil {
+		return err
+	}
+	b.keys = b.keys[:0]
+	b.vectors = b.vectors[:0]
+	return nil
+}
+
 type usearchNativeAPI interface {
 	create(dimensions, metric, connectivity, expansionAdd, expansionSearch uintptr) unsafe.Pointer
 	open(path string) unsafe.Pointer
@@ -167,8 +229,10 @@ type usearchNativeAPI interface {
 	saveBuffer(handle unsafe.Pointer, output []byte) int32
 	reserve(handle unsafe.Pointer, capacity int) int32
 	add(handle unsafe.Pointer, key uint64, vector []float32) int32
+	addBatch(handle unsafe.Pointer, keys []uint64, vectors []float32, dimensions int) int32
 	get(handle unsafe.Pointer, key uint64, vector []float32) int32
 	remove(handle unsafe.Pointer, key uint64) int32
+	removeBatch(handle unsafe.Pointer, keys []uint64) int32
 	compact(handle unsafe.Pointer) int32
 	save(handle unsafe.Pointer, path string) int32
 	search(handle unsafe.Pointer, query []float32, count int, keys []uint64, distances []float32) (int32, int)
@@ -326,8 +390,22 @@ func (u *usearchVectorIndex) ApplyVectorChanges(changes []VectorChange) error {
 		return err
 	}
 
-	dirty := make(map[string]bool)
-	removed := make(map[string]bool)
+	dirty := make(map[string]struct{})
+	removals := make(map[string]map[uint64]struct{})
+	additions := make(map[string]map[uint64][]float32)
+	compact := make(map[string]bool)
+	queueRemoval := func(field string, key uint64, shouldCompact bool) {
+		fieldRemovals := removals[field]
+		if fieldRemovals == nil {
+			fieldRemovals = make(map[uint64]struct{})
+			removals[field] = fieldRemovals
+		}
+		fieldRemovals[key] = struct{}{}
+		dirty[field] = struct{}{}
+		if shouldCompact {
+			compact[field] = true
+		}
+	}
 	for _, change := range changes {
 		key, known := u.manifest.IDs[string(change.ID)]
 		if change.Delete {
@@ -335,19 +413,13 @@ func (u *usearchVectorIndex) ApplyVectorChanges(changes []VectorChange) error {
 				continue
 			}
 			if change.Field == "" {
-				for field, handle := range u.indices {
-					if err := u.nativeStatus(handle, u.api.remove(handle, key), "remove"); err != nil {
-						return err
-					}
-					dirty[field] = true
-					removed[field] = true
+				for field := range u.indices {
+					queueRemoval(field, key, true)
+					delete(additions[field], key)
 				}
-			} else if handle := u.indices[change.Field]; handle != nil {
-				if err := u.nativeStatus(handle, u.api.remove(handle, key), "remove"); err != nil {
-					return err
-				}
-				dirty[change.Field] = true
-				removed[change.Field] = true
+			} else if u.indices[change.Field] != nil {
+				queueRemoval(change.Field, key, true)
+				delete(additions[change.Field], key)
 			}
 			continue
 		}
@@ -365,7 +437,6 @@ func (u *usearchVectorIndex) ApplyVectorChanges(changes []VectorChange) error {
 		spec := u.manifest.Fields[change.Field]
 		handle := u.indices[change.Field]
 		if handle == nil {
-			var err error
 			spec = VectorFieldSpec{
 				Name:       change.Field,
 				Dims:       len(change.Vector),
@@ -377,37 +448,58 @@ func (u *usearchVectorIndex) ApplyVectorChanges(changes []VectorChange) error {
 			if handle == nil {
 				return fmt.Errorf("create usearch field %q: native index could not be created", change.Field)
 			}
-			if u.options.Connectivity > 0 {
-				if err = u.nativeStatus(handle, u.api.reserve(handle, 1), "reserve"); err != nil {
-					u.api.destroy(handle)
-					return err
-				}
-			}
 			u.indices[change.Field] = handle
 			u.manifest.Fields[change.Field] = spec
 		}
 
 		// Replacement semantics match the flat backend and make direct
 		// VectorBatcher callers idempotent even without an explicit delete.
-		if err := u.nativeStatus(handle, u.api.remove(handle, key), "replace"); err != nil {
-			return err
+		queueRemoval(change.Field, key, false)
+		fieldAdditions := additions[change.Field]
+		if fieldAdditions == nil {
+			fieldAdditions = make(map[uint64][]float32)
+			additions[change.Field] = fieldAdditions
 		}
-		if err := u.nativeStatus(handle, u.api.add(handle, key, change.Vector), "add"); err != nil {
-			return err
-		}
-		dirty[change.Field] = true
+		fieldAdditions[key] = change.Vector
 	}
 
+	fields := make([]string, 0, len(dirty))
 	for field := range dirty {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	for _, field := range fields {
 		handle := u.indices[field]
 		if handle == nil {
 			continue
 		}
-		if removed[field] {
+		removeKeys := sortedUSearchKeys(removals[field])
+		if len(removeKeys) > 0 {
+			if err := u.nativeStatus(handle, u.api.removeBatch(handle, removeKeys), "remove batch"); err != nil {
+				return err
+			}
+		}
+		if compact[field] && len(removeKeys) > 0 {
 			// USearch keeps deleted slots until compaction. Compact only
 			// batches containing deletes, where reclaiming those slots also
 			// bounds long-running update/delete workloads.
 			if err := u.nativeStatus(handle, u.api.compact(handle), "compact"); err != nil {
+				return err
+			}
+		}
+		fieldAdditions := additions[field]
+		if len(fieldAdditions) > 0 {
+			if err := u.nativeStatus(handle,
+				u.api.reserve(handle, u.api.size(handle)+len(fieldAdditions)), "reserve batch"); err != nil {
+				return err
+			}
+			adder := newUSearchBatchAdder(u.api, handle, u.manifest.Fields[field].Dims)
+			for _, key := range sortedUSearchVectorKeys(fieldAdditions) {
+				if err := adder.Add(key, fieldAdditions[key]); err != nil {
+					return err
+				}
+			}
+			if err := adder.Flush(); err != nil {
 				return err
 			}
 		}
@@ -418,13 +510,39 @@ func (u *usearchVectorIndex) ApplyVectorChanges(changes []VectorChange) error {
 	return writeUsearchManifest(u.root, u.manifest)
 }
 
+func sortedUSearchKeys(keys map[uint64]struct{}) []uint64 {
+	result := make([]uint64, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func sortedUSearchVectorKeys(vectors map[uint64][]float32) []uint64 {
+	result := make([]uint64, 0, len(vectors))
+	for key := range vectors {
+		result = append(result, key)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
 func (u *usearchVectorIndex) nativeStatus(handle unsafe.Pointer, status int32, operation string) error {
+	return usearchNativeStatus(u.api, handle, status, operation)
+}
+
+func usearchNativeStatus(api usearchNativeAPI, handle unsafe.Pointer,
+	status int32, operation string) error {
 	if status == 0 {
 		return nil
 	}
-	message := u.api.errorMessage(handle)
-	if message == "" {
-		message = "native operation failed"
+	message := "native operation failed"
+	if api != nil {
+		message = api.errorMessage(handle)
+		if message == "" {
+			message = "native operation failed"
+		}
 	}
 	return fmt.Errorf("usearch %s: %s", operation, message)
 }

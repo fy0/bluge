@@ -157,6 +157,23 @@ missing while opening an existing index, text search remains available and
 vector search returns `ErrVectorUnsupported`; writing new vector documents
 still requires the native artifact.
 
+For RAG ingestion, one Bluge `Document` should represent one chunk, matching
+the row model used by LanceDB and zvec. Give the chunk its own `_id`, index the
+chunk text for BM25, attach its embedding as a vector field, and store
+`source_id`, chunk position, and other metadata on that same document. Text and
+ANN results then fuse on the same chunk ID; the full source normally remains in
+an external source store instead of being indexed a second time. Bluge does not
+split source material or run an embedding model.
+
+`Writer.InsertMany` and `Writer.UpdateMany` submit a slice of documents as one
+text-index batch and one vector mutation batch. `OfflineWriter.InsertMany`
+groups a large initial corpus by its configured batch size and is preferred for
+bulk construction. Native USearch additions cross the FFI boundary in bounded
+row-major batches rather than one call per vector. The default text-only path
+for `Insert` and `Batch` does not allocate vector changes or inspect document
+IDs, while still rejecting an accidental vector field before the text batch is
+accepted.
+
 Vector requests can be composed without changing the text search API:
 
 ```go

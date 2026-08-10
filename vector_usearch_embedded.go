@@ -96,10 +96,14 @@ func (b *EmbeddedUSearchVectorBackend) BuildVectorPayload(field string,
 	if status := api.reserve(handle, len(records)); status != 0 {
 		return zapxtext.VectorPayload{}, usearchNativeStatus(api, handle, status, "reserve")
 	}
+	adder := newUSearchBatchAdder(api, handle, dimensions)
 	for key, record := range records {
-		if status := api.add(handle, uint64(key+1), record.Values); status != 0 {
-			return zapxtext.VectorPayload{}, usearchNativeStatus(api, handle, status, "add")
+		if err := adder.Add(uint64(key+1), record.Values); err != nil {
+			return zapxtext.VectorPayload{}, err
 		}
+	}
+	if err := adder.Flush(); err != nil {
+		return zapxtext.VectorPayload{}, err
 	}
 	data, err := serializeUSearchIndex(api, handle)
 	if err != nil {
@@ -162,6 +166,7 @@ func (b *EmbeddedUSearchVectorBackend) MergeVectorPayload(field string,
 	}
 	docIDs := make([]uint32, 0, live)
 	key := uint64(1)
+	adder := newUSearchBatchAdder(api, target, dimensions)
 	for inputID, input := range inputs {
 		source := api.openBuffer(input.Payload.Data)
 		if source == nil {
@@ -182,14 +187,17 @@ func (b *EmbeddedUSearchVectorBackend) MergeVectorPayload(field string,
 				api.destroy(source)
 				return zapxtext.VectorPayload{}, nativeErr
 			}
-			if status := api.add(target, key, vector); status != 0 {
+			if err := adder.Add(key, vector); err != nil {
 				api.destroy(source)
-				return zapxtext.VectorPayload{}, usearchNativeStatus(api, target, status, "add merge")
+				return zapxtext.VectorPayload{}, err
 			}
 			key++
 			docIDs = append(docIDs, uint32(newDocID))
 		}
 		api.destroy(source)
+	}
+	if err := adder.Flush(); err != nil {
+		return zapxtext.VectorPayload{}, err
 	}
 	data, err := serializeUSearchIndex(api, target)
 	if err != nil {
@@ -214,21 +222,6 @@ func serializeUSearchIndex(api usearchNativeAPI, handle unsafe.Pointer) ([]byte,
 		return nil, usearchNativeStatus(api, handle, status, "save buffer")
 	}
 	return data, nil
-}
-
-func usearchNativeStatus(api usearchNativeAPI, handle unsafe.Pointer,
-	status int32, operation string) error {
-	if status == 0 {
-		return nil
-	}
-	message := "native operation failed"
-	if api != nil {
-		message = api.errorMessage(handle)
-		if message == "" {
-			message = "native operation failed"
-		}
-	}
-	return fmt.Errorf("usearch %s: %s", operation, message)
 }
 
 type embeddedUSearchVectorIndex struct {

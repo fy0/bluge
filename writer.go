@@ -58,10 +58,54 @@ func (w *Writer) Insert(doc segment.Document) error {
 	return w.Batch(b)
 }
 
+// InsertMany inserts documents in one atomic text-index batch. Vector-enabled
+// backends receive the corresponding mutations as one batch as well.
+func (w *Writer) InsertMany(documents []*Document) error {
+	if len(documents) == 0 {
+		return nil
+	}
+	batch := NewBatch()
+	for i, document := range documents {
+		if document == nil {
+			return fmt.Errorf("cannot insert nil document at index %d", i)
+		}
+		batch.Insert(document)
+	}
+	return w.Batch(batch)
+}
+
 func (w *Writer) Update(id segment.Term, doc segment.Document) error {
 	b := NewBatch()
 	b.Update(id, doc)
 	return w.Batch(b)
+}
+
+// UpdateMany replaces documents by their _id fields in one atomic text-index
+// batch. Every document must contain an _id field.
+func (w *Writer) UpdateMany(documents []*Document) error {
+	if len(documents) == 0 {
+		return nil
+	}
+	ids := make([]Identifier, len(documents))
+	for i, document := range documents {
+		if document == nil {
+			return fmt.Errorf("cannot update nil document at index %d", i)
+		}
+		id, found, err := documentIdentifier(document)
+		if err != nil {
+			return fmt.Errorf("cannot read document ID at index %d: %w", i, err)
+		}
+		if !found {
+			return fmt.Errorf("cannot update document at index %d without %q", i, _idField)
+		}
+		ids[i] = id
+	}
+
+	batch := NewBatch()
+	for i, document := range documents {
+		batch.Update(ids[i], document)
+	}
+	return w.Batch(batch)
 }
 
 func (w *Writer) Delete(id segment.Term) error {
@@ -71,14 +115,26 @@ func (w *Writer) Delete(id segment.Term) error {
 }
 
 func (w *Writer) Batch(batch *index.Batch) error {
+	segmentVectors := usesSegmentVectorBackend(w.config)
+	if w.vector == nil && !segmentVectors {
+		hasVectors, err := batchContainsVectors(batch)
+		if err != nil {
+			return err
+		}
+		if hasVectors {
+			return ErrVectorUnsupported
+		}
+		return w.chill.Batch(batch)
+	}
+
 	changes, hasVectors, err := vectorChangesForBatch(batch)
 	if err != nil {
 		return err
 	}
-	if hasVectors && w.vector == nil && !usesSegmentVectorBackend(w.config) {
+	if hasVectors && w.vector == nil && !segmentVectors {
 		return ErrVectorUnsupported
 	}
-	if usesSegmentVectorBackend(w.config) {
+	if segmentVectors {
 		if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
 			if err := validator.ValidateVectorChanges(changes); err != nil {
 				return err
@@ -91,7 +147,7 @@ func (w *Writer) Batch(batch *index.Batch) error {
 	if err := w.chill.Batch(batch); err != nil {
 		return err
 	}
-	if usesSegmentVectorBackend(w.config) {
+	if segmentVectors {
 		return nil
 	}
 	return applyVectorChanges(w.vector, changes, hasVectors)
