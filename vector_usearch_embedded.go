@@ -3,9 +3,11 @@
 package bluge
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"unsafe"
@@ -361,6 +363,17 @@ func (e *embeddedUSearchVectorIndex) searchDocumentCandidates(field string, quer
 	return e.searchCandidates(field, query, k, nil, allowed)
 }
 
+// embeddedVectorCandidate is an intermediate search result. The stored
+// identifier is resolved only when the global ranking actually needs it, so a
+// search does not pay for the identifiers of candidates that the global
+// truncation discards.
+type embeddedVectorCandidate struct {
+	globalDoc uint64
+	score     float64
+	id        Identifier
+	idSet     bool
+}
+
 func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []float32,
 	k int, allowedIDs map[Identifier]struct{}, allowedDocs []uint64) ([]VectorHit, error) {
 	if k <= 0 {
@@ -393,7 +406,21 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 		(allowedDocs != nil && len(allowedDocs) == 0) {
 		return []VectorHit{}, nil
 	}
-	hits := make([]VectorHit, 0, len(segments)*k)
+	candidates, err := e.collectCandidates(segments, query, k, allowedIDs, allowedDocs)
+	if err != nil {
+		return nil, err
+	}
+	return e.rankCandidates(candidates, k)
+}
+
+// collectCandidates runs the per-segment native search. Every segment
+// contributes its own top-k, which is enough for the union to contain the
+// global top-k. Identifiers are resolved here only when the filter itself is
+// expressed in terms of identifiers.
+func (e *embeddedUSearchVectorIndex) collectCandidates(segments []embeddedUSearchSegment,
+	query []float32, k int, allowedIDs map[Identifier]struct{},
+	allowedDocs []uint64) ([]embeddedVectorCandidate, error) {
+	candidates := make([]embeddedVectorCandidate, 0, len(segments)*k)
 	for _, segment := range segments {
 		count := k
 		if allowedIDs != nil {
@@ -422,6 +449,7 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 		if resultCount < 0 || resultCount > len(keys) || resultCount > len(distances) {
 			return nil, fmt.Errorf("embedded usearch returned invalid result count %d", resultCount)
 		}
+		similarity := VectorSimilarity(segment.payload.Similarity)
 		for i := 0; i < resultCount; i++ {
 			if keys[i] == 0 || keys[i]-1 >= uint64(len(segment.payload.DocIDs)) {
 				return nil, fmt.Errorf("embedded usearch returned invalid key %d", keys[i])
@@ -430,32 +458,126 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 			if segment.deleted != nil && segment.deleted.Contains(localDoc) {
 				continue
 			}
-			globalDoc := segment.offset + uint64(localDoc)
-			id, err := embeddedDocumentID(e.snapshot, globalDoc)
-			if err != nil {
-				return nil, err
+			candidate := embeddedVectorCandidate{
+				globalDoc: segment.offset + uint64(localDoc),
+				score:     usearchScore(similarity, float64(distances[i])),
 			}
 			if allowedIDs != nil {
+				id, err := embeddedDocumentID(e.snapshot, candidate.globalDoc)
+				if err != nil {
+					return nil, err
+				}
 				if _, ok := allowedIDs[id]; !ok {
 					continue
 				}
+				candidate.id = id
+				candidate.idSet = true
 			}
-			hits = append(hits, VectorHit{
-				ID:    id,
-				Score: usearchScore(VectorSimilarity(segment.payload.Similarity), float64(distances[i])),
-			})
+			candidates = append(candidates, candidate)
 		}
 	}
-	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].Score == hits[j].Score {
-			return hits[i].ID < hits[j].ID
+	return candidates, nil
+}
+
+// rankCandidates reproduces the documented ordering (score descending, then
+// identifier ascending) while resolving as few stored identifiers as possible.
+//
+// When more candidates arrive than k, the k-th score decides everything:
+// candidates scoring above it are returned whatever their identifiers are,
+// candidates scoring exactly it compete for the remaining slots, and
+// candidates scoring below it can never reach the result. Ordering by score
+// alone needs no identifier, so the split is computed before any identifier is
+// read and the candidates below the cutoff are dropped unread.
+//
+// The identifier comparison inside the tied group is the documented one.
+// Document numbers cannot stand in for identifiers there.
+//
+// The sorts are not stable, which is safe here: two candidates only compare
+// equal when they carry the same score and the same identifier, and such
+// candidates produce indistinguishable VectorHit entries. Candidates sharing a
+// score but differing in identifier are ordered by identifier, and the split
+// by score does not depend on the order inside a score group.
+func (e *embeddedUSearchVectorIndex) rankCandidates(candidates []embeddedVectorCandidate,
+	k int) ([]VectorHit, error) {
+	if len(candidates) <= k {
+		// No candidate can be dropped, so there is no split to compute and
+		// every candidate needs its identifier. This is the single-segment
+		// shape of a search.
+		if err := e.resolveCandidateIDs(candidates); err != nil {
+			return nil, err
 		}
-		return hits[i].Score > hits[j].Score
+		slices.SortFunc(candidates, compareScoreThenID)
+		return vectorHits(candidates, nil), nil
+	}
+	// The k-th score decides everything: candidates above it are returned
+	// whatever their identifiers are, candidates on it compete for the
+	// remaining slots, and candidates below it can never reach the result.
+	slices.SortFunc(candidates, func(a, b embeddedVectorCandidate) int {
+		return cmp.Compare(b.score, a.score)
 	})
-	if len(hits) > k {
-		hits = hits[:k]
+	cutoff := candidates[k-1].score
+	above := sort.Search(len(candidates), func(i int) bool {
+		return candidates[i].score <= cutoff
+	})
+	tiedEnd := above + sort.Search(len(candidates)-above, func(i int) bool {
+		return candidates[above+i].score < cutoff
+	})
+	selected, tied := candidates[:above], candidates[above:tiedEnd]
+	if err := e.resolveCandidateIDs(selected); err != nil {
+		return nil, err
 	}
-	return hits, nil
+	if err := e.resolveCandidateIDs(tied); err != nil {
+		return nil, err
+	}
+	// Candidates after tiedEnd are dropped without an identifier read.
+	slices.SortFunc(selected, compareScoreThenID)
+	slices.SortFunc(tied, func(a, b embeddedVectorCandidate) int {
+		return cmp.Compare(a.id, b.id)
+	})
+	keep := k - len(selected)
+	if keep > len(tied) {
+		keep = len(tied)
+	}
+	if keep < 0 {
+		keep = 0
+	}
+	return vectorHits(selected, tied[:keep]), nil
+}
+
+func compareScoreThenID(a, b embeddedVectorCandidate) int {
+	if byScore := cmp.Compare(b.score, a.score); byScore != 0 {
+		return byScore
+	}
+	return cmp.Compare(a.id, b.id)
+}
+
+// vectorHits converts candidate groups that are already in result order into
+// the returned hits. tail is empty when nothing was truncated.
+func vectorHits(head, tail []embeddedVectorCandidate) []VectorHit {
+	hits := make([]VectorHit, 0, len(head)+len(tail))
+	for _, candidate := range head {
+		hits = append(hits, VectorHit{ID: candidate.id, Score: candidate.score})
+	}
+	for _, candidate := range tail {
+		hits = append(hits, VectorHit{ID: candidate.id, Score: candidate.score})
+	}
+	return hits
+}
+
+func (e *embeddedUSearchVectorIndex) resolveCandidateIDs(
+	candidates []embeddedVectorCandidate) error {
+	for i := range candidates {
+		if candidates[i].idSet {
+			continue
+		}
+		id, err := embeddedDocumentID(e.snapshot, candidates[i].globalDoc)
+		if err != nil {
+			return err
+		}
+		candidates[i].id = id
+		candidates[i].idSet = true
+	}
+	return nil
 }
 
 func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, bool) {
@@ -502,6 +624,7 @@ func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, boo
 }
 
 func embeddedDocumentID(snapshot *index.Snapshot, globalDoc uint64) (Identifier, error) {
+	recordVectorStoredIDRead()
 	var id Identifier
 	if err := snapshot.VisitStoredFields(globalDoc, func(field string, value []byte) bool {
 		if field == _idField {
