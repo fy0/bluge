@@ -25,6 +25,9 @@ var (
 	ErrVectorInvalidValue      = errors.New("vector contains NaN or infinity")
 	ErrVectorInvalidField      = errors.New("vector field is invalid")
 	ErrVectorFilterUnsupported = errors.New("vector backend does not support query filters")
+	// ErrVectorPreparedFilter rejects a PreparedVectorFilter that is nil,
+	// already closed, bound to a different reader, or whose reader is closed.
+	ErrVectorPreparedFilter = errors.New("prepared vector filter cannot be used")
 )
 
 type VectorSimilarity string
