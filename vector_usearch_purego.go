@@ -28,6 +28,13 @@ var (
 type puregoUSearchAPI struct {
 	handle uintptr
 
+	// USearch allocates a fixed pool of search contexts per index, sized to
+	// hardware_concurrency when the index is created or loaded. Concurrent
+	// calls beyond that fail with "Reserve capacity ahead of searches!", and
+	// the pool cannot be grown through the C ABI, so every operation on a
+	// handle is serialized through a per-handle mutex.
+	handleLocks sync.Map // unsafe.Pointer -> *sync.Mutex
+
 	abiVersion                      func() uint32
 	hardwareAccelerationCompiledFn  func() string
 	hardwareAccelerationAvailableFn func() string
@@ -208,33 +215,60 @@ func (l *puregoUSearchAPI) openBuffer(data []byte) unsafe.Pointer {
 
 func (l *puregoUSearchAPI) destroy(handle unsafe.Pointer) {
 	if handle != nil {
+		unlock := l.lockHandle(handle)
 		l.indexDestroy(handle)
+		l.handleLocks.Delete(handle)
+		unlock()
 	}
 }
 
+// lockHandle serializes the next native call on handle and returns the
+// release function.
+func (l *puregoUSearchAPI) lockHandle(handle unsafe.Pointer) func() {
+	if handle == nil {
+		return func() {}
+	}
+	lock, _ := l.handleLocks.LoadOrStore(handle, &sync.Mutex{})
+	mu := lock.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (l *puregoUSearchAPI) dimensions(handle unsafe.Pointer) int {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return int(l.indexDimensions(handle))
 }
 
 func (l *puregoUSearchAPI) size(handle unsafe.Pointer) int {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return int(l.indexSize(handle))
 }
 
 func (l *puregoUSearchAPI) serializedLength(handle unsafe.Pointer) int {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return int(l.indexSerializedLength(handle))
 }
 
 func (l *puregoUSearchAPI) saveBuffer(handle unsafe.Pointer, output []byte) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	status := l.indexSaveBuffer(handle, bytePointer(output), uintptr(len(output)))
 	runtime.KeepAlive(output)
 	return status
 }
 
 func (l *puregoUSearchAPI) reserve(handle unsafe.Pointer, capacity int) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return l.indexReserve(handle, uintptr(capacity))
 }
 
 func (l *puregoUSearchAPI) add(handle unsafe.Pointer, key uint64, vector []float32) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	status := l.indexAdd(handle, key, vectorPointer(vector), uintptr(len(vector)))
 	runtime.KeepAlive(vector)
 	return status
@@ -242,6 +276,8 @@ func (l *puregoUSearchAPI) add(handle unsafe.Pointer, key uint64, vector []float
 
 func (l *puregoUSearchAPI) addBatch(handle unsafe.Pointer, keys []uint64,
 	vectors []float32, dimensions int) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	status := l.indexAddBatch(handle, uint64Pointer(keys), vectorPointer(vectors),
 		uintptr(len(keys)), uintptr(dimensions))
 	runtime.KeepAlive(keys)
@@ -250,6 +286,8 @@ func (l *puregoUSearchAPI) addBatch(handle unsafe.Pointer, keys []uint64,
 }
 
 func (l *puregoUSearchAPI) get(handle unsafe.Pointer, key uint64, vector []float32) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	var resultCount uintptr
 	status := l.indexGet(handle, key, vectorPointer(vector), uintptr(len(vector)), &resultCount)
 	runtime.KeepAlive(vector)
@@ -265,25 +303,35 @@ func (l *puregoUSearchAPI) get(handle unsafe.Pointer, key uint64, vector []float
 }
 
 func (l *puregoUSearchAPI) remove(handle unsafe.Pointer, key uint64) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return l.indexRemove(handle, key)
 }
 
 func (l *puregoUSearchAPI) removeBatch(handle unsafe.Pointer, keys []uint64) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	status := l.indexRemoveBatch(handle, uint64Pointer(keys), uintptr(len(keys)))
 	runtime.KeepAlive(keys)
 	return status
 }
 
 func (l *puregoUSearchAPI) compact(handle unsafe.Pointer) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return l.indexCompact(handle)
 }
 
 func (l *puregoUSearchAPI) save(handle unsafe.Pointer, path string) int32 {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	return l.indexSave(handle, path)
 }
 
 func (l *puregoUSearchAPI) search(handle unsafe.Pointer, query []float32, count int,
 	keys []uint64, distances []float32) (int32, int) {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	var resultCount uintptr
 	status := l.indexSearch(handle, vectorPointer(query), uintptr(len(query)), uintptr(count),
 		uint64Pointer(keys), vectorPointer(distances), &resultCount)
@@ -295,6 +343,8 @@ func (l *puregoUSearchAPI) search(handle unsafe.Pointer, query []float32, count 
 
 func (l *puregoUSearchAPI) searchFiltered(handle unsafe.Pointer, query []float32, count int,
 	allowedKeys, keys []uint64, distances []float32) (int32, int) {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	var resultCount uintptr
 	status := l.indexSearchFiltered(handle, vectorPointer(query), uintptr(len(query)), uintptr(count),
 		uint64Pointer(allowedKeys), uintptr(len(allowedKeys)), uint64Pointer(keys),
@@ -320,6 +370,8 @@ func (l *puregoUSearchAPI) errorMessage(handle unsafe.Pointer) string {
 }
 
 func (l *puregoUSearchAPI) errorMessageInto(handle unsafe.Pointer, buffer []byte) int {
+	unlock := l.lockHandle(handle)
+	defer unlock()
 	length := l.indexLastError(handle, bytePointer(buffer), uintptr(len(buffer)))
 	runtime.KeepAlive(buffer)
 	return int(length)
