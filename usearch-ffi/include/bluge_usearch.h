@@ -1,6 +1,7 @@
 #ifndef BLUGE_USEARCH_H
 #define BLUGE_USEARCH_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -8,7 +9,10 @@
 extern "C" {
 #endif
 
-/* Increment when the exported signatures or ownership rules change. */
+/* Increment when the exported signatures or ownership rules change.
+ * Version 3 is the baseline contract. Version 4 adds
+ * bluge_usearch_index_reserve_threads; Go treats it as optional and keeps
+ * ABI 3 libraries working with their default context pool. */
 uint32_t bluge_usearch_abi_version(void);
 
 /* Returned strings are owned by the DLL and remain valid until unload. */
@@ -43,6 +47,14 @@ bluge_usearch_index *bluge_usearch_index_open_buffer(
     const uint8_t *data,
     size_t length);
 int32_t bluge_usearch_index_reserve(bluge_usearch_index *handle, size_t capacity);
+/* ABI 4: reserves member capacity and grows the per-index thread pool that
+ * bounds concurrent searches and insertions. Must not overlap other
+ * operations on the handle. The effective member capacity never shrinks
+ * below the index's current reserved capacity. */
+bool bluge_usearch_index_reserve_threads(
+    bluge_usearch_index *handle,
+    size_t capacity,
+    size_t threads);
 int32_t bluge_usearch_index_add(
     bluge_usearch_index *handle,
     uint64_t key,

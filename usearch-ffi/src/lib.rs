@@ -11,7 +11,10 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 const METRIC_L2: u32 = 1;
 const METRIC_DOT: u32 = 2;
 const METRIC_COSINE: u32 = 3;
-const ABI_VERSION: u32 = 3;
+// ABI 4 adds bluge_usearch_index_reserve_threads, which grows the per-index
+// search context pool so concurrent calls stop failing once they exceed
+// hardware_concurrency. Earlier exports are unchanged.
+const ABI_VERSION: u32 = 4;
 
 static HARDWARE_COMPILED: OnceLock<CString> = OnceLock::new();
 static HARDWARE_AVAILABLE: OnceLock<CString> = OnceLock::new();
@@ -265,6 +268,32 @@ pub extern "C" fn bluge_usearch_index_reserve(handle: *mut IndexHandle, capacity
             .reserve(capacity)
             .map_err(|error| error.to_string())
     })
+}
+
+/// Reserves member capacity and grows the per-index thread pool that bounds
+/// concurrent searches and insertions.
+///
+/// `capacity` is clamped up to the index's current reserved member capacity:
+/// USearch copies the vector lookup table into a buffer of `capacity` slots,
+/// so a smaller value would corrupt live reservations. The call must not
+/// overlap other operations on the handle; the Go adapter only invokes it on
+/// freshly opened handles or while holding every context permit.
+#[unsafe(no_mangle)]
+pub extern "C" fn bluge_usearch_index_reserve_threads(
+    handle: *mut IndexHandle,
+    capacity: usize,
+    threads: usize,
+) -> bool {
+    status(handle, |handle| {
+        if threads == 0 {
+            return Err("thread count must be greater than zero".to_owned());
+        }
+        let capacity = capacity.max(handle.index.capacity());
+        handle
+            .index
+            .reserve_capacity_and_threads(capacity, threads)
+            .map_err(|error| error.to_string())
+    }) == 0
 }
 
 #[unsafe(no_mangle)]

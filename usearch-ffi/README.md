@@ -28,6 +28,12 @@ Go adapter bounds each addition call to roughly 4 MiB of `float32` values and
 at most 4096 rows; USearch still owns each HNSW insertion, but the process no
 longer pays one Go-to-native transition per vector.
 
+ABI 4 adds `bluge_usearch_index_reserve_threads`, which grows the per-index
+search context pool beyond the `hardware_concurrency` default so concurrent
+searches on one handle run in parallel instead of serializing. The Go adapter
+caps in-flight calls at the negotiated pool size and keeps ABI 3 libraries
+working with their default pool.
+
 ## Loading from Go
 
 The shared Go binding uses `purego.RegisterLibFunc` for typed C calls on every
@@ -66,7 +72,7 @@ Branch and pull-request builds remain temporary Actions artifacts. Pushing a
 semantic Bluge tag such as `v0.6.0` waits for all six native builds and their
 complete `CGO_ENABLED=0` Go test suites, then publishes the
 corresponding GitHub Release. Release assets use names such as
-`vector-engine-abi3-windows-amd64.zip` and are accompanied by a single
+`vector-engine-abi4-windows-amd64.zip` and are accompanied by a single
 `SHA256SUMS` file. GitHub also provides the normal source archives for the Go
 module in the same release.
 
@@ -103,5 +109,6 @@ The native adapter and its dependencies retain independent compatibility
 identifiers inside `manifest.json`. `Cargo.toml` versions the adapter,
 `Cargo.lock` pins the exact USearch dependency compiled into an artifact, and
 `bluge_usearch_abi_version` identifies the C contract. The current release uses
-adapter 0.1.0, USearch 2.26.0, and ABI 3. Bluge rejects an incompatible ABI
-before opening an index, regardless of the filenames or release tag.
+adapter 0.1.0, USearch 2.26.0, and ABI 4. Bluge accepts ABI 3 and 4 libraries
+and rejects anything else before opening an index, regardless of the filenames
+or release tag.

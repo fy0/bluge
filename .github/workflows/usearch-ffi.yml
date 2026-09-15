@@ -322,7 +322,7 @@ jobs:
         run: |
           $library = Resolve-Path "target\${{ matrix.target }}\release\${{ matrix.binary }}"
           $probe = .\probe.ps1 -LibraryPath $library.Path | ConvertFrom-Json
-          if ($probe.abi_version -ne 3) {
+          if ($probe.abi_version -ne 4) {
             throw "Unexpected vector engine ABI version: $($probe.abi_version)"
           }
           if ("${{ matrix.numkong }}" -eq "true" -and $probe.compiled -eq "serial") {
@@ -399,7 +399,7 @@ jobs:
           PY
           )"
           echo "$probe_json"
-          if [[ "$(jq -r '.abi_version' <<<"$probe_json")" != "3" ]]; then
+          if [[ "$(jq -r '.abi_version' <<<"$probe_json")" != "4" ]]; then
             exit 1
           fi
           compiled="$(jq -r '.compiled' <<<"$probe_json")"
@@ -460,7 +460,7 @@ jobs:
           $hardwareCompiled = $probe.compiled
           $hardwareAvailable = $probe.available
           @{
-            abi_version = 3
+            abi_version = 4
             adapter_version = $adapterPackage.version
             binary = "${{ matrix.binary }}"
             bluge_version = $blugeVersion
@@ -513,7 +513,7 @@ jobs:
             --arg hardware_available "${{ steps.unix-probe.outputs.available }}" \
             --argjson numkong "${{ matrix.numkong }}" \
             '{
-              abi_version: 3,
+              abi_version: 4,
               adapter_version: $adapter_version,
               binary: $binary,
               bluge_version: $bluge_version,
@@ -584,7 +584,7 @@ jobs:
             jq -e \
               --arg version "$version" \
               --arg source_commit "$GITHUB_SHA" \
-              '.abi_version == 3 and
+              '.abi_version == 4 and
                .bluge_version == $version and
                .source_commit == $source_commit' \
               "$manifest" >/dev/null
@@ -597,7 +597,7 @@ jobs:
               echo "Native dependency versions differ across platforms" >&2
               exit 1
             fi
-            archive="$PWD/dist/vector-engine-abi3-${platform}.zip"
+            archive="$PWD/dist/vector-engine-abi4-${platform}.zip"
             (cd "$directory" && zip -q -r "$archive" .)
           done
           (cd dist && sha256sum ./*.zip > SHA256SUMS)
