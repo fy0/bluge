@@ -319,7 +319,9 @@ func TestEmbeddedSearchBestResultsInOneSegment(t *testing.T) {
 	// native search picks arbitrarily among its own ties and can even return
 	// fewer hits than requested when a segment is full of identical vectors,
 	// so the assertions below cover membership and scores rather than a
-	// specific identifier order inside the tie.
+	// specific identifier order inside the tie. The top score is compared
+	// with a tolerance because the SIMD distance kernels leave residual
+	// floating-point noise (about 2e-16 on arm64 NEON).
 	for _, k := range []int{1, 50, 192, 512} {
 		k := k
 		hits, err := corpus.search(k, query, nil)
@@ -334,7 +336,7 @@ func TestEmbeddedSearchBestResultsInOneSegment(t *testing.T) {
 		for i, hit := range hits {
 			number := documentNumberOf(t, hit.ID)
 			inBestSegment := number >= bestStart && number < bestEnd
-			if hit.Score == 1 {
+			if hit.Score >= 1-1e-6 {
 				best++
 				if !inBestSegment {
 					t.Fatalf("k=%d: hit %d is %q with the top score but lives outside the "+
