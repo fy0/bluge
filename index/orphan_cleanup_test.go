@@ -17,7 +17,6 @@ package index
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -84,7 +83,7 @@ func TestOrphanedSegmentFilesRemovedOnOpen(t *testing.T) {
 	}
 	for _, id := range []uint64{0xdead, 0xbeef0000} {
 		path := filepath.Join(fsDir.path, fsDir.fileName(ItemKindSegment, id))
-		if err := ioutil.WriteFile(path, []byte("orphan"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte("orphan"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -130,15 +129,16 @@ func TestSkippedMergeSegmentFileRemoved(t *testing.T) {
 	mergeIntroComplete.Add(1)
 	var segIntroCompleted int
 	cfg.EventCallback = func(e Event) {
-		if e.Kind == EventKindBatchIntroduction {
+		switch e.Kind {
+		case EventKindBatchIntroduction:
 			segIntroCompleted++
 			if segIntroCompleted == 3 {
 				introComplete.Done()
 			}
-		} else if e.Kind == EventKindMergeTaskIntroductionStart {
+		case EventKindMergeTaskIntroductionStart:
 			mergeIntroStart.Done()
 			introComplete.Wait()
-		} else if e.Kind == EventKindMergeTaskIntroduction {
+		case EventKindMergeTaskIntroduction:
 			mergeIntroComplete.Done()
 		}
 	}
@@ -235,7 +235,7 @@ func noFileMerging(cfg *Config) {
 // name -> contents map.
 func dirContents(t *testing.T, path string) map[string][]byte {
 	t.Helper()
-	entries, err := ioutil.ReadDir(path)
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func dirContents(t *testing.T, path string) map[string][]byte {
 		if e.IsDir() {
 			continue
 		}
-		data, err := ioutil.ReadFile(filepath.Join(path, e.Name()))
+		data, err := os.ReadFile(filepath.Join(path, e.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -278,23 +278,23 @@ func TestOpenWriterFailsOnUnreadableSnapshot(t *testing.T) {
 	corruptions := map[string]func(t *testing.T, path string){
 		// flips a content byte; load fails on the CRC check
 		"crc": func(t *testing.T, path string) {
-			raw, err := ioutil.ReadFile(path)
+			raw, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			raw[len(raw)/2] ^= 0xff
-			if err := ioutil.WriteFile(path, raw, 0600); err != nil {
+			if err := os.WriteFile(path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 		},
 		// overwrites the format version byte with an unsupported value
 		"version": func(t *testing.T, path string) {
-			raw, err := ioutil.ReadFile(path)
+			raw, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			raw[0] = 0x7f
-			if err := ioutil.WriteFile(path, raw, 0600); err != nil {
+			if err := os.WriteFile(path, raw, 0600); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -363,7 +363,7 @@ func TestOpenWriterFailsOnUnreadableSnapshot(t *testing.T) {
 			if err := os.Remove(midPath); err != nil {
 				t.Fatal(err)
 			}
-			if err := ioutil.WriteFile(filepath.Join(fsDir.path,
+			if err := os.WriteFile(filepath.Join(fsDir.path,
 				fsDir.fileName(ItemKindSegment, 0xdead)), []byte("orphan"), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -534,7 +534,7 @@ func TestSweepRemovesOrphansOnlyWithMultipleSnapshotsRetained(t *testing.T) {
 	// drop two fake orphan segment files
 	for _, id := range []uint64{0xdead, 0xbeef0000} {
 		path := filepath.Join(fsDir.path, fsDir.fileName(ItemKindSegment, id))
-		if err := ioutil.WriteFile(path, []byte("orphan"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte("orphan"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -609,7 +609,7 @@ func TestSweepRetriesFailedRemove(t *testing.T) {
 
 	// drop an orphan segment file whose first removal will fail
 	orphanPath := filepath.Join(fsDir.path, fsDir.fileName(ItemKindSegment, 0xdead))
-	if err := ioutil.WriteFile(orphanPath, []byte("orphan"), 0600); err != nil {
+	if err := os.WriteFile(orphanPath, []byte("orphan"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	failOnce[0xdead] = true
@@ -661,7 +661,7 @@ func TestSweepWithOpenReaderHoldingSnapshot(t *testing.T) {
 	liveSegs := segmentFileIDs(t, cfg)
 
 	orphanPath := filepath.Join(fsDir.path, fsDir.fileName(ItemKindSegment, 0xdead))
-	if err := ioutil.WriteFile(orphanPath, []byte("orphan"), 0600); err != nil {
+	if err := os.WriteFile(orphanPath, []byte("orphan"), 0600); err != nil {
 		t.Fatal(err)
 	}
 

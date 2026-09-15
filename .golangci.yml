@@ -104,7 +104,7 @@ linters:
         linters:
           - gosec
         text: G204
-      - path: ^vector_usearch_integration_test\.go$
+      - path: ^(vector_usearch_(integration|embedded_testkit)_test|index/orphan_cleanup_test)\.go$
         linters:
           - gosec
         text: G703

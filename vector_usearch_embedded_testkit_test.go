@@ -112,7 +112,7 @@ func buildEmbeddedCorpus(tb testing.TB, spec embeddedCorpusSpec) *embeddedCorpus
 	if spec.VectorOf == nil {
 		dims := spec.Dimensions
 		spec.VectorOf = func(i int) []float32 {
-			return deterministicVector(uint64(i)+1, make([]float32, dims))
+			return deterministicVector(uint64(i)+1, make([]float32, dims)) //nolint:gosec // document indices are non-negative
 		}
 	}
 	if spec.GroupOf == nil {

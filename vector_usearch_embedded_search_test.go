@@ -17,10 +17,10 @@ import (
 // before candidate identifiers were resolved lazily. It reads the stored
 // identifier of every candidate, then orders and truncates the whole list. It
 // is the semantic oracle the optimized implementation must match.
-func referenceEmbeddedSearch(tb testing.TB, e *embeddedUSearchVectorIndex, field string,
+func referenceEmbeddedSearch(tb testing.TB, e *embeddedUSearchVectorIndex,
 	query []float32, k int, allowedIDs map[Identifier]struct{}, allowedDocs []uint64) []VectorHit {
 	tb.Helper()
-	segments := e.fields[field]
+	segments := e.fields[embeddedBenchField]
 	hits := make([]VectorHit, 0, len(segments)*k)
 	for _, segment := range segments {
 		count := k
@@ -170,7 +170,7 @@ func TestEmbeddedSearchMatchesReferenceImplementation(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertSameHits(t, "no filter",
-				got, referenceEmbeddedSearch(t, index, embeddedBenchField, query, k, nil, nil))
+				got, referenceEmbeddedSearch(t, index, query, k, nil, nil))
 			assertOrdering(t, "no filter", got)
 
 			got, err = corpus.search(k, query, groupFilter("g1"))
@@ -178,7 +178,7 @@ func TestEmbeddedSearchMatchesReferenceImplementation(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertSameHits(t, "document filter",
-				got, referenceEmbeddedSearch(t, index, embeddedBenchField, query, k, nil, allowedDocs))
+				got, referenceEmbeddedSearch(t, index, query, k, nil, allowedDocs))
 			assertOrdering(t, "document filter", got)
 
 			got, err = index.SearchCandidates(embeddedBenchField, query, k, allowedIDs)
@@ -186,7 +186,7 @@ func TestEmbeddedSearchMatchesReferenceImplementation(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertSameHits(t, "identifier filter",
-				got, referenceEmbeddedSearch(t, index, embeddedBenchField, query, k, allowedIDs, nil))
+				got, referenceEmbeddedSearch(t, index, query, k, allowedIDs, nil))
 			assertOrdering(t, "identifier filter", got)
 		})
 	}
@@ -249,7 +249,7 @@ func TestEmbeddedSearchTieBreaking(t *testing.T) {
 		}
 		assertOrdering(t, "ties", got)
 		assertSameHits(t, fmt.Sprintf("ties k=%d", k),
-			got, referenceEmbeddedSearch(t, index, embeddedBenchField, query, k, nil, nil))
+			got, referenceEmbeddedSearch(t, index, query, k, nil, nil))
 		for i := 1; i < len(got); i++ {
 			if got[i-1].Score < got[i].Score {
 				t.Fatalf("k=%d: not sorted by score", k)
@@ -277,7 +277,7 @@ func TestEmbeddedSearchTieBreaking(t *testing.T) {
 		}
 		assertOrdering(t, "ties filtered", got)
 		assertSameHits(t, fmt.Sprintf("ties filtered k=%d", k),
-			got, referenceEmbeddedSearch(t, index, embeddedBenchField, query, k, nil, allowedDocs))
+			got, referenceEmbeddedSearch(t, index, query, k, nil, allowedDocs))
 	}
 }
 
@@ -357,7 +357,7 @@ func TestEmbeddedSearchBestResultsInOneSegment(t *testing.T) {
 		}
 		assertSameHits(t, fmt.Sprintf("concentrated k=%d", k),
 			hits, referenceEmbeddedSearch(t, corpus.embeddedIndex(t),
-				embeddedBenchField, query, k, nil, nil))
+				query, k, nil, nil))
 	}
 }
 
@@ -407,7 +407,7 @@ func TestEmbeddedSearchDeletionsAndFilters(t *testing.T) {
 	}
 	assertOrdering(t, "filtered", hits)
 	assertSameHits(t, "filtered exhaustive",
-		hits, referenceEmbeddedSearch(t, index, embeddedBenchField, query, 500, nil, allowed))
+		hits, referenceEmbeddedSearch(t, index, query, 500, nil, allowed))
 
 	// An identifier filter that matches nothing keeps its own empty contract.
 	empty, err := index.SearchCandidates(embeddedBenchField, query, 10, map[Identifier]struct{}{})
@@ -476,7 +476,7 @@ func TestEmbeddedSearchBestResultsRemainAfterDeletion(t *testing.T) {
 		t.Fatalf("deletion shrank the result set: %v", vectorIDs(hits))
 	}
 	assertSameHits(t, "after deletion",
-		hits, referenceEmbeddedSearch(t, corpus.embeddedIndex(t), embeddedBenchField, query, 5, nil, nil))
+		hits, referenceEmbeddedSearch(t, corpus.embeddedIndex(t), query, 5, nil, nil))
 }
 
 func TestEmbeddedSearchValidationErrors(t *testing.T) {
@@ -608,14 +608,14 @@ func TestEmbeddedSearchDefersIdentifierReads(t *testing.T) {
 	}
 	reads := vectorStoredIDReadCount()
 	candidates := len(corpus.embeddedIndex(t).fields[embeddedBenchField]) * k
-	if int(reads) > len(hits)+1 {
+	if int(reads) > len(hits)+1 { //nolint:gosec // the read counter is small
 		t.Fatalf("resolved %d identifiers for %d results (%d candidates): identifiers "+
 			"were not deferred", reads, len(hits), candidates)
 	}
 
 	resetVectorStoredIDReadCount()
 	referenceEmbeddedSearch(t, corpus.embeddedIndex(t),
-		embeddedBenchField, query, k, nil, nil)
+		query, k, nil, nil)
 	referenceReads := vectorStoredIDReadCount()
 	if referenceReads <= reads {
 		t.Fatalf("reference read %d identifiers, optimized read %d: expected the "+
