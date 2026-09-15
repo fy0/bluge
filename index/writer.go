@@ -72,13 +72,6 @@ func OpenWriter(config Config) (*Writer, error) {
 		persistSyncs:   make(chan chan struct{}),
 	}
 
-	// start the requested number of analysis workers
-	for i := 0; i < config.NumAnalysisWorkers; i++ {
-		config.GoFunc(func() {
-			analysisWorker(config.AnalysisChan, rv.closeCh)
-		})
-	}
-
 	var err error
 	rv.segPlugin, err = loadSegmentPlugin(config.supportedSegmentPlugins, config.SegmentType, config.SegmentVersion)
 	if err != nil {
@@ -101,23 +94,35 @@ func OpenWriter(config Config) (*Writer, error) {
 		return nil, fmt.Errorf("error getting exclusive access to diretory: %w", err)
 	}
 
-	lastPersistedEpoch, nextSnapshotEpoch, err2 := rv.loadSnapshots()
-	if err2 != nil {
-		_ = rv.Close()
-		return nil, err2
-	}
-	atomic.StoreUint64(&rv.stats.LastPersistedEpoch, lastPersistedEpoch)
-
-	// initialize nextSegmentID to a safe value
+	// initialize nextSegmentID to a safe value; list the segment files
+	// before loading snapshots, so a failure here happens before any
+	// snapshot has been committed to the deletion policy and the cleanup
+	// path cannot remove files whose references are still unknown
 	existingSegments, err := rv.directory.List(ItemKindSegment)
 	if err != nil {
-		_ = rv.Close()
+		rv.abortOpen()
 		return nil, err
 	}
 	if len(existingSegments) > 0 {
 		rv.nextSegmentID = existingSegments[0]
 	}
 	rv.nextSegmentID++
+
+	lastPersistedEpoch, nextSnapshotEpoch, err2 := rv.loadSnapshots()
+	if err2 != nil {
+		rv.abortOpen()
+		return nil, err2
+	}
+	atomic.StoreUint64(&rv.stats.LastPersistedEpoch, lastPersistedEpoch)
+
+	// report on-disk segment files to the deletion policy, so files that
+	// are not referenced by any loaded snapshot (leftovers from
+	// interrupted persists or skipped merge introductions) can be
+	// reclaimed by the cleanup below; reaching this point means every
+	// snapshot loaded, so the reference set is complete
+	if tracker, ok := rv.deletionPolicy.(SegmentFileTracker); ok {
+		tracker.TrackSegmentFiles(existingSegments)
+	}
 
 	// give deletion policy an opportunity to cleanup now before we begin
 	err = rv.deletionPolicy.Cleanup(rv.directory)
@@ -141,7 +146,25 @@ func OpenWriter(config Config) (*Writer, error) {
 	go rv.mergerLoop(mergesCh, persistNotifier)
 	rv.asyncStarted = true
 
+	// start the requested number of analysis workers last, so a failed
+	// open never leaves them running against a closed closeCh
+	for i := 0; i < config.NumAnalysisWorkers; i++ {
+		config.GoFunc(func() {
+			analysisWorker(config.AnalysisChan, rv.closeCh)
+		})
+	}
+
 	return rv, nil
+}
+
+// abortOpen releases the resources acquired by a failed OpenWriter without
+// running the deletion policy: the snapshot load was incomplete, so the
+// set of referenced files is unknown and nothing may be removed.
+func (s *Writer) abortOpen() {
+	close(s.closeCh)
+	s.asyncTasks.Wait()
+	s.replaceRoot(nil, nil, nil)
+	_ = s.directory.Unlock()
 }
 
 func (s *Writer) loadSnapshots() (lastPersistedEpoch, nextSnapshotEpoch uint64, err error) {
@@ -152,21 +175,21 @@ func (s *Writer) loadSnapshots() (lastPersistedEpoch, nextSnapshotEpoch uint64, 
 	}
 
 	// try and load each snapshot seen
-	var snapshotsFound, snapshotLoaded bool
 	// walk snapshots backwards (oldest to newest)
 	// this allows the deletion policy see each snapshot
 	// in the order it was created
 	for i := len(snapshotEpochs) - 1; i >= 0; i-- {
 		snapshotEpoch := snapshotEpochs[i]
-		snapshotsFound = true
 		var indexSnapshot *Snapshot
 		indexSnapshot, err = s.loadSnapshot(snapshotEpoch)
 		if err != nil {
-			log.Printf("error loading snapshot epoch: %d: %v", snapshotEpoch, err)
-			// but keep going and hope there is another newer snapshot that works
-			continue
+			// an unreadable snapshot leaves the set of referenced
+			// segment files unknown, and continuing would reuse its
+			// epoch for new snapshots: fail the open instead of
+			// writing over data the unreadable snapshot still needs
+			return 0, 0, fmt.Errorf("error loading snapshot epoch %d: %w",
+				snapshotEpoch, err)
 		}
-		snapshotLoaded = true
 
 		lastPersistedEpoch = indexSnapshot.epoch
 		nextSnapshotEpoch = indexSnapshot.epoch + 1
@@ -177,13 +200,6 @@ func (s *Writer) loadSnapshots() (lastPersistedEpoch, nextSnapshotEpoch uint64, 
 		// make this snapshot the root (and retire the previous)
 		atomic.StoreUint64(&s.stats.TotFileSegmentsAtRoot, uint64(len(indexSnapshot.segment)))
 		s.replaceRoot(indexSnapshot, nil, nil)
-	}
-	if snapshotsFound && !snapshotLoaded {
-		// handle this case better, there was at least one snapshot on disk
-		// but we failed to successfully load anything
-		// this results in losing all data and starting from scratch
-		// should require, some more explicit decision, for now error out
-		return 0, 0, fmt.Errorf("existing snapshots found, but none could be loaded, exiting")
 	}
 	return lastPersistedEpoch, nextSnapshotEpoch, nil
 }
@@ -546,11 +562,14 @@ func (s *Writer) loadSnapshot(epoch uint64) (*Snapshot, error) {
 			return nil, fmt.Errorf("error reading snapshot CRC: %w", err)
 		}
 		if !bytes.Equal(computedCRCBytes, fileCRCBytes) {
+			// format the error before closing: fileCRCBytes points into
+			// the mapping that closer.Close() may unmap
+			err = fmt.Errorf("CRC mismatch loading snapshot %d: computed: %x file: %x",
+				epoch, computedCRCBytes, fileCRCBytes)
 			if closer != nil {
 				_ = closer.Close()
 			}
-			return nil, fmt.Errorf("CRC mismatch loading snapshot %d: computed: %x file: %x",
-				epoch, computedCRCBytes, fileCRCBytes)
+			return nil, err
 		}
 	}
 	if closer != nil {

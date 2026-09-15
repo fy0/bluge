@@ -60,3 +60,40 @@ func TestDeletableEpochs(t *testing.T) {
 		})
 	}
 }
+
+// removeRecordingDirectory records segment Remove calls; all other
+// Directory methods are unused by KeepNLatestDeletionPolicy.Cleanup.
+type removeRecordingDirectory struct {
+	Directory
+	removed []uint64
+}
+
+func (d *removeRecordingDirectory) Remove(kind string, id uint64) error {
+	if kind == ItemKindSegment {
+		d.removed = append(d.removed, id)
+	}
+	return nil
+}
+
+// TestKeepNLatestTrackSegmentFiles verifies that segment files reported at
+// open are removed by Cleanup only when no retained snapshot references
+// them.
+func TestKeepNLatestTrackSegmentFiles(t *testing.T) {
+	dir := &removeRecordingDirectory{}
+	policy := NewKeepNLatestDeletionPolicy(1)
+	policy.Commit(&Snapshot{epoch: 1, segment: []*segmentSnapshot{{id: 7}}})
+	policy.TrackSegmentFiles([]uint64{7, 8, 9})
+	// age epoch 1 out of the retained window so segment 7 is no longer
+	// referenced by a live snapshot
+	policy.Commit(&Snapshot{epoch: 2, segment: []*segmentSnapshot{{id: 10}}})
+	if err := policy.Cleanup(dir); err != nil {
+		t.Fatal(err)
+	}
+	removed := map[uint64]bool{}
+	for _, id := range dir.removed {
+		removed[id] = true
+	}
+	if len(removed) != 3 || !removed[7] || !removed[8] || !removed[9] {
+		t.Fatalf("expected segments 7, 8 and 9 removed, got %v", dir.removed)
+	}
+}

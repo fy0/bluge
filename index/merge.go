@@ -190,6 +190,8 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 		seg, err = s.loadSegment(newSegmentID, s.segPlugin)
 		if err != nil {
 			atomic.AddUint64(&s.stats.TotFileMergePlanTasksErr, 1)
+			// the merged segment file is not referenced by any snapshot
+			_ = s.directory.Remove(ItemKindSegment, newSegmentID)
 			return err
 		}
 		oldNewDocNums = make(map[uint64][]uint64)
@@ -213,7 +215,11 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 	// give it to the introducer
 	select {
 	case <-s.closeCh:
-		_ = seg.Close()
+		if seg != nil {
+			_ = seg.Close()
+			// the merged segment file is not referenced by any snapshot
+			_ = s.directory.Remove(ItemKindSegment, newSegmentID)
+		}
 		return segment.ErrClosed
 	case merges <- sm:
 		atomic.AddUint64(&s.stats.TotFileMergeIntroductions, 1)
@@ -231,10 +237,15 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 	atomic.AddUint64(&s.stats.TotFileMergeIntroductionsDone, 1)
 	if mergeTaskIntroStatus != nil && mergeTaskIntroStatus.snapshot != nil {
 		_ = mergeTaskIntroStatus.snapshot.Close()
-		if mergeTaskIntroStatus.skipped {
-			// decrement the ref counts on skipping introduction.
-			// FIXME stale file that won't get cleaned up
+		if mergeTaskIntroStatus.skipped && seg != nil {
+			// decrement the ref counts on skipping introduction, and
+			// remove the merged segment file, which is not referenced
+			// by any snapshot
 			_ = seg.Close()
+			if err := s.directory.Remove(ItemKindSegment, newSegmentID); err != nil {
+				s.fireAsyncError(fmt.Errorf("error removing skipped merge segment %d: %v",
+					newSegmentID, err))
+			}
 		}
 	}
 
@@ -345,6 +356,8 @@ func (s *Writer) mergeSegmentBases(merges chan *segmentMerge, snapshot *Snapshot
 	seg, err := s.loadSegment(newSegmentID, s.segPlugin)
 	if err != nil {
 		atomic.AddUint64(&s.stats.TotMemMergeErr, 1)
+		// the merged segment file is not referenced by any snapshot
+		_ = s.directory.Remove(ItemKindSegment, newSegmentID)
 		return nil, 0, err
 	}
 
@@ -369,6 +382,8 @@ func (s *Writer) mergeSegmentBases(merges chan *segmentMerge, snapshot *Snapshot
 	select { // send to introducer
 	case <-s.closeCh:
 		_ = seg.DecRef()
+		// the merged segment file is not referenced by any snapshot
+		_ = s.directory.Remove(ItemKindSegment, newSegmentID)
 		return nil, 0, segment.ErrClosed
 	case merges <- sm:
 	}
@@ -381,9 +396,15 @@ func (s *Writer) mergeSegmentBases(merges chan *segmentMerge, snapshot *Snapshot
 		atomic.AddUint64(&s.stats.TotMemMergeSegments, uint64(len(sbs)))
 		atomic.AddUint64(&s.stats.TotMemMergeDone, 1)
 		if mergeTaskIntroStatus.skipped {
-			// decrement the ref counts on skipping introduction.
+			// decrement the ref counts on skipping introduction, and
+			// remove the merged segment file, which is not referenced
+			// by any snapshot
 			_ = newSnapshot.Close()
 			_ = seg.Close()
+			if err := s.directory.Remove(ItemKindSegment, newSegmentID); err != nil {
+				s.fireAsyncError(fmt.Errorf("error removing skipped merge segment %d: %v",
+					newSegmentID, err))
+			}
 			newSnapshot = nil
 		}
 	}

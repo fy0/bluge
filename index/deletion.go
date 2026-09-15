@@ -19,6 +19,15 @@ type DeletionPolicy interface {
 	Cleanup(Directory) error
 }
 
+// SegmentFileTracker is an optional interface a DeletionPolicy can implement
+// to learn about the segment files present in the directory when a writer
+// opens. It is only called after every snapshot in the directory was loaded
+// successfully, so the set of referenced segments is complete and files not
+// referenced by a live snapshot may be removed by Cleanup.
+type SegmentFileTracker interface {
+	TrackSegmentFiles(ids []uint64)
+}
+
 type KeepNLatestDeletionPolicy struct {
 	n                 int
 	liveEpochs        []uint64
@@ -52,6 +61,14 @@ func (p *KeepNLatestDeletionPolicy) Commit(snapshot *Snapshot) {
 		newlyDeletable := p.liveEpochs[:len(p.liveEpochs)-p.n]
 		p.liveEpochs = p.liveEpochs[len(p.liveEpochs)-p.n:]
 		p.deletableEpochs = append(p.deletableEpochs, newlyDeletable...)
+	}
+}
+
+// TrackSegmentFiles marks the provided segment file ids as known, so that
+// cleanupSegments can remove the ones not referenced by any live snapshot.
+func (p *KeepNLatestDeletionPolicy) TrackSegmentFiles(ids []uint64) {
+	for _, id := range ids {
+		p.knownSegmentFiles[id] = struct{}{}
 	}
 }
 
