@@ -195,7 +195,11 @@ func mergeAndPersistInvertedSection(segments []*SegmentBase, dropsIn []*roaring.
 		use1HitEncoding := func(termCardinality uint64) (bool, uint64, uint64) {
 			if termCardinality == uint64(1) && locEncoder.FinalSize() <= 0 {
 				docNum := uint64(newRoaring.Minimum())
-				if under32Bits(docNum) && docNum == lastDocNum && lastFreq == 1 {
+				// lastNorm must also fit into 31 bits and be non-zero:
+				// FSTValEncode1Hit masks the norm to 31 bits, and
+				// readers treat a zero normBits as "not 1-hit"
+				if under32Bits(docNum) && docNum == lastDocNum && lastFreq == 1 &&
+					under32Bits(lastNorm) && lastNorm != 0 {
 					return true, docNum, lastNorm
 				}
 			}
