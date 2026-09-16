@@ -73,7 +73,7 @@ func TestUsearchGateBoundsConcurrentSearches(t *testing.T) {
 	}
 
 	peak := api.handlePeakInFlight(segment.handle)
-	if peak > int32(want) { //nolint:gosec // the bound is a small positive constant
+	if peak > int32(want) {
 		t.Fatalf("in-flight native calls peaked at %d, above the pool size %d", peak, want)
 	}
 	if runtime.GOMAXPROCS(0) > 1 && peak < 2 {
