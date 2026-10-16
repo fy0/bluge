@@ -27,7 +27,7 @@ var (
 )
 
 const (
-	collectionFormatVersion = 1
+	collectionFormatVersion = 2
 	collectionRevisionField = "_collection_revision"
 	collectionCorpusField   = "_collection_corpus"
 )
@@ -85,8 +85,9 @@ func (c CollectionConfig) normalized() (CollectionConfig, error) {
 	return c, nil
 }
 
-// VectorSpaceSpec is immutable once registered. ModelRevision and Preprocessing
-// identify the embedding recipe; callers must produce query vectors using it.
+// VectorSpaceSpec is immutable once registered. ID names the embedding space;
+// Model, ModelRevision and Preprocessing are optional descriptions. Field defaults
+// to "embedding" and Similarity to cosine. Callers supply compatible vectors.
 type VectorSpaceSpec struct {
 	ID            string           `json:"id"`
 	Field         string           `json:"field"`
@@ -106,8 +107,8 @@ func (s VectorSpaceSpec) validate() error {
 			return errors.New("invalid vector space ID")
 		}
 	}
-	if s.Field == "" || s.Model == "" || s.ModelRevision == "" {
-		return errors.New("vector space requires a field, model and model revision")
+	if s.Field == "" {
+		return errors.New("vector space requires a field")
 	}
 	if s.Dims <= 0 {
 		return ErrVectorInvalidDimension
@@ -141,15 +142,16 @@ func (e *VectorRevisionConflictError) Unwrap() error { return ErrVectorRevisionC
 // must go through this object so revisions and chunk IDs remain authoritative.
 // Mutations are serialized; existing readers can continue searching concurrently.
 type Collection struct {
-	mu        sync.Mutex
-	config    CollectionConfig
-	corpus    string
-	writer    *Writer
-	lock      lock.LockedFile
-	spaces    map[string]collectionSpace
-	revisions map[Identifier]string
-	closed    bool
-	writeErr  error
+	mu             sync.Mutex
+	config         CollectionConfig
+	corpus         string
+	writer         *Writer
+	lock           lock.LockedFile
+	spaces         map[string]collectionSpace
+	revisions      map[Identifier]string
+	closed         bool
+	writeErr       error
+	maintenanceErr error
 }
 
 func OpenCollection(config CollectionConfig) (*Collection, error) {
@@ -193,9 +195,15 @@ func OpenCollection(config CollectionConfig) (*Collection, error) {
 		_ = w.Close()
 		return nil, err
 	}
+	c := &Collection{config: config, corpus: manifest.CorpusID, writer: w,
+		lock: l, spaces: spaces, revisions: revisions}
+	_, c.maintenanceErr = maintainCollection(context.Background(), config, manifest.CorpusID)
+	if errors.Is(c.maintenanceErr, ErrCollectionCorrupt) {
+		_ = w.Close()
+		return nil, c.maintenanceErr
+	}
 	failed = false
-	return &Collection{config: config, corpus: manifest.CorpusID, writer: w,
-		lock: l, spaces: spaces, revisions: revisions}, nil
+	return c, nil
 }
 
 func (c *Collection) check() error {
@@ -203,23 +211,33 @@ func (c *Collection) check() error {
 		return ErrCollectionClosed
 	}
 	if c.writeErr != nil {
-		return fmt.Errorf("reopen collection after text write failure: %w", c.writeErr)
+		return fmt.Errorf("reopen collection after write failure: %w", c.writeErr)
 	}
 	return nil
 }
 
-// UpsertDocuments assigns a fresh revision to every document, including metadata
-// only updates. Duplicate IDs and reserved fields reject the whole batch.
-func (c *Collection) UpsertDocuments(documents []*Document) ([]DocumentRevision, error) {
+// UpsertDocuments assigns fresh revisions unless inputRevisions supplies one
+// nonempty embedding-input version per document. Reuse a version for metadata-only
+// changes to preserve vectors; change it whenever embedding inputs change.
+// Duplicate IDs, reserved fields and invalid revisions reject the whole batch.
+func (c *Collection) UpsertDocuments(documents []*Document, inputRevisions ...string) ([]DocumentRevision, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.check(); err != nil {
 		return nil, err
 	}
+	if len(inputRevisions) != 0 && len(inputRevisions) != len(documents) {
+		return nil, errors.New("input revisions must match the document count")
+	}
+	for _, revision := range inputRevisions {
+		if revision == "" {
+			return nil, errors.New("empty embedding-input revision")
+		}
+	}
 	batch := NewBatch()
 	revisions := make([]DocumentRevision, 0, len(documents))
 	seen := make(map[Identifier]struct{}, len(documents))
-	for _, doc := range documents {
+	for i, doc := range documents {
 		if doc == nil {
 			return nil, errors.New("nil collection document")
 		}
@@ -252,9 +270,14 @@ func (c *Collection) UpsertDocuments(documents []*Document) ([]DocumentRevision,
 		if idFields != 1 {
 			return nil, errors.New("collection document requires exactly one _id field")
 		}
-		revision, err := newCollectionToken()
-		if err != nil {
-			return nil, err
+		var revision string
+		if len(inputRevisions) != 0 {
+			revision = inputRevisions[i]
+		} else {
+			revision, err = newCollectionToken()
+			if err != nil {
+				return nil, err
+			}
 		}
 		copyDoc := append(Document(nil), (*doc)...)
 		copyDoc.AddField(NewStoredOnlyField(collectionRevisionField, []byte(revision)))
@@ -307,6 +330,12 @@ func (c *Collection) CreateVectorSpace(spec VectorSpaceSpec) error {
 	if err := c.check(); err != nil {
 		return err
 	}
+	if spec.Field == "" {
+		spec.Field = "embedding"
+	}
+	if spec.Similarity == "" {
+		spec.Similarity = VectorCosine
+	}
 	if err := spec.validate(); err != nil {
 		return err
 	}
@@ -317,11 +346,16 @@ func (c *Collection) CreateVectorSpace(spec VectorSpaceSpec) error {
 		return errors.New("vector space specification is immutable; choose a new ID")
 	}
 	dir := collectionSpacePath(c.config.Path, spec.ID)
+	gate, err := lockCollectionCoordinator(context.Background(), c.config.Path)
+	if err != nil {
+		return err
+	}
+	defer gate.Close()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	space := collectionSpace{Version: collectionFormatVersion, CorpusID: c.corpus, Spec: spec}
-	if err := writeCollectionJSON(filepath.Join(dir, "spec.json"), space); err != nil {
+	space := collectionSpace{Version: collectionFormatVersion, CorpusID: c.corpus, Spec: spec, Generations: make([]uint64, 0)}
+	if err := writeCollectionSpace(dir, &space); err != nil {
 		return err
 	}
 	c.spaces[spec.ID] = space
@@ -346,17 +380,27 @@ func sortedCollectionSpecs(spaces map[string]collectionSpace) []VectorSpaceSpec 
 	return rv
 }
 
-func (c *Collection) Reader() (*CollectionReader, error) {
+// Reader pins the selected spaces and a text snapshot. No names selects all spaces.
+func (c *Collection) Reader(spaceIDs ...string) (*CollectionReader, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.check(); err != nil {
 		return nil, err
 	}
+	spaces, err := selectCollectionSpaces(c.spaces, spaceIDs)
+	if err != nil {
+		return nil, err
+	}
+	gate, err := lockCollectionCoordinator(context.Background(), c.config.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer gate.Close()
 	r, err := c.writer.Reader()
 	if err != nil {
 		return nil, err
 	}
-	return newCollectionReader(c.config, c.corpus, r, c.spaces), nil
+	return newCollectionReader(c.config, c.corpus, r, spaces)
 }
 
 func (c *Collection) Close() error {

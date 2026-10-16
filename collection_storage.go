@@ -4,6 +4,7 @@
 package bluge
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -24,10 +26,12 @@ type collectionManifest struct {
 }
 
 type collectionSpace struct {
-	Version    int             `json:"version"`
-	CorpusID   string          `json:"corpus_id"`
-	Spec       VectorSpaceSpec `json:"spec"`
-	Generation uint64          `json:"-"`
+	Version       int             `json:"version"`
+	CorpusID      string          `json:"corpus_id"`
+	Spec          VectorSpaceSpec `json:"spec"`
+	Generation    uint64          `json:"-"`
+	Generations   []uint64        `json:"generations"`
+	CatalogSHA256 string          `json:"catalog_sha256,omitempty"`
 }
 
 type collectionVectorMetadata struct {
@@ -60,7 +64,7 @@ func loadCollectionManifest(config CollectionConfig, create bool) (collectionMan
 			return m, readErr
 		}
 		for _, e := range entries {
-			if e.Name() != "collection.lock" && !strings.HasPrefix(e.Name(), ".pending-") {
+			if e.Name() != "collection.lock" && e.Name() != "generations.lock" && !strings.HasPrefix(e.Name(), ".pending-") {
 				return m, fmt.Errorf("%w: collection manifest missing in nonempty directory", ErrCollectionCorrupt)
 			}
 		}
@@ -85,11 +89,26 @@ func collectionSpacePath(root, id string) string {
 	return filepath.Join(root, "vectors", "space-"+id)
 }
 
-func loadCollectionSpaces(root, corpus string) (map[string]collectionSpace, error) {
+func selectCollectionSpaces(spaces map[string]collectionSpace, spaceIDs []string) (map[string]collectionSpace, error) {
+	if len(spaceIDs) == 0 {
+		return spaces, nil
+	}
+	selected := make(map[string]collectionSpace, len(spaceIDs))
+	for _, id := range spaceIDs {
+		space, ok := spaces[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", ErrVectorSpaceNotFound, id)
+		}
+		selected[id] = space
+	}
+	return selected, nil
+}
+
+func loadCollectionSpaces(root, corpus string, spaceIDs ...string) (map[string]collectionSpace, error) {
 	spaces := make(map[string]collectionSpace)
 	entries, err := os.ReadDir(filepath.Join(root, "vectors"))
 	if errors.Is(err, os.ErrNotExist) {
-		return spaces, nil
+		return selectCollectionSpaces(spaces, spaceIDs)
 	}
 	if err != nil {
 		return nil, err
@@ -98,10 +117,20 @@ func loadCollectionSpaces(root, corpus string) (map[string]collectionSpace, erro
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "space-") {
 			continue
 		}
+		if len(spaceIDs) != 0 && !slices.Contains(spaceIDs, strings.TrimPrefix(e.Name(), "space-")) {
+			continue
+		}
 		dir := filepath.Join(root, "vectors", e.Name())
 		var space collectionSpace
 		if err := readCollectionJSON(filepath.Join(dir, "spec.json"), &space); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
+				generation, scanErr := collectionGeneration(dir, true)
+				if scanErr != nil {
+					return nil, scanErr
+				}
+				if generation != 0 {
+					return nil, fmt.Errorf("%w: missing space specification for %s", ErrCollectionCorrupt, dir)
+				}
 				continue
 			}
 			return nil, err
@@ -110,13 +139,16 @@ func loadCollectionSpaces(root, corpus string) (map[string]collectionSpace, erro
 			space.Spec.validate() != nil || "space-"+space.Spec.ID != e.Name() {
 			return nil, fmt.Errorf("%w: invalid vector space %q", ErrCollectionCorrupt, e.Name())
 		}
-		space.Generation, err = collectionGeneration(dir, true)
+		space.Generations, err = collectionCatalogGenerations(dir, space)
 		if err != nil {
 			return nil, err
 		}
+		if len(space.Generations) != 0 {
+			space.Generation = space.Generations[len(space.Generations)-1]
+		}
 		spaces[space.Spec.ID] = space
 	}
-	return spaces, nil
+	return selectCollectionSpaces(spaces, spaceIDs)
 }
 
 func collectionGeneration(dir string, committedOnly bool) (uint64, error) {
@@ -177,6 +209,14 @@ func readCollectionJSON(path string, value interface{}) error {
 }
 
 func writeCollectionJSON(path string, value interface{}) error {
+	return writeCollectionJSONFile(path, value, false)
+}
+
+func replaceCollectionJSON(path string, value interface{}) error {
+	return writeCollectionJSONFile(path, value, true)
+}
+
+func writeCollectionJSONFile(path string, value interface{}, replace bool) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
@@ -190,6 +230,9 @@ func writeCollectionJSON(path string, value interface{}) error {
 	err = errors.Join(writeErr, f.Sync(), f.Close())
 	if err != nil {
 		return err
+	}
+	if replace {
+		return replaceCollectionFile(f.Name(), path)
 	}
 	return publishCollectionFile(f.Name(), path)
 }
@@ -215,21 +258,41 @@ func syncCollectionFile(path string) error {
 	return errors.Join(f.Sync(), f.Close())
 }
 
+// readCollectionCommit checks identity and file presence without reading payloads.
+func readCollectionCommit(config CollectionConfig, space collectionSpace) (collectionCommit, error) {
+	dir := collectionSpacePath(config.Path, space.Spec.ID)
+	indexPath, metadataPath, commitPath := collectionGenerationFiles(dir, config.VectorStorage, space.Generation)
+	var commit collectionCommit
+	if err := readCollectionJSON(commitPath, &commit); err != nil {
+		return commit, fmt.Errorf("%w: commit: %w", ErrCollectionCorrupt, err)
+	}
+	if commit.Version != collectionFormatVersion || commit.CorpusID != space.CorpusID ||
+		commit.SpaceID != space.Spec.ID || commit.Generation != space.Generation {
+		return commit, fmt.Errorf("%w: commit identity mismatch", ErrCollectionCorrupt)
+	}
+	for _, path := range []string{indexPath, metadataPath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			return commit, fmt.Errorf("%w: payload: %w", ErrCollectionCorrupt, err)
+		}
+		if !info.Mode().IsRegular() {
+			return commit, fmt.Errorf("%w: non-file payload %s", ErrCollectionCorrupt, path)
+		}
+	}
+	return commit, nil
+}
+
 func loadCollectionVectorMetadata(config CollectionConfig, space collectionSpace) (*collectionVectorMetadata, error) {
 	if space.Generation == 0 {
 		return &collectionVectorMetadata{Version: collectionFormatVersion, CorpusID: space.CorpusID,
 			Spec: space.Spec, Storage: config.VectorStorage, Revisions: make(map[Identifier]string)}, nil
 	}
-	dir := collectionSpacePath(config.Path, space.Spec.ID)
-	indexPath, metadataPath, commitPath := collectionGenerationFiles(dir, config.VectorStorage, space.Generation)
-	var commit collectionCommit
-	if err := readCollectionJSON(commitPath, &commit); err != nil {
+	commit, err := readCollectionCommit(config, space)
+	if err != nil {
 		return nil, err
 	}
-	if commit.Version != collectionFormatVersion || commit.CorpusID != space.CorpusID ||
-		commit.SpaceID != space.Spec.ID || commit.Generation != space.Generation {
-		return nil, fmt.Errorf("%w: commit identity mismatch", ErrCollectionCorrupt)
-	}
+	dir := collectionSpacePath(config.Path, space.Spec.ID)
+	indexPath, metadataPath, _ := collectionGenerationFiles(dir, config.VectorStorage, space.Generation)
 	for path, expected := range map[string]string{indexPath: commit.IndexSHA256, metadataPath: commit.MetadataSHA256} {
 		actual, err := collectionFileHash(path)
 		if err != nil {
@@ -315,9 +378,11 @@ func openCollectionVectors(config CollectionConfig, space collectionSpace,
 			return nil, fmt.Errorf("%w: cannot open native vector index", ErrCollectionCorrupt)
 		}
 		u.indices[space.Spec.Field] = handle
-		if api.dimensions(handle) != space.Spec.Dims || api.size(handle) != len(m.Revisions) {
+		dims, count := api.dimensions(handle), api.size(handle)
+		if dims != space.Spec.Dims || count != len(m.Revisions) {
 			_ = u.Close()
-			return nil, fmt.Errorf("%w: native dimensions or count mismatch", ErrCollectionCorrupt)
+			return nil, fmt.Errorf("%w: native generation %d has dimensions=%d count=%d, expected dimensions=%d count=%d", ErrCollectionCorrupt,
+				space.Generation, dims, count, space.Spec.Dims, len(m.Revisions))
 		}
 	}
 	return u, nil
@@ -325,7 +390,7 @@ func openCollectionVectors(config CollectionConfig, space collectionSpace,
 
 // UpsertVectors publishes one complete generation for one model without writing
 // the text index. Batch embeddings to amortize full-index serialization costs.
-// Old generations are retained in this experimental implementation.
+// After publication, maintenance retains the current and reader-held generations.
 func (c *Collection) UpsertVectors(spaceID string, records []VectorRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -424,12 +489,40 @@ func (c *Collection) UpsertVectors(spaceID string, records []VectorRecord) error
 	}
 	commit := collectionCommit{Version: collectionFormatVersion, CorpusID: c.corpus, SpaceID: spaceID,
 		Generation: m.Generation, IndexSHA256: indexHash, MetadataSHA256: metadataHash}
+	gate, err := lockCollectionCoordinator(context.Background(), c.config.Path)
+	if err != nil {
+		return err
+	}
+	// GC can have shortened the on-disk catalog since this writer cached the
+	// space. Reload it under the coordinator before appending a publication.
+	spaces, err := loadCollectionSpaces(c.config.Path, c.corpus, spaceID)
+	if err != nil {
+		_ = gate.Close()
+		return err
+	}
+	current, ok := spaces[spaceID]
+	if !ok || current.Spec != space.Spec || current.Generation != space.Generation {
+		_ = gate.Close()
+		return fmt.Errorf("%w: vector space changed while writing", ErrCollectionCorrupt)
+	}
 	if err := writeCollectionJSON(commitPath, commit); err != nil {
-		// Publication may have succeeded even if the directory sync failed.
+		_ = gate.Close()
+		return err
+	}
+	current.Generation = m.Generation
+	current.Generations = append(current.Generations, m.Generation)
+	if err := writeCollectionSpace(dir, &current); err != nil {
+		_ = gate.Close()
+		// Catalog replacement may be visible even if its directory sync failed.
 		c.writeErr = err
 		return err
 	}
-	space.Generation = m.Generation
-	c.spaces[spaceID] = space
+	c.spaces[spaceID] = current
+	if err := gate.Close(); err != nil {
+		c.maintenanceErr = err
+		return nil
+	}
+	// Staging is no longer in use. Cleanup errors do not change commit success.
+	_, c.maintenanceErr = maintainCollection(context.Background(), c.config, c.corpus, spaceID)
 	return nil
 }

@@ -11,11 +11,12 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/fy0/bluge/index/lock"
 	"github.com/fy0/bluge/search"
 )
 
 // CollectionReader pins a text snapshot and the published generations of all
-// registered spaces. Native indices and revision filters are loaded lazily.
+// selected spaces. Native indices and revision filters are loaded lazily.
 // Search iterators must be consumed before closing the reader.
 type CollectionReader struct {
 	mu        sync.RWMutex
@@ -29,18 +30,25 @@ type CollectionReader struct {
 	revisions map[Identifier]string
 	ids       []Identifier
 	closed    bool
+	leases    []lock.LockedFile
 }
 
-func OpenCollectionReader(config CollectionConfig) (*CollectionReader, error) {
+// OpenCollectionReader opens only the named spaces, or all spaces if none are named.
+func OpenCollectionReader(config CollectionConfig, spaceIDs ...string) (*CollectionReader, error) {
 	config, err := config.normalized()
 	if err != nil {
 		return nil, err
 	}
+	gate, err := lockCollectionCoordinator(context.Background(), config.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer gate.Close()
 	manifest, err := loadCollectionManifest(config, false)
 	if err != nil {
 		return nil, err
 	}
-	spaces, err := loadCollectionSpaces(config.Path, manifest.CorpusID)
+	spaces, err := loadCollectionSpaces(config.Path, manifest.CorpusID, spaceIDs...)
 	if err != nil {
 		return nil, err
 	}
@@ -48,16 +56,20 @@ func OpenCollectionReader(config CollectionConfig) (*CollectionReader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newCollectionReader(config, manifest.CorpusID, r, spaces), nil
+	return newCollectionReader(config, manifest.CorpusID, r, spaces)
 }
 
-func newCollectionReader(config CollectionConfig, corpus string, text *Reader, spaces map[string]collectionSpace) *CollectionReader {
+func newCollectionReader(config CollectionConfig, corpus string, text *Reader, spaces map[string]collectionSpace) (*CollectionReader, error) {
+	leases, err := pinCollectionSpaces(config, spaces)
+	if err != nil {
+		return nil, errors.Join(err, text.Close())
+	}
 	copySpaces := make(map[string]collectionSpace, len(spaces))
 	for id, space := range spaces {
 		copySpaces[id] = space
 	}
 	return &CollectionReader{config: config, corpus: corpus, text: text, spaces: copySpaces,
-		views: make(map[string]*Reader), metadata: make(map[string]*collectionVectorMetadata)}
+		views: make(map[string]*Reader), metadata: make(map[string]*collectionVectorMetadata), leases: leases}, nil
 }
 
 func (r *CollectionReader) Search(ctx context.Context, request SearchRequest) (search.DocumentMatchIterator, error) {
@@ -169,10 +181,19 @@ func (r *CollectionReader) vectorReader(ctx context.Context, spaceID string) (*R
 	if err := r.loadRevisions(ctx); err != nil {
 		return nil, err
 	}
-	allowed := make(map[Identifier]struct{}, len(m.Revisions))
+	var allowed map[Identifier]struct{}
 	for id, revision := range m.Revisions {
-		if r.revisions[id] == revision {
-			allowed[id] = struct{}{}
+		if r.revisions[id] != revision {
+			allowed = make(map[Identifier]struct{}, len(m.Revisions))
+			break
+		}
+	}
+	// nil means every stored vector is current, so native search needs no filter.
+	if allowed != nil {
+		for id, revision := range m.Revisions {
+			if r.revisions[id] == revision {
+				allowed[id] = struct{}{}
+			}
 		}
 	}
 	var raw VectorIndex
@@ -182,8 +203,7 @@ func (r *CollectionReader) vectorReader(ctx context.Context, spaceID string) (*R
 			return nil, err
 		}
 	}
-	view := &Reader{config: r.text.config, reader: r.text.reader,
-		vector: &collectionVectorView{spec: m.Spec, raw: raw, allowed: allowed}}
+	view := r.text.vectorView(&collectionVectorView{spec: m.Spec, raw: raw, allowed: allowed})
 	r.views[spaceID] = view
 	return view, nil
 }
@@ -310,10 +330,9 @@ func (r *CollectionReader) Close() error {
 	r.closed = true
 	var err error
 	for _, view := range r.views {
-		view.closed.Store(true)
-		err = errors.Join(err, closeVectorIndex(view.vector))
+		err = errors.Join(err, view.Close())
 	}
-	return errors.Join(err, r.text.Close())
+	return errors.Join(err, r.text.Close(), closeCollectionLeases(r.leases))
 }
 
 func collectionRevisions(ctx context.Context, reader *Reader, corpus string) (map[Identifier]string, error) {
@@ -399,7 +418,9 @@ func (v *collectionVectorView) SearchCandidates(field string, query []float32, k
 		}
 	}
 	allowed := v.allowed
-	if candidates != nil {
+	if allowed == nil {
+		allowed = candidates
+	} else if candidates != nil {
 		allowed = make(map[Identifier]struct{})
 		for id := range candidates {
 			if _, ok := v.allowed[id]; ok {
@@ -407,7 +428,7 @@ func (v *collectionVectorView) SearchCandidates(field string, query []float32, k
 			}
 		}
 	}
-	if len(allowed) == 0 || v.raw == nil {
+	if (allowed != nil && len(allowed) == 0) || v.raw == nil {
 		return []VectorHit{}, nil
 	}
 	return v.raw.(VectorCandidateSearcher).SearchCandidates(field, query, k, allowed)

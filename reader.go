@@ -32,6 +32,8 @@ type Reader struct {
 	config Config
 	reader *index.Snapshot
 	vector VectorIndex
+	// A vector view borrows its parent's text snapshot until the parent closes it.
+	borrowedSnapshot bool
 
 	// closed is set by Close so lifetime-bound objects such as
 	// PreparedVectorFilter can reject use after the reader is gone. It is
@@ -198,8 +200,17 @@ func (r *Reader) Backup(path string, cancel chan struct{}) error {
 }
 
 func (r *Reader) Close() error {
-	r.closed.Store(true)
+	if r.closed.Swap(true) {
+		return nil
+	}
+	if r.borrowedSnapshot {
+		return closeVectorIndex(r.vector)
+	}
 	return errors.Join(r.reader.Close(), closeVectorIndex(r.vector))
+}
+
+func (r *Reader) vectorView(vector VectorIndex) *Reader {
+	return &Reader{config: r.config, reader: r.reader, vector: vector, borrowedSnapshot: true}
 }
 
 // PreparedVectorFilter is a filter Query that was evaluated once against one
