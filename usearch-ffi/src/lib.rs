@@ -8,6 +8,55 @@ use std::sync::OnceLock;
 
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_preserves_keys_and_subsequent_replacements() {
+        let handle = bluge_usearch_index_create(32, METRIC_COSINE, 16, 128, 64);
+        assert!(!handle.is_null());
+        let index = &handle_ref(handle).unwrap().index;
+        let value = |key: u64, revision: u64| -> Vec<f32> {
+            (0..32)
+                .map(|d| ((key * 1543 + d * 97 + revision * 13) % 997) as f32)
+                .collect()
+        };
+        index.reserve(1000).unwrap();
+        for key in 1..=1000 {
+            index.add(key, &value(key, 0)).unwrap();
+        }
+        let mut revisions = vec![0; 1001];
+        for round in 1..=4 {
+            let keys: Vec<u64> = (0..10).map(|i| (i * 97 + round * 13) % 1000 + 1).collect();
+            for key in &keys {
+                index.remove(*key).unwrap();
+            }
+            assert_eq!(bluge_usearch_index_compact(handle), 0);
+            assert_eq!(index.size(), 990);
+            index.reserve(1000).unwrap();
+            for key in keys {
+                index.add(key, &value(key, round)).unwrap();
+                revisions[key as usize] = round;
+            }
+            let mut bytes = vec![0; index.serialized_length()];
+            index.save_to_buffer(&mut bytes).unwrap();
+            index.load_from_buffer(&bytes).unwrap();
+            assert_eq!(index.size(), 1000);
+            for key in 1..=1000 {
+                let mut actual = vec![0f32; 32];
+                assert_eq!(index.get(key, &mut actual).unwrap(), 1, "missing key {key}");
+                assert_eq!(
+                    actual,
+                    value(key, revisions[key as usize]),
+                    "wrong vector for key {key}"
+                );
+            }
+        }
+        unsafe { bluge_usearch_index_destroy(handle) };
+    }
+}
+
 const METRIC_L2: u32 = 1;
 const METRIC_DOT: u32 = 2;
 const METRIC_COSINE: u32 = 3;
@@ -446,7 +495,18 @@ pub unsafe extern "C" fn bluge_usearch_index_remove_batch(
 #[unsafe(no_mangle)]
 pub extern "C" fn bluge_usearch_index_compact(handle: *mut IndexHandle) -> i32 {
     status(handle, |handle| {
-        handle.index.compact().map_err(|error| error.to_string())
+        handle.index.compact().map_err(|error| error.to_string())?;
+        // USearch 2.26 reorders slots without rebuilding its key lookup and
+        // free-slot queue. Reload before any subsequent lookup or mutation.
+        let mut bytes = vec![0; handle.index.serialized_length()];
+        handle
+            .index
+            .save_to_buffer(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        handle
+            .index
+            .load_from_buffer(&bytes)
+            .map_err(|error| error.to_string())
     })
 }
 

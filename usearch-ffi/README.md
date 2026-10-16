@@ -34,6 +34,13 @@ searches on one handle run in parallel instead of serializing. The Go adapter
 caps in-flight calls at the negotiated pool size and keeps ABI 3 libraries
 working with their default pool.
 
+USearch 2.26.0 compaction changes graph slot positions without refreshing the
+live key lookup and free-slot queue. The adapter therefore reloads its native
+serialization after compaction before returning. This preserves key/vector
+identity during subsequent updates; rebuild the native library when adopting
+this fix. The ABI stays at 4. The extra in-memory serialization affects update
+latency and peak memory, not the on-disk float32 format.
+
 ## Loading from Go
 
 The shared Go binding uses `purego.RegisterLibFunc` for typed C calls on every
