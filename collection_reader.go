@@ -59,7 +59,8 @@ func OpenCollectionReader(config CollectionConfig, spaceIDs ...string) (*Collect
 	return newCollectionReader(config, manifest.CorpusID, r, spaces)
 }
 
-func newCollectionReader(config CollectionConfig, corpus string, text *Reader, spaces map[string]collectionSpace) (*CollectionReader, error) {
+func newCollectionReader(config CollectionConfig, corpus string, text *Reader,
+	spaces map[string]collectionSpace) (*CollectionReader, error) {
 	leases, err := pinCollectionSpaces(config, spaces)
 	if err != nil {
 		return nil, errors.Join(err, text.Close())
@@ -150,7 +151,8 @@ func (r *CollectionReader) PrepareVectorFilter(ctx context.Context, spaceID stri
 	return view.PrepareVectorFilter(ctx, filter)
 }
 
-func (r *CollectionReader) VectorSearchPrepared(ctx context.Context, spaceID, field string, query []float32, k int, filter *PreparedVectorFilter) ([]VectorHit, error) {
+func (r *CollectionReader) VectorSearchPrepared(ctx context.Context, spaceID, field string, query []float32,
+	k int, filter *PreparedVectorFilter) ([]VectorHit, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.closed {
@@ -233,11 +235,6 @@ func (r *CollectionReader) loadRevisions(ctx context.Context) error {
 		return err
 	}
 	r.revisions = revisions
-	r.ids = make([]Identifier, 0, len(revisions))
-	for id := range revisions {
-		r.ids = append(r.ids, id)
-	}
-	sort.Slice(r.ids, func(i, j int) bool { return r.ids[i] < r.ids[j] })
 	return nil
 }
 
@@ -264,6 +261,15 @@ func (r *CollectionReader) PendingVectors(ctx context.Context, spaceID string, a
 	}
 	if err := r.loadRevisions(ctx); err != nil {
 		return nil, err
+	}
+	// Only pagination needs ordered IDs. Ordinary searches and status queries
+	// should not allocate and sort the entire text corpus.
+	if r.ids == nil {
+		r.ids = make([]Identifier, 0, len(r.revisions))
+		for id := range r.revisions {
+			r.ids = append(r.ids, id)
+		}
+		sort.Slice(r.ids, func(i, j int) bool { return r.ids[i] < r.ids[j] })
 	}
 	result := make([]DocumentRevision, 0)
 	start := sort.Search(len(r.ids), func(i int) bool { return r.ids[i] > after })
@@ -402,7 +408,8 @@ func (v *collectionVectorView) Search(field string, query []float32, k int, filt
 	return v.SearchCandidates(field, query, k, nil)
 }
 
-func (v *collectionVectorView) SearchCandidates(field string, query []float32, k int, candidates map[Identifier]struct{}) ([]VectorHit, error) {
+func (v *collectionVectorView) SearchCandidates(field string, query []float32, k int,
+	candidates map[Identifier]struct{}) ([]VectorHit, error) {
 	if field != v.spec.Field {
 		return nil, ErrVectorFieldNotFound
 	}

@@ -193,26 +193,48 @@ func TestCollectionUSearchStorage(t *testing.T) {
 	config := DefaultCollectionConfig(root)
 	config.LibraryPath = library
 	collection, err := OpenCollection(config)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	spec := VectorSpaceSpec{ID: "native-v1", Field: "embedding", Model: "native", ModelRevision: "1", Dims: 2, Similarity: VectorCosine}
-	if err := collection.CreateVectorSpace(spec); err != nil { t.Fatal(err) }
+	if err := collection.CreateVectorSpace(spec); err != nil {
+		t.Fatal(err)
+	}
 	revs, err := collection.UpsertDocuments([]*Document{collectionTestDoc("red", "apple"), collectionTestDoc("blue", "water")})
-	if err != nil { t.Fatal(err) }
-	if err := collection.UpsertVectors(spec.ID, []VectorRecord{{ID: revs[0].ID, Revision: revs[0].Revision, Vector: []float32{1, 0}}, {ID: revs[1].ID, Revision: revs[1].Revision, Vector: []float32{0, 1}}}); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := collection.UpsertVectors(spec.ID, []VectorRecord{{ID: revs[0].ID, Revision: revs[0].Revision, Vector: []float32{1, 0}}, {ID: revs[1].ID, Revision: revs[1].Revision, Vector: []float32{0, 1}}}); err != nil {
+		t.Fatal(err)
+	}
 	r, err := collection.Reader()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	hits, err := r.SearchVectorRequest(context.Background(), spec.ID, NewVectorSearchRequest(spec.Field, []float32{1, 0}).SetK(2))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertVectorIDs(t, hits, "red", "blue")
-	if err := r.Close(); err != nil { t.Fatal(err) }
-	if err := collection.Close(); err != nil { t.Fatal(err) }
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := collection.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reopened, err := OpenCollection(config)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer reopened.Close()
 	r, err = reopened.Reader()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer r.Close()
 	hits, err = r.SearchVectorRequest(context.Background(), spec.ID, NewVectorSearchRequest(spec.Field, []float32{0, 1}).SetK(1))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertVectorIDs(t, hits, "blue")
 }

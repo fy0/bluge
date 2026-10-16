@@ -162,6 +162,7 @@ func storageBenchID(id int) Identifier   { return Identifier(fmt.Sprintf("chunk-
 // A fixed integer PRNG makes input independent of Go's math/rand version and
 // native graph randomness. Queries are separate samples, never indexed vectors.
 func storageBenchVector(c storageBenchConfig, id, revision, model int, query bool) []float32 {
+	// #nosec G115 -- Benchmark ordinals seed modular uint64 arithmetic; wrapping is intentional.
 	state := c.Seed ^ (uint64(id+1) * 0x9e3779b97f4a7c15) ^ (uint64(revision+1) * 0xbf58476d1ce4e5b9) ^ (uint64(model+1) * 0x94d049bb133111eb)
 	if query {
 		state ^= 0xd6e8feb86659fd93
@@ -390,9 +391,11 @@ func storageBenchRun(t *testing.T, cfg storageBenchConfig) {
 func storageBenchUpdateIDs(c storageBenchConfig, round int) []int {
 	ids := make([]int, 0, c.Documents/100)
 	seen := make(map[int]bool, cap(ids))
+	// #nosec G115 -- Round ordinals seed modular uint64 arithmetic; wrapping is intentional.
 	state := c.Seed ^ (uint64(round) * 0x9e3779b97f4a7c15)
 	for len(ids) < cap(ids) {
 		state = state*6364136223846793005 + 1442695040888963407
+		// #nosec G115 -- Documents is the validated positive benchmark corpus size.
 		id := int((state >> 32) % uint64(c.Documents))
 		if !seen[id] {
 			seen[id] = true
@@ -417,6 +420,7 @@ func storageBenchJSON(t *testing.T, path string, value interface{}) {
 func storageBenchQueryProcess(t *testing.T, c storageBenchConfig) storageBenchQuery {
 	path := filepath.Join(c.Root, fmt.Sprintf("query-%d-config.json", c.Phase))
 	storageBenchJSON(t, path, c)
+	// #nosec G204 G702 -- Relaunch this test binary with a fixed test and a locally generated config.
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCollectionStorageBenchmark$", "-test.timeout=30m", "-collection-bench-worker="+path)
 	start := time.Now()
 	output, err := cmd.CombinedOutput()
@@ -515,6 +519,7 @@ func storageBenchQueryWorker(t *testing.T, path string) {
 				for _, id := range p.DocIDs {
 					docs += uvarint(uint64(id))
 				}
+				// #nosec G115 -- docs sums positive varint widths for this in-memory slice.
 				result.EmbeddedMapping += 20 + 1 + uvarint(uint64(p.Dimensions)) + uvarint(uint64(len(p.DocIDs))) +
 					uvarint(uint64(len(p.Backend))) + int64(len(p.Backend)) + uvarint(uint64(len(p.Similarity))) + int64(len(p.Similarity)) +
 					uvarint(uint64(docs)) + docs + uvarint(uint64(len(p.Data)))

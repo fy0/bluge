@@ -5,8 +5,57 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func TestCollectionPendingPaginationAfterSearch(t *testing.T) {
+	c, specs, _ := gcCollection(t, "flat")
+	spec := specs[0]
+	if _, err := c.UpsertDocuments([]*Document{
+		collectionTestDoc("z", "last"), collectionTestDoc("d", "middle"),
+		collectionTestDoc("a", "changed"), collectionTestDoc("c", "first"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.Reader(spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx := context.Background()
+	hits, err := r.SearchVectorRequest(ctx, spec.ID, NewVectorSearchRequest(spec.Field, []float32{1, 0}).SetK(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertVectorIDs(t, hits, "b")
+	status, err := r.VectorStatus(ctx, spec.ID)
+	if err != nil || status.PendingVectors != 4 {
+		t.Fatalf("status: %+v, %v", status, err)
+	}
+	// Subsequent text changes must not alter pagination on the existing reader.
+	if _, err := c.UpsertDocuments([]*Document{collectionTestDoc("aa", "later")}); err != nil {
+		t.Fatal(err)
+	}
+	var after Identifier
+	for _, want := range [][]Identifier{{"a", "c"}, {"d", "z"}, {}} {
+		page, err := r.PendingVectors(ctx, spec.ID, after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]Identifier, len(page))
+		for i, revision := range page {
+			got[i] = revision.ID
+			if revision.Revision != c.revisions[revision.ID] {
+				t.Fatalf("wrong revision for %s", revision.ID)
+			}
+			after = revision.ID
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("pending page: %v, want %v", got, want)
+		}
+	}
+}
 
 func TestCollectionSelectedSpaces(t *testing.T) {
 	for _, independent := range []bool{false, true} {

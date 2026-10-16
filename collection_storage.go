@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"unsafe"
 )
@@ -159,30 +158,15 @@ func collectionGeneration(dir string, committedOnly bool) (uint64, error) {
 	var max uint64
 	for _, e := range entries {
 		name := e.Name()
-		prefix := "commit-"
-		if !strings.HasPrefix(name, prefix) {
-			if committedOnly {
-				continue
-			}
-			if strings.HasPrefix(name, "index-") {
-				prefix = "index-"
-			} else if strings.HasPrefix(name, "metadata-") {
-				prefix = "metadata-"
-			} else {
-				continue
-			}
-		}
-		ext := filepath.Ext(name)
-		if ext != ".json" && ext != ".usearch" && ext != ".flat" {
+		if committedOnly && !strings.HasPrefix(name, "commit-") || strings.HasPrefix(name, "lease-") {
 			continue
 		}
-		if prefix == "commit-" && ext != ".json" {
-			continue
+		n, recognized, err := collectionFileGeneration(name)
+		if err != nil {
+			return 0, err
 		}
-		raw := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ext)
-		n, err := strconv.ParseUint(raw, 10, 64)
-		if err != nil || len(raw) != 20 || n == 0 {
-			return 0, fmt.Errorf("%w: invalid generation filename %q", ErrCollectionCorrupt, name)
+		if !recognized {
+			continue
 		}
 		if n > max {
 			max = n
@@ -198,6 +182,7 @@ func collectionGenerationFiles(dir, storage string, generation uint64) (string, 
 }
 
 func readCollectionJSON(path string, value interface{}) error {
+	// #nosec G703 -- Paths come from the trusted collection configuration or local benchmark files.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -315,25 +300,33 @@ func loadCollectionVectorMetadata(config CollectionConfig, space collectionSpace
 			return nil, fmt.Errorf("%w: empty vector identity", ErrCollectionCorrupt)
 		}
 	}
-	if m.Storage == "usearch" {
-		if m.Native == nil || m.Native.Version != usearchManifestVersion || m.Native.NextKey == 0 ||
-			len(m.Native.Fields) != 1 || m.Native.Fields[m.Spec.Field] != (VectorFieldSpec{Name: m.Spec.Field, Dims: m.Spec.Dims, Similarity: m.Spec.Similarity}) {
-			return nil, fmt.Errorf("%w: invalid native manifest", ErrCollectionCorrupt)
-		}
-		keys := make(map[uint64]bool, len(m.Native.IDs))
-		for id, key := range m.Native.IDs {
-			if id == "" || key == 0 || keys[key] || key >= m.Native.NextKey {
-				return nil, fmt.Errorf("%w: invalid native key mapping", ErrCollectionCorrupt)
-			}
-			keys[key] = true
-		}
-		for id := range m.Revisions {
-			if m.Native.IDs[string(id)] == 0 {
-				return nil, fmt.Errorf("%w: missing native key", ErrCollectionCorrupt)
-			}
+	if m.Storage == vectorBackendUSearchName {
+		if err := validateCollectionNativeMetadata(&m); err != nil {
+			return nil, err
 		}
 	}
 	return &m, nil
+}
+
+func validateCollectionNativeMetadata(m *collectionVectorMetadata) error {
+	field := VectorFieldSpec{Name: m.Spec.Field, Dims: m.Spec.Dims, Similarity: m.Spec.Similarity}
+	if m.Native == nil || m.Native.Version != usearchManifestVersion || m.Native.NextKey == 0 ||
+		len(m.Native.Fields) != 1 || m.Native.Fields[m.Spec.Field] != field {
+		return fmt.Errorf("%w: invalid native manifest", ErrCollectionCorrupt)
+	}
+	keys := make(map[uint64]bool, len(m.Native.IDs))
+	for id, key := range m.Native.IDs {
+		if id == "" || key == 0 || keys[key] || key >= m.Native.NextKey {
+			return fmt.Errorf("%w: invalid native key mapping", ErrCollectionCorrupt)
+		}
+		keys[key] = true
+	}
+	for id := range m.Revisions {
+		if m.Native.IDs[string(id)] == 0 {
+			return fmt.Errorf("%w: missing native key", ErrCollectionCorrupt)
+		}
+	}
+	return nil
 }
 
 // openCollectionVectors loads a private native handle, never the handle of a
@@ -341,7 +334,7 @@ func loadCollectionVectorMetadata(config CollectionConfig, space collectionSpace
 func openCollectionVectors(config CollectionConfig, space collectionSpace,
 	m *collectionVectorMetadata, staging string) (VectorIndex, error) {
 	indexPath, _, _ := collectionGenerationFiles(collectionSpacePath(config.Path, space.Spec.ID), config.VectorStorage, space.Generation)
-	if config.VectorStorage == "flat" {
+	if config.VectorStorage == vectorBackendFlatName {
 		f := newFlatVectorIndex("")
 		if space.Generation != 0 {
 			var err error
@@ -404,25 +397,9 @@ func (c *Collection) UpsertVectors(spaceID string, records []VectorRecord) error
 	if len(records) == 0 {
 		return nil
 	}
-	seen := make(map[Identifier]bool, len(records))
-	var conflicts []Identifier
-	for _, r := range records {
-		if r.ID == "" || r.Revision == "" || seen[r.ID] {
-			return errors.New("vector batch requires unique nonempty IDs and revisions")
-		}
-		seen[r.ID] = true
-		if c.revisions[r.ID] != r.Revision {
-			conflicts = append(conflicts, r.ID)
-		}
-		if len(r.Vector) != space.Spec.Dims {
-			return ErrVectorInvalidDimension
-		}
-		if err := validateVectorChange(VectorChange{ID: r.ID, Field: space.Spec.Field, Vector: r.Vector, Similarity: space.Spec.Similarity}); err != nil {
-			return err
-		}
-	}
-	if len(conflicts) != 0 {
-		return &VectorRevisionConflictError{IDs: conflicts}
+	seen, err := validateCollectionVectorRecords(space.Spec, records, c.revisions)
+	if err != nil {
+		return err
 	}
 	m, err := loadCollectionVectorMetadata(c.config, space)
 	if err != nil {
@@ -448,7 +425,9 @@ func (c *Collection) UpsertVectors(spaceID string, records []VectorRecord) error
 	defer vectors.Close()
 	changes := make([]VectorChange, 0, len(records))
 	for id, revision := range m.Revisions {
-		if c.revisions[id] != revision {
+		// Upserts already replace existing vectors. Only explicit removals
+		// need compaction; replacing a stale vector can reuse its native slot.
+		if c.revisions[id] != revision && !seen[id] {
 			changes = append(changes, VectorChange{ID: id, Delete: true})
 			delete(m.Revisions, id)
 		}
@@ -462,6 +441,13 @@ func (c *Collection) UpsertVectors(spaceID string, records []VectorRecord) error
 	}
 	source := filepath.Join(staging, "index.flat")
 	if u, ok := vectors.(*usearchVectorIndex); ok {
+		// A collection generation has one field. Removed IDs cannot be needed
+		// by another field, and must not accumulate in new generations.
+		for id := range u.manifest.IDs {
+			if _, live := m.Revisions[Identifier(id)]; !live {
+				delete(u.manifest.IDs, id)
+			}
+		}
 		m.Native = &u.manifest
 		source = usearchFieldPath(staging, space.Spec.Field)
 	}
@@ -469,6 +455,39 @@ func (c *Collection) UpsertVectors(spaceID string, records []VectorRecord) error
 		return err
 	}
 	m.Generation = last + 1
+	return c.publishVectors(space, m, source)
+}
+
+func validateCollectionVectorRecords(spec VectorSpaceSpec, records []VectorRecord,
+	revisions map[Identifier]string) (map[Identifier]bool, error) {
+	seen := make(map[Identifier]bool, len(records))
+	var conflicts []Identifier
+	for _, r := range records {
+		if r.ID == "" || r.Revision == "" || seen[r.ID] {
+			return nil, errors.New("vector batch requires unique nonempty IDs and revisions")
+		}
+		seen[r.ID] = true
+		if revisions[r.ID] != r.Revision {
+			conflicts = append(conflicts, r.ID)
+		}
+		if len(r.Vector) != spec.Dims {
+			return nil, ErrVectorInvalidDimension
+		}
+		if err := validateVectorChange(VectorChange{ID: r.ID, Field: spec.Field, Vector: r.Vector, Similarity: spec.Similarity}); err != nil {
+			return nil, err
+		}
+	}
+	if len(conflicts) != 0 {
+		return nil, &VectorRevisionConflictError{IDs: conflicts}
+	}
+	return seen, nil
+}
+
+// publishVectors makes staged payloads durable before publishing their catalog.
+// The caller holds c.mu and keeps the staging directory alive through cleanup.
+func (c *Collection) publishVectors(space collectionSpace, m *collectionVectorMetadata, source string) error {
+	spaceID := space.Spec.ID
+	dir := collectionSpacePath(c.config.Path, spaceID)
 	indexPath, metadataPath, commitPath := collectionGenerationFiles(dir, c.config.VectorStorage, m.Generation)
 	if err := syncCollectionFile(source); err != nil {
 		return err

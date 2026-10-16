@@ -79,3 +79,36 @@ go test . -run '^TestCollectionStorageBenchmark$' -count=1 -timeout=5m -v `
 向量更新仍会写出一份完整新 generation；首次加载还会校验内容并读取文档
 版本。存在过期向量或业务过滤时，仍有过滤集合转换开销。这里未引入增量日志、
 新的过滤缓存框架或额外模型管理层。
+
+## 合入前复核
+
+逐项复核原审查意见：全部向量有效时走无过滤查询；自动维护限定刚更新的
+空间且不扫描 payload 内容；Reader 可以按名称选择空间；显式输入版本可保留
+元数据更新前的 embedding；回收只保留当前代和被 Reader 固定的旧代。
+借用文本快照的向量 Reader 通过自身 `Close` 释放，模型描述字段已经可选。
+
+此次额外修复三处同类成本：
+
+- 普通向量查询和状态查询首次加载版本时不再构建、排序全体文档 ID；只有
+  `PendingVectors` 首次分页需要有序 ID，并在该快照内复用。
+- 同批替换的过期向量直接走后端 replacement，不再额外排入 delete 并触发
+  USearch 全图压缩。未被同批替换的失效向量仍正常删除和压缩。
+- 新一代 Collection 的 native ID 映射只保留本代实际向量。此前删除文档后
+  映射仍持续累积，回归测试在修复前复现了“2 条向量、3 个 key”的不一致；
+  修复后覆盖连续更换 ID、重新插入、独立 Reader、重开 writer 和旧快照延迟加载。
+
+同时按校验、发布、退役和清理整理了较长的内部函数，复用 generation 文件名
+解析，修正格式和测试进程清理，并对本地实验参数导致的静态检查误报逐处说明。
+没有增加公共接口或通用管理框架，维度、有限数值、版本冲突、损坏检测和
+Reader 回收保护继续保留。新增分页测试覆盖先查询再分页、字典序、分页结束和
+后续文本写入不影响既有快照；native 更新测试同时覆盖纯替换及删除后压缩。
+
+剩余成本仍是整代索引写出、首次加载时的完整性检查与文档版本读取，以及
+有过期向量或业务条件时的过滤集合转换。本轮没有宣称消除这些成本。
+
+最终验证在只包含版本控制文件的独立 worktree 完成：Windows amd64 在重新
+构建的真实 USearch DLL 下通过 `CGO_ENABLED=0 go test ./... -count=1 -timeout=10m`；
+Windows 通过 `go test -race . -run 'TestCollection|TestPreparedVectorFilter' -count=1 -timeout=5m`；
+Linux amd64（WSL，真实 USearch 库）通过 `go test -race . -run TestCollection -count=1 -timeout=5m`。
+Rust `cargo test --locked --release --target x86_64-pc-windows-msvc` 的压缩/key 回归通过。
+golangci-lint 2.12.2 按 CI 参数 `run --new-from-rev=v0.5.0 --timeout=5m` 检查为 0 issues。

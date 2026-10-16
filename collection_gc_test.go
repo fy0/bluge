@@ -199,6 +199,7 @@ func TestCollectionCrossProcessPins(t *testing.T) {
 				c, specs, revs := gcCollection(t, storage)
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
+				// #nosec G204 G702 -- Relaunch this test binary with a fixed helper test.
 				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCollectionLeaseProcess$")
 				cmd.Env = append(os.Environ(), "BLUGE_GC_CHILD_ROOT="+c.config.Path, "BLUGE_GC_CHILD_STORAGE="+storage)
 				cmd.Stderr = os.Stderr
@@ -213,7 +214,7 @@ func TestCollectionCrossProcessPins(t *testing.T) {
 				if err := cmd.Start(); err != nil {
 					t.Fatal(err)
 				}
-				defer cmd.Process.Kill()
+				defer func() { _ = cmd.Process.Kill() }() // The process may already have exited.
 				scanner := bufio.NewScanner(out)
 				if !scanner.Scan() || scanner.Text() != "READY" {
 					t.Fatal("child did not pin generations")
@@ -273,6 +274,7 @@ func TestCollectionMaintenanceRecovery(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// #nosec G703 -- Both paths are generated under this test's temporary collection directory.
 				if err := os.WriteFile(to, b, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -321,9 +323,9 @@ func TestCollectionMaintenanceRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "catalog-retired":
-				gcRetireCatalog(t, c.config, specs[0].ID, 1)
+				gcRetireFirstGeneration(t, c.config, specs[0].ID)
 			case "retired", "partly-deleted":
-				gcRetireCatalog(t, c.config, specs[0].ID, 1)
+				gcRetireFirstGeneration(t, c.config, specs[0].ID)
 				if err := publishCollectionFile(oldCommit, filepath.Join(dir, ".retired-"+filepath.Base(oldCommit))); err != nil {
 					t.Fatal(err)
 				}
@@ -379,9 +381,10 @@ func TestCollectionVerificationAndStructuralCorruption(t *testing.T) {
 			dir := collectionSpacePath(c.config.Path, specs[0].ID)
 			idx, meta, commit := collectionGenerationFiles(dir, "flat", 3)
 			path := map[string]string{"index": idx, "metadata": meta, "commit": commit, "spec": filepath.Join(dir, "spec.json"), "missing-index": idx, "missing-commit": commit, "catalog": filepath.Join(dir, "spec.json"), "missing-catalog": filepath.Join(dir, "spec.json")}[file]
-			if file == "missing-index" || file == "missing-commit" {
+			switch file {
+			case "missing-index", "missing-commit":
 				err = os.Remove(path)
-			} else if file == "catalog" || file == "missing-catalog" {
+			case "catalog", "missing-catalog":
 				var space collectionSpace
 				if err := readCollectionJSON(path, &space); err != nil {
 					t.Fatal(err)
@@ -392,7 +395,7 @@ func TestCollectionVerificationAndStructuralCorruption(t *testing.T) {
 					space.Generations = nil
 				}
 				err = replaceCollectionJSON(path, space) // Deliberately preserve the old checksum.
-			} else {
+			default:
 				err = os.WriteFile(path, []byte("corrupt"), 0o600)
 			}
 			if err != nil {
@@ -675,7 +678,7 @@ func TestCollectionInterruptedProcess(t *testing.T) {
 	defer gate.Close()
 	dir := collectionSpacePath(root, "model-a")
 	idx, _, commit := collectionGenerationFiles(dir, "flat", 1)
-	gcRetireCatalog(t, cfg, "model-a", 1)
+	gcRetireFirstGeneration(t, cfg, "model-a")
 	if err := publishCollectionFile(commit, filepath.Join(dir, ".retired-"+filepath.Base(commit))); err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +689,7 @@ func TestCollectionInterruptedProcess(t *testing.T) {
 	bufio.NewScanner(os.Stdin).Scan() // Killed while holding writer and coordinator locks.
 }
 
-func gcRetireCatalog(t *testing.T, cfg CollectionConfig, id string, retired uint64) {
+func gcRetireFirstGeneration(t *testing.T, cfg CollectionConfig, id string) {
 	t.Helper()
 	dir := collectionSpacePath(cfg.Path, id)
 	var space collectionSpace
@@ -695,7 +698,7 @@ func gcRetireCatalog(t *testing.T, cfg CollectionConfig, id string, retired uint
 	}
 	var kept []uint64
 	for _, n := range space.Generations {
-		if n != retired {
+		if n != 1 {
 			kept = append(kept, n)
 		}
 	}
@@ -749,7 +752,7 @@ func TestCollectionOrphanLeaseIsNeverDeleted(t *testing.T) {
 	defer r.Close()
 	gcPublish(t, c, specs, revs)
 	gcPublish(t, c, specs, revs)
-	gcRetireCatalog(t, c.config, specs[0].ID, 1)
+	gcRetireFirstGeneration(t, c.config, specs[0].ID)
 	if _, err := c.Maintain(context.Background()); !errors.Is(err, ErrCollectionCorrupt) {
 		t.Fatalf("unreferenced reader lease: %v", err)
 	}
@@ -776,6 +779,7 @@ func TestCollectionKilledPublicationAndCleanup(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
+			// #nosec G204 G702 -- Relaunch this test binary with a fixed helper test.
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCollectionInterruptedProcess$")
 			cmd.Env = append(os.Environ(), "BLUGE_GC_CRASH_ROOT="+c.config.Path, "BLUGE_GC_CRASH_PHASE="+phase)
 			cmd.Stderr = os.Stderr
@@ -790,7 +794,7 @@ func TestCollectionKilledPublicationAndCleanup(t *testing.T) {
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			defer cmd.Process.Kill()
+			defer func() { _ = cmd.Process.Kill() }() // The process may already have exited.
 			scanner := bufio.NewScanner(out)
 			if !scanner.Scan() || scanner.Text() != "READY" {
 				t.Fatal("child not ready")

@@ -30,6 +30,7 @@ const (
 	collectionFormatVersion = 2
 	collectionRevisionField = "_collection_revision"
 	collectionCorpusField   = "_collection_corpus"
+	collectionVectorField   = "embedding"
 )
 
 // CollectionConfig configures the experimental, independently persisted vector
@@ -47,7 +48,7 @@ func DefaultCollectionConfig(path string) CollectionConfig {
 	return CollectionConfig{
 		Path:          path,
 		TextConfig:    DefaultConfig(filepath.Join(path, "text")),
-		VectorStorage: "usearch",
+		VectorStorage: vectorBackendUSearchName,
 	}
 }
 
@@ -61,9 +62,9 @@ func (c CollectionConfig) normalized() (CollectionConfig, error) {
 		return c, err
 	}
 	if c.VectorStorage == "" {
-		c.VectorStorage = "usearch"
+		c.VectorStorage = vectorBackendUSearchName
 	}
-	if c.VectorStorage != "flat" && c.VectorStorage != "usearch" {
+	if c.VectorStorage != vectorBackendFlatName && c.VectorStorage != vectorBackendUSearchName {
 		return c, fmt.Errorf("unsupported collection vector storage %q", c.VectorStorage)
 	}
 	c.USearchOptions, err = c.USearchOptions.normalized()
@@ -103,7 +104,9 @@ func (s VectorSpaceSpec) validate() error {
 		return errors.New("space ID must contain 1 to 64 lowercase letters, digits, hyphens or underscores")
 	}
 	for _, ch := range s.ID {
-		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_') {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9', ch == '-', ch == '_':
+		default:
 			return errors.New("invalid vector space ID")
 		}
 	}
@@ -238,38 +241,14 @@ func (c *Collection) UpsertDocuments(documents []*Document, inputRevisions ...st
 	revisions := make([]DocumentRevision, 0, len(documents))
 	seen := make(map[Identifier]struct{}, len(documents))
 	for i, doc := range documents {
-		if doc == nil {
-			return nil, errors.New("nil collection document")
-		}
-		id, found, err := documentIdentifier(doc)
+		id, err := validateCollectionDocument(doc)
 		if err != nil {
 			return nil, err
-		}
-		if !found || id == "" {
-			return nil, errors.New("collection document requires a nonempty _id")
 		}
 		if _, exists := seen[id]; exists {
 			return nil, fmt.Errorf("duplicate chunk ID %q", id)
 		}
 		seen[id] = struct{}{}
-		idFields := 0
-		for _, f := range *doc {
-			if f.Name() == _idField {
-				idFields++
-				if !f.Index() || !f.Store() {
-					return nil, errors.New("collection _id must be indexed and stored")
-				}
-			}
-			if strings.HasPrefix(f.Name(), "_collection_") {
-				return nil, fmt.Errorf("reserved field %q", f.Name())
-			}
-			if _, ok := f.(interface{ VectorValue() []float32 }); ok {
-				return nil, errors.New("write collection vectors with UpsertVectors")
-			}
-		}
-		if idFields != 1 {
-			return nil, errors.New("collection document requires exactly one _id field")
-		}
 		var revision string
 		if len(inputRevisions) != 0 {
 			revision = inputRevisions[i]
@@ -296,6 +275,38 @@ func (c *Collection) UpsertDocuments(documents []*Document, inputRevisions ...st
 		c.revisions[r.ID] = r.Revision
 	}
 	return revisions, nil
+}
+
+func validateCollectionDocument(doc *Document) (Identifier, error) {
+	if doc == nil {
+		return "", errors.New("nil collection document")
+	}
+	id, found, err := documentIdentifier(doc)
+	if err != nil {
+		return "", err
+	}
+	if !found || id == "" {
+		return "", errors.New("collection document requires a nonempty _id")
+	}
+	idFields := 0
+	for _, f := range *doc {
+		if f.Name() == _idField {
+			idFields++
+			if !f.Index() || !f.Store() {
+				return "", errors.New("collection _id must be indexed and stored")
+			}
+		}
+		if strings.HasPrefix(f.Name(), "_collection_") {
+			return "", fmt.Errorf("reserved field %q", f.Name())
+		}
+		if _, ok := f.(interface{ VectorValue() []float32 }); ok {
+			return "", errors.New("write collection vectors with UpsertVectors")
+		}
+	}
+	if idFields != 1 {
+		return "", errors.New("collection document requires exactly one _id field")
+	}
+	return id, nil
 }
 
 func (c *Collection) DeleteDocuments(ids ...Identifier) error {
@@ -331,7 +342,7 @@ func (c *Collection) CreateVectorSpace(spec VectorSpaceSpec) error {
 		return err
 	}
 	if spec.Field == "" {
-		spec.Field = "embedding"
+		spec.Field = collectionVectorField
 	}
 	if spec.Similarity == "" {
 		spec.Similarity = VectorCosine

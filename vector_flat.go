@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	flatVectorMagic   = "BLUGEVEC"
-	flatVectorVersion = uint32(1)
-	maxVectorBlobSize = 64 << 20
+	vectorBackendFlatName = "flat"
+	flatVectorMagic       = "BLUGEVEC"
+	flatVectorVersion     = uint32(1)
+	maxVectorBlobSize     = 64 << 20
 )
 
 func checkedVectorUint32(value int, label string) (uint32, error) {
@@ -62,7 +63,7 @@ func NewFlatVectorBackend(path string) *FlatVectorBackend {
 	return &FlatVectorBackend{path: path}
 }
 
-func (b *FlatVectorBackend) Name() string { return "flat" }
+func (b *FlatVectorBackend) Name() string { return vectorBackendFlatName }
 
 func (b *FlatVectorBackend) Open(_ Config) (VectorIndex, error) {
 	if b.path == "" {

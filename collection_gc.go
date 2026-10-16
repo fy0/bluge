@@ -170,7 +170,8 @@ func collectionFileGeneration(name string) (uint64, bool, error) {
 	return n, true, nil
 }
 
-func maintainCollection(ctx context.Context, config CollectionConfig, corpus string, spaceIDs ...string) (result CollectionMaintenance, retErr error) {
+func maintainCollection(ctx context.Context, config CollectionConfig, corpus string,
+	spaceIDs ...string) (result CollectionMaintenance, retErr error) {
 	gate, err := lockCollectionCoordinator(ctx, config.Path)
 	if err != nil {
 		return result, err
@@ -202,100 +203,107 @@ func maintainCollection(ctx context.Context, config CollectionConfig, corpus str
 	}
 	for _, spec := range sortedCollectionSpecs(spaces) {
 		space := spaces[spec.ID]
-		dir := collectionSpacePath(config.Path, spec.ID)
-		retire := make(map[uint64]bool)
-		var leases []lock.LockedFile
-		for _, n := range space.Generations {
-			if n == space.Generation {
-				continue
-			}
-			if err := collectionContextError(ctx); err != nil {
-				return result, errors.Join(err, closeCollectionLeases(leases))
-			}
-			lease, err := lock.OpenExclusive(collectionLeasePath(dir, n), os.O_CREATE|os.O_RDWR, 0o600)
-			if collectionLockBusy(err) {
-				result.PinnedGenerations++
-				continue
-			}
-			if err != nil {
-				return result, errors.Join(err, closeCollectionLeases(leases))
-			}
-			leases = append(leases, lease)
-			retire[n] = true
-		}
-		if len(retire) == 0 {
-			continue
-		}
-		generations := space.Generations
-		space.Generations = make([]uint64, 0, len(generations)-len(retire))
-		for _, n := range generations {
-			if !retire[n] {
-				space.Generations = append(space.Generations, n)
-			}
-		}
-		// This durable catalog replacement is the retirement point. Any files
-		// left behind afterwards are unreferenced, including old commit files.
-		if err := writeCollectionSpace(dir, &space); err != nil {
-			return result, errors.Join(err, closeCollectionLeases(leases))
-		}
-		spaces[space.Spec.ID] = space
-		result.RemovedGenerations += len(retire)
-		for _, n := range generations {
-			if !retire[n] {
-				continue
-			}
-			_, _, commit := collectionGenerationFiles(dir, config.VectorStorage, n)
-			retired := filepath.Join(dir, ".retired-"+filepath.Base(commit))
-			err = publishCollectionFile(commit, retired)
-			if err != nil {
-				return result, errors.Join(err, closeCollectionLeases(leases))
-			}
-		}
-		if err := closeCollectionLeases(leases); err != nil {
+		if err := retireCollectionGenerations(ctx, config, &space, &result); err != nil {
 			return result, err
 		}
+		spaces[spec.ID] = space
 	}
+	err = sweepCollectionFiles(ctx, config.Path, spaces, len(spaceIDs) != 0, &result)
+	return result, err
+}
+
+func sweepCollectionFiles(ctx context.Context, root string, spaces map[string]collectionSpace,
+	selected bool, result *CollectionMaintenance) error {
 	// The writer lock excludes active staging writes. The coordinator excludes new
 	// readers. Retirements are durable before deleting now-uncommitted payloads.
 	var dirs []string
-	if len(spaceIDs) != 0 {
+	if selected {
 		for id := range spaces {
-			dirs = append(dirs, collectionSpacePath(config.Path, id))
+			dirs = append(dirs, collectionSpacePath(root, id))
 		}
 	} else {
-		dirs = append(dirs, config.Path)
-		entries, err := os.ReadDir(filepath.Join(config.Path, "vectors"))
+		dirs = append(dirs, root)
+		entries, err := os.ReadDir(filepath.Join(root, "vectors"))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return result, err
+			return err
 		}
 		for _, e := range entries {
 			if e.IsDir() && strings.HasPrefix(e.Name(), "space-") {
-				dirs = append(dirs, filepath.Join(config.Path, "vectors", e.Name()))
+				dirs = append(dirs, filepath.Join(root, "vectors", e.Name()))
 			}
 		}
 	}
 	for _, dir := range dirs {
 		committed := make(map[uint64]bool)
-		if dir != config.Path {
+		if dir != root {
 			for _, n := range spaces[strings.TrimPrefix(filepath.Base(dir), "space-")].Generations {
 				committed[n] = true
 			}
 		}
-		if err := sweepCollectionDirectory(ctx, dir, committed, &result); err != nil {
-			return result, err
+		if err := sweepCollectionDirectory(ctx, dir, committed, result); err != nil {
+			return err
 		}
 	}
-	return result, nil
+	return nil
 }
 
-func sweepCollectionDirectory(ctx context.Context, dir string, committed map[uint64]bool, result *CollectionMaintenance) error {
-	if err := syncCollectionDirectory(dir); err != nil {
+// The caller holds the writer and coordinator locks throughout retirement.
+func retireCollectionGenerations(ctx context.Context, config CollectionConfig,
+	space *collectionSpace, result *CollectionMaintenance) (retErr error) {
+	dir := collectionSpacePath(config.Path, space.Spec.ID)
+	retire := make(map[uint64]bool)
+	var leases []lock.LockedFile
+	defer func() { retErr = errors.Join(retErr, closeCollectionLeases(leases)) }()
+	for _, n := range space.Generations {
+		if n == space.Generation {
+			continue
+		}
+		if err := collectionContextError(ctx); err != nil {
+			return err
+		}
+		lease, err := lock.OpenExclusive(collectionLeasePath(dir, n), os.O_CREATE|os.O_RDWR, 0o600)
+		if collectionLockBusy(err) {
+			result.PinnedGenerations++
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		leases = append(leases, lease)
+		retire[n] = true
+	}
+	if len(retire) == 0 {
+		return nil
+	}
+	generations := space.Generations
+	space.Generations = make([]uint64, 0, len(generations)-len(retire))
+	for _, n := range generations {
+		if !retire[n] {
+			space.Generations = append(space.Generations, n)
+		}
+	}
+	// This durable catalog replacement is the retirement point. Any files
+	// left behind afterwards are unreferenced, including old commit files.
+	if err := writeCollectionSpace(dir, space); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
+	result.RemovedGenerations += len(retire)
+	for _, n := range generations {
+		if !retire[n] {
+			continue
+		}
+		_, _, commit := collectionGenerationFiles(dir, config.VectorStorage, n)
+		retired := filepath.Join(dir, ".retired-"+filepath.Base(commit))
+		if err := publishCollectionFile(commit, retired); err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+// Check every orphan lease before deleting any files in this directory. The
+// coordinator prevents new readers from acquiring leases during the sweep.
+func checkCollectionOrphanLeases(dir string, entries []os.DirEntry, committed map[uint64]bool) error {
 	checked := make(map[uint64]bool)
 	for _, e := range entries {
 		n, recognized, err := collectionFileGeneration(e.Name())
@@ -318,12 +326,26 @@ func sweepCollectionDirectory(ctx context.Context, dir string, committed map[uin
 			}
 		}
 	}
+	return nil
+}
+
+func sweepCollectionDirectory(ctx context.Context, dir string, committed map[uint64]bool, result *CollectionMaintenance) error {
+	if err := syncCollectionDirectory(dir); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	if err := checkCollectionOrphanLeases(dir, entries, committed); err != nil {
+		return err
+	}
 	for _, e := range entries {
 		if err := collectionContextError(ctx); err != nil {
 			return err
 		}
 		n, recognized, _ := collectionFileGeneration(e.Name())
-		if !(recognized && !committed[n]) && !strings.HasPrefix(e.Name(), ".pending-") && !strings.HasPrefix(e.Name(), ".retired-") {
+		if (!recognized || committed[n]) && !strings.HasPrefix(e.Name(), ".pending-") && !strings.HasPrefix(e.Name(), ".retired-") {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
