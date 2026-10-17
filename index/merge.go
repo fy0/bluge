@@ -15,6 +15,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,8 @@ func (s *Writer) mergerLoop(merges chan *segmentMerge, persisterNotifier watcher
 	defer s.asyncTasks.Done()
 
 	var lastEpochMergePlanned uint64
+	retry := newBackgroundRetry(s.config)
+	defer retry.stop()
 
 	// tell the persister we're waiting for anything after the initialEpoch
 	ew, err := persisterNotifier.NotifyUsAfter(0, s.closeCh)
@@ -38,12 +41,19 @@ func (s *Writer) mergerLoop(merges chan *segmentMerge, persisterNotifier watcher
 OUTER:
 	for {
 		atomic.AddUint64(&s.stats.TotFileMergeLoopBeg, 1)
+		notifyCh, retryCh := retry.notifications(ew.notifyCh)
 
 		select {
 		case <-s.closeCh:
 			break OUTER
+		case <-retryCh:
+			retry.stop()
 
 		case done := <-s.mergeDrains:
+			if retry.err != nil {
+				done <- retry.err
+				continue OUTER
+			}
 			var mergedEpoch uint64
 			mergedEpoch, err = s.convergeMerges(merges)
 			if err == nil {
@@ -51,7 +61,7 @@ OUTER:
 			}
 			done <- err
 
-		case <-ew.notifyCh:
+		case <-notifyCh:
 			// check to see if there is a new snapshot to persist
 			ourSnapshot := s.currentSnapshot()
 			atomic.StoreUint64(&s.stats.mergeSnapshotSize, uint64(ourSnapshot.Size()))
@@ -64,16 +74,17 @@ OUTER:
 				_, err = s.planMergeAtSnapshot(merges, ourSnapshot, s.config.MergePlanOptions)
 				if err != nil {
 					atomic.StoreUint64(&s.stats.mergeEpoch, 0)
-					if err == segment.ErrClosed {
+					if errors.Is(err, segment.ErrClosed) {
 						// index has been closed
 						_ = ourSnapshot.Close()
 						break OUTER
 					}
-					s.fireAsyncError(fmt.Errorf("merging err: %v", err))
 					_ = ourSnapshot.Close()
 					atomic.AddUint64(&s.stats.TotFileMergeLoopErr, 1)
+					s.fireAsyncError(retry.fail("merging err", err))
 					continue OUTER
 				}
+				retry.reset()
 				lastEpochMergePlanned = ourSnapshot.epoch
 
 				atomic.StoreUint64(&s.stats.LastMergedEpoch, ourSnapshot.epoch)
@@ -131,7 +142,7 @@ func (s *Writer) planMergeAtSnapshot(merges chan *segmentMerge, ourSnapshot *Sna
 	resultMergePlan, err := mergeplan.Plan(onlyPersistedSnapshots, &options)
 	if err != nil {
 		atomic.AddUint64(&s.stats.TotFileMergePlanErr, 1)
-		return false, fmt.Errorf("merge planning err: %v", err)
+		return false, fmt.Errorf("merge planning err: %w", err)
 	}
 	if resultMergePlan == nil {
 		// nothing to do
@@ -184,7 +195,7 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 			if err == segment.ErrClosed {
 				return err
 			}
-			return fmt.Errorf("merging failed: %v", err)
+			return fmt.Errorf("merging failed: %w", err)
 		}
 
 		seg, err = s.loadSegment(newSegmentID, s.segPlugin)

@@ -129,6 +129,30 @@ remaining scheduling risks. The older standalone measurements remain in the
 * **32-bit coverage** - atomic counters used by the segment code are aligned
   and the core packages are tested with `GOARCH=386`.
 
+### Background Write Failures
+
+Background segment merges and snapshot persistence retry with exponential
+backoff: 1, 2, 4, 8, 16, and 32 seconds, then once per minute until success or
+writer close. They retry even without new writes, allowing recovery after disk
+space is freed. Only success resets the delay; new snapshots do not bypass it.
+Use `config.WithBackgroundRetryBackoff(initialDelay, maxDelay)` to customize
+the delays, for example:
+
+```go
+config = config.WithBackgroundRetryBackoff(time.Second, 5*time.Minute)
+```
+
+Zero uses the default for that delay; negative delays or a maximum below the
+initial delay are rejected by `OpenWriter`.
+Errors reported through `index.Config.AsyncError` include the retry status and
+preserve the underlying cause for `errors.Is`. `Writer.Close()` returns an
+outstanding background error promptly instead of waiting through backoff.
+
+For a full storage volume, free space and background work will resume on a
+subsequent attempt, without restarting the writer. Check write and close errors:
+data whose persistence failed is not guaranteed durable. Backoff does not free
+disk space; applications should also limit log and backup retention.
+
 ### Index Compatibility
 
 The on-disk format is **zapx-bluge v2**.  It is intentionally incompatible with

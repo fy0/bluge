@@ -15,6 +15,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -39,7 +40,9 @@ func (s *Writer) persisterLoop(merges chan *segmentMerge, persists chan *persist
 	var ew *epochWatcher
 
 	var unpersistedCallbacks []func(error)
-	var persistSyncs []chan struct{}
+	var persistSyncs []chan error
+	retry := newBackgroundRetry(s.config)
+	defer retry.stop()
 
 	// tell the introducer we're waiting for changes after the initial epoch
 	introducerEpochWatcher, err := introducerNotifier.NotifyUsAfter(0, s.closeCh)
@@ -51,17 +54,25 @@ OUTER:
 	for {
 		atomic.AddUint64(&s.stats.TotPersistLoopBeg, 1)
 		atomic.AddUint64(&s.stats.TotPersistLoopWait, 1)
+		notifyCh, retryCh := retry.notifications(introducerEpochWatcher.notifyCh)
 
 		select {
 		case <-s.closeCh:
 			break OUTER
+		case <-retryCh:
+			retry.stop()
 		case done := <-s.persistSyncs:
+			if retry.err != nil {
+				done <- retry.err
+				continue OUTER
+			}
 			// Acknowledge below only after the local persisted epoch reaches root.
 			persistSyncs = append(persistSyncs, done)
 		case ew = <-persisterNotifier:
 			persistWatchers.Add(ew)
 			lastMergedEpoch = ew.epoch
-		case <-introducerEpochWatcher.notifyCh:
+			persistWatchers.NotifySatisfiedWatchers(lastPersistedEpoch)
+		case <-notifyCh:
 			// woken up, next loop should pick up work
 			atomic.AddUint64(&s.stats.TotPersistLoopWaitNotified, 1)
 
@@ -98,7 +109,7 @@ OUTER:
 				}
 				if err != nil {
 					atomic.StoreUint64(&s.stats.persistEpoch, 0)
-					if err == segment.ErrClosed {
+					if errors.Is(err, segment.ErrClosed) {
 						// index has been closed
 						_ = ourSnapshot.Close()
 						break OUTER
@@ -108,11 +119,16 @@ OUTER:
 					// the retry attempt
 					unpersistedCallbacks = append(unpersistedCallbacks, ourPersistedCallbacks...)
 
-					s.fireAsyncError(fmt.Errorf("got err persisting snapshot: %v", err))
 					_ = ourSnapshot.Close()
 					atomic.AddUint64(&s.stats.TotPersistLoopErr, 1)
+					s.fireAsyncError(retry.fail("got err persisting snapshot", err))
+					for _, done := range persistSyncs {
+						done <- retry.err
+					}
+					persistSyncs = nil
 					continue OUTER
 				}
+				retry.reset()
 
 				if unpersistedCallbacks != nil {
 					// in the event of this being a retry attempt for persisting a snapshot
@@ -339,7 +355,7 @@ func (s *Writer) persistSnapshotDirect(persists chan *persistIntroduction, snaps
 		if !segmentSnapshot.segment.Persisted() {
 			err = s.directory.Persist(ItemKindSegment, segmentSnapshot.id, segmentSnapshot.segment.Segment, s.closeCh)
 			if err != nil {
-				return fmt.Errorf("error persisting segment: %v", err)
+				return fmt.Errorf("error persisting segment: %w", err)
 			}
 			newSegments[segmentSnapshot.id] = segmentSnapshot.segment
 		}

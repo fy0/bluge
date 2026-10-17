@@ -17,6 +17,7 @@ package bluge
 import (
 	"io/ioutil"
 	"log"
+	"time"
 
 	"github.com/fy0/bluge/index"
 
@@ -65,6 +66,15 @@ func (config Config) WithSegmentVersion(ver uint32) Config {
 // builds and merge tasks used by OfflineWriter.
 func (config Config) WithOfflineWriterConcurrency(concurrency int) Config {
 	config.indexConfig = config.indexConfig.WithOfflineWriterConcurrency(concurrency)
+	return config
+}
+
+// WithBackgroundRetryBackoff sets the initial and maximum delays between
+// failed background merge and persistence attempts. Zero uses defaults of one
+// second and one minute, respectively. Retries continue until success or close.
+// OpenWriter rejects negative delays or a maximum below the initial delay.
+func (config Config) WithBackgroundRetryBackoff(initialDelay, maxDelay time.Duration) Config {
+	config.indexConfig = config.indexConfig.WithBackgroundRetryBackoff(initialDelay, maxDelay)
 	return config
 }
 

@@ -53,7 +53,7 @@ type Writer struct {
 	asyncTasks   sync.WaitGroup
 	asyncStarted bool
 	mergeDrains  chan chan error
-	persistSyncs chan chan struct{}
+	persistSyncs chan chan error
 
 	mutationLock sync.RWMutex
 	closing      bool
@@ -63,13 +63,24 @@ type Writer struct {
 }
 
 func OpenWriter(config Config) (*Writer, error) {
+	if config.BackgroundRetryInitialDelay == 0 {
+		config.BackgroundRetryInitialDelay = defaultBackgroundRetryInitialDelay
+	}
+	if config.BackgroundRetryMaxDelay == 0 {
+		config.BackgroundRetryMaxDelay = defaultBackgroundRetryMaxDelay
+	}
+	if config.BackgroundRetryInitialDelay < 0 || config.BackgroundRetryMaxDelay < config.BackgroundRetryInitialDelay {
+		return nil, fmt.Errorf("background retry delays must be positive with maximum >= initial: initial=%s, maximum=%s",
+			config.BackgroundRetryInitialDelay, config.BackgroundRetryMaxDelay)
+	}
+
 	rv := &Writer{
 		config:         config,
 		deletionPolicy: config.DeletionPolicyFunc(),
 		directory:      config.DirectoryFunc(),
 		closeCh:        make(chan struct{}),
 		mergeDrains:    make(chan chan error),
-		persistSyncs:   make(chan chan struct{}),
+		persistSyncs:   make(chan chan error),
 	}
 
 	var err error
@@ -244,11 +255,13 @@ func (s *Writer) close() (err error) {
 	if s.asyncStarted {
 		drainErr = s.drainMerges()
 		if drainErr == nil {
-			s.syncPersister()
+			drainErr = s.syncPersister()
+		}
+		if drainErr == nil {
 			drainErr = s.drainMerges()
 		}
 		if drainErr == nil {
-			s.syncPersister()
+			drainErr = s.syncPersister()
 		}
 	}
 
@@ -281,10 +294,10 @@ func (s *Writer) drainMerges() error {
 	return <-done
 }
 
-func (s *Writer) syncPersister() {
-	done := make(chan struct{})
+func (s *Writer) syncPersister() error {
+	done := make(chan error, 1)
 	s.persistSyncs <- done
-	<-done
+	return <-done
 }
 
 // Batch applies a batch of changes to the index atomically

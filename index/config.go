@@ -16,6 +16,7 @@ package index
 
 import (
 	"math"
+	"time"
 
 	segment "github.com/fy0/bluge/segment"
 
@@ -47,6 +48,13 @@ type Config struct {
 	NormCalc           func(string, int) float32
 
 	MergeBufferSize int
+
+	// BackgroundRetryInitialDelay and BackgroundRetryMaxDelay control
+	// exponential backoff for background merge and persistence failures.
+	// Retries continue at the maximum delay until success or writer close.
+	// Zero values use defaults of one second and one minute, respectively.
+	BackgroundRetryInitialDelay time.Duration
+	BackgroundRetryMaxDelay     time.Duration
 
 	// OfflineWriterConcurrency controls the maximum number of concurrent
 	// segment builds and merge tasks used by WriterOffline.
@@ -103,6 +111,15 @@ func (config Config) WithSegmentOptions(options map[string]interface{}) Config {
 
 func (config Config) WithPersisterNapTimeMSec(napTime int) Config {
 	config.PersisterNapTimeMSec = napTime
+	return config
+}
+
+// WithBackgroundRetryBackoff sets the initial and maximum delays between
+// failed background attempts. Zero uses the default for that delay.
+// OpenWriter rejects negative delays or a maximum below the initial delay.
+func (config Config) WithBackgroundRetryBackoff(initialDelay, maxDelay time.Duration) Config {
+	config.BackgroundRetryInitialDelay = initialDelay
+	config.BackgroundRetryMaxDelay = maxDelay
 	return config
 }
 
@@ -182,6 +199,9 @@ func defaultConfig() Config {
 
 		MergeBufferSize:          1024 * 1024,
 		OfflineWriterConcurrency: 2,
+
+		BackgroundRetryInitialDelay: defaultBackgroundRetryInitialDelay,
+		BackgroundRetryMaxDelay:     defaultBackgroundRetryMaxDelay,
 
 		// Optimizations enabled
 		OptimizeConjunction:          true,
