@@ -1,0 +1,19 @@
+archive: C:\Users\test\Downloads\data-simplification.tar.bz2 (55.73 MiB)
+index:   D:\codes\2026\bluge\tmp\readme-text-20261018\index-1 (303.27 MiB, kept=true)
+batch:   1000 docs
+profile: "LOCATION" in 37ms, 21 queries, 5 hits shown
+open:    0.605ms
+first:   1.756ms
+warm:    1.677ms/1.717ms/1.151ms/1.751ms/1.157ms/1.655ms/1.765ms/1.167ms/1.746ms/1.200ms/1.872ms/1.135ms/2.722ms/1.654ms/0.591ms/1.639ms/2.358ms/1.575ms/0.918ms/1.250ms
+close:   4.226ms
+memory:  peak Alloc=1.42 MiB peak Sys=11.08 MiB final Alloc=1.42 MiB final Sys=11.08 MiB
+hit 1: score=3.3314 id=data-simplification/wikilarge/wiki.full.aner.train.dst:155625 side=dst file=data-simplification/wikilarge/wiki.full.aner.train.dst
+       Countries like LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10 , LOCATION@11 , LOCATION@12 , LOCATI...
+hit 2: score=3.3242 id=data-simplification/wikilarge/wiki.full.aner.train.dst:285127 side=dst file=data-simplification/wikilarge/wiki.full.aner.train.dst
+       Countries like LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10 , LOCATION@11 , LOCATION@12 , LOCATI...
+hit 3: score=3.3242 id=data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444 side=dst file=data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst
+       Countries like LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10 , LOCATION@11 , LOCATION@12 , LOCATI...
+hit 4: score=3.3156 id=data-simplification/wikilarge/wiki.full.aner.train.dst:44789 side=dst file=data-simplification/wikilarge/wiki.full.aner.train.dst
+       LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@22 , Inverness-shire , LOCATION@10 , Kinross-shire , LOCATION@11 , ...
+hit 5: score=3.3122 id=data-simplification/wikilarge/wiki.full.aner.train.src:284192 side=src file=data-simplification/wikilarge/wiki.full.aner.train.src
+       ORGANIZATION@1 comprises twenty-eight members : LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , the LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10...

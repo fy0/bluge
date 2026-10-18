@@ -1,0 +1,19 @@
+archive: C:\Users\test\Downloads\data-simplification.tar.bz2 (55.73 MiB)
+index:   D:\codes\2026\bluge\tmp\readme-text-20261018\index-2 (303.53 MiB, kept=true)
+files:   24 text files
+docs:    1547580
+text:    176.24 MiB uncompressed indexed text
+batch:   1000 docs
+build:   1m54.371s, 13531 docs/sec, 1.54 MiB/sec
+query:   "LOCATION" in 15ms, 5 hits shown
+memory:  peak Alloc=76.21 MiB peak Sys=109.02 MiB final Alloc=1.88 MiB final Sys=109.02 MiB
+hit 1: score=3.3314 id=data-simplification/wikilarge/wiki.full.aner.train.dst:155625 side=dst file=data-simplification/wikilarge/wiki.full.aner.train.dst
+       Countries like LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10 , LOCATION@11 , LOCATION@12 , LOCATI...
+hit 2: score=3.3242 id=data-simplification/wikilarge/wiki.full.aner.train.dst:285127 side=dst file=data-simplification/wikilarge/wiki.full.aner.train.dst
+       Countries like LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10 , LOCATION@11 , LOCATION@12 , LOCATI...
+hit 3: score=3.3242 id=data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444 side=dst file=data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst
+       Countries like LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10 , LOCATION@11 , LOCATION@12 , LOCATI...
+hit 4: score=3.3156 id=data-simplification/wikilarge/wiki.full.aner.train.dst:44789 side=dst file=data-simplification/wikilarge/wiki.full.aner.train.dst
+       LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@22 , Inverness-shire , LOCATION@10 , Kinross-shire , LOCATION@11 , ...
+hit 5: score=3.3122 id=data-simplification/wikilarge/wiki.full.aner.train.src:284192 side=src file=data-simplification/wikilarge/wiki.full.aner.train.src
+       ORGANIZATION@1 comprises twenty-eight members : LOCATION@1 , LOCATION@2 , LOCATION@3 , LOCATION@4 , LOCATION@5 , the LOCATION@6 , LOCATION@7 , LOCATION@8 , LOCATION@9 , LOCATION@10...

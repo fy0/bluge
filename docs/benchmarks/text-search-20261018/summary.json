@@ -1,0 +1,825 @@
+{
+  "revision": "1df08adac9af796f321e78a7801636f7e762955f",
+  "corpus_sha256": "42b6b69724d9be6de33e73c4b58bd6a93c46b8b5a26e78d233eb0e463b03718b",
+  "corpus_bytes": 58432902,
+  "runner_sha256": "217a495a60458e0d2558e813e160d95dba53c814b5c951f068cefc90e7712833",
+  "runner_change": "Only profile display precision changed from 0.1 ms to 0.001 ms.",
+  "source": "Clean git archive of HEAD; runner recovered from examples/examples.zip.",
+  "completed_utc": "2026-10-18T13:03:32.060534+00:00",
+  "go": "go version go1.24.6 windows/amd64",
+  "gomaxprocs": "default (20 logical CPUs)",
+  "docs": 1547580,
+  "archive_files": 24,
+  "batch_docs": 1000,
+  "executable_bytes": 4819456,
+  "executable_sha256": "92565ce37f35dfbf8a86bcf2de52872e1114360ee7f1d5624a39b0eeb6239c3c",
+  "builds": [
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-keep-index"
+      ],
+      "started_utc": "2026-10-18T12:57:42.893790+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "build_ms": 115700.0,
+      "docs_per_second": 13376,
+      "peak_alloc_mib": 77.8,
+      "peak_sys_mib": 113.71,
+      "index_bytes": 318001292,
+      "segments": 20,
+      "files": 21
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-2",
+        "-keep-index"
+      ],
+      "started_utc": "2026-10-18T12:59:38.974617+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "build_ms": 114371.0,
+      "docs_per_second": 13531,
+      "peak_alloc_mib": 76.21,
+      "peak_sys_mib": 109.02,
+      "index_bytes": 318277595,
+      "segments": 21,
+      "files": 22
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-3",
+        "-keep-index"
+      ],
+      "started_utc": "2026-10-18T13:01:33.388360+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "build_ms": 118004.0,
+      "docs_per_second": 13115,
+      "peak_alloc_mib": 73.14,
+      "peak_sys_mib": 109.33,
+      "index_bytes": 318277797,
+      "segments": 21,
+      "files": 22
+    }
+  ],
+  "query_profiles": [
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.490765+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 1.11,
+      "first_ms": 1.777,
+      "close_ms": 3.478,
+      "warm_ms": [
+        1.606,
+        1.154,
+        1.69,
+        1.613,
+        1.25,
+        1.71,
+        1.704,
+        1.068,
+        1.716,
+        1.785,
+        1.89,
+        1.713,
+        1.7,
+        1.615,
+        1.135,
+        1.865,
+        1.6,
+        1.996,
+        1.073,
+        0.917
+      ],
+      "fresh_lifecycle_ms": 6.365
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.547077+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 1.104,
+      "first_ms": 1.734,
+      "close_ms": 3.849,
+      "warm_ms": [
+        1.684,
+        1.252,
+        1.798,
+        1.658,
+        1.177,
+        1.74,
+        1.177,
+        1.808,
+        1.209,
+        1.696,
+        1.624,
+        3.412,
+        1.238,
+        1.762,
+        1.262,
+        1.103,
+        1.678,
+        1.831,
+        1.008,
+        1.64
+      ],
+      "fresh_lifecycle_ms": 6.687
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.602330+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 1.091,
+      "first_ms": 1.732,
+      "close_ms": 3.223,
+      "warm_ms": [
+        1.641,
+        1.174,
+        1.863,
+        1.679,
+        2.319,
+        2.247,
+        1.213,
+        1.711,
+        1.744,
+        1.109,
+        1.733,
+        1.622,
+        1.729,
+        1.624,
+        1.718,
+        1.188,
+        0.507,
+        2.678,
+        0.926,
+        1.95
+      ],
+      "fresh_lifecycle_ms": 6.045999999999999
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.657800+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 0.635,
+      "first_ms": 1.628,
+      "close_ms": 2.986,
+      "warm_ms": [
+        1.768,
+        1.631,
+        1.687,
+        1.166,
+        1.644,
+        1.774,
+        1.115,
+        1.671,
+        1.695,
+        1.695,
+        1.708,
+        2.229,
+        1.15,
+        1.696,
+        1.128,
+        1.744,
+        1.587,
+        0.913,
+        1.984,
+        0.984
+      ],
+      "fresh_lifecycle_ms": 5.2490000000000006
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.710423+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 0.605,
+      "first_ms": 1.756,
+      "close_ms": 4.226,
+      "warm_ms": [
+        1.677,
+        1.717,
+        1.151,
+        1.751,
+        1.157,
+        1.655,
+        1.765,
+        1.167,
+        1.746,
+        1.2,
+        1.872,
+        1.135,
+        2.722,
+        1.654,
+        0.591,
+        1.639,
+        2.358,
+        1.575,
+        0.918,
+        1.25
+      ],
+      "fresh_lifecycle_ms": 6.587
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.768919+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 1.084,
+      "first_ms": 1.094,
+      "close_ms": 3.563,
+      "warm_ms": [
+        2.247,
+        1.595,
+        1.74,
+        1.613,
+        1.632,
+        1.229,
+        1.672,
+        1.669,
+        1.143,
+        2.217,
+        1.167,
+        2.16,
+        1.752,
+        1.693,
+        1.041,
+        2.197,
+        1.668,
+        0.592,
+        2.151,
+        1.539
+      ],
+      "fresh_lifecycle_ms": 5.741
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.823677+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 1.187,
+      "first_ms": 1.745,
+      "close_ms": 3.508,
+      "warm_ms": [
+        1.71,
+        1.697,
+        1.636,
+        1.738,
+        1.723,
+        1.125,
+        1.729,
+        1.631,
+        1.718,
+        2.247,
+        1.104,
+        1.639,
+        1.705,
+        1.174,
+        1.125,
+        2.127,
+        1.496,
+        2.059,
+        1.008,
+        1.96
+      ],
+      "fresh_lifecycle_ms": 6.44
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.879206+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 1.078,
+      "first_ms": 1.765,
+      "close_ms": 4.918,
+      "warm_ms": [
+        1.631,
+        1.725,
+        1.244,
+        1.625,
+        1.74,
+        1.65,
+        1.68,
+        1.13,
+        1.621,
+        1.718,
+        1.666,
+        1.676,
+        1.602,
+        1.691,
+        1.099,
+        1.094,
+        2.918,
+        1.659,
+        0.911,
+        1.959
+      ],
+      "fresh_lifecycle_ms": 7.761
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.936463+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 0.59,
+      "first_ms": 1.659,
+      "close_ms": 3.482,
+      "warm_ms": [
+        1.714,
+        1.62,
+        1.784,
+        1.61,
+        1.13,
+        1.7,
+        1.638,
+        1.73,
+        1.663,
+        1.725,
+        1.134,
+        1.609,
+        2.282,
+        1.704,
+        1.675,
+        1.104,
+        1.605,
+        1.881,
+        2.185,
+        2.149
+      ],
+      "fresh_lifecycle_ms": 5.731
+    },
+    {
+      "command": [
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\current.exe",
+        "-archive",
+        "C:\\Users\\test\\Downloads\\data-simplification.tar.bz2",
+        "-batch",
+        "1000",
+        "-index",
+        "D:\\codes\\2026\\bluge\\tmp\\readme-text-20261018\\index-1",
+        "-query-only",
+        "-profile-query",
+        "-warm-queries",
+        "20"
+      ],
+      "started_utc": "2026-10-18T13:03:31.993231+00:00",
+      "hits": [
+        [
+          "3.3314",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:155625"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:285127"
+        ],
+        [
+          "3.3242",
+          "data-simplification/wikismall/PWKP_108016.tag.80.aner.train.dst:85444"
+        ],
+        [
+          "3.3156",
+          "data-simplification/wikilarge/wiki.full.aner.train.dst:44789"
+        ],
+        [
+          "3.3122",
+          "data-simplification/wikilarge/wiki.full.aner.train.src:284192"
+        ]
+      ],
+      "open_ms": 0.505,
+      "first_ms": 2.224,
+      "close_ms": 3.716,
+      "warm_ms": [
+        1.707,
+        1.605,
+        1.194,
+        1.665,
+        1.698,
+        1.682,
+        1.098,
+        1.602,
+        1.756,
+        1.645,
+        1.117,
+        1.707,
+        2.774,
+        1.713,
+        1.621,
+        1.583,
+        0.771,
+        2.326,
+        0.931,
+        1.952
+      ],
+      "fresh_lifecycle_ms": 6.445
+    }
+  ],
+  "aggregate": {
+    "build_ms_mean": 116025.0,
+    "docs_per_second_mean": 13340.666666666666,
+    "index_bytes_mean": 318185561.3333333,
+    "peak_alloc_mib_max": 77.8,
+    "peak_sys_mib_max": 113.71,
+    "fresh_lifecycle_ms_median": 6.4025,
+    "resident_ms_median": 1.6655,
+    "resident_ms_p95": 2.247
+  },
+  "environment": {
+    "os_arch": "Windows/amd64",
+    "cpu": "Intel Core i5-13600KF",
+    "logical_cpus": 20,
+    "ram_bytes": 68523839488,
+    "cgo_enabled": 0,
+    "build_flags": [
+      "-trimpath",
+      "-buildvcs=false",
+      "-ldflags=-s -w"
+    ]
+  },
+  "raw_sha256": {
+    "build-1.log": "9d956f63d8384576af61ab0bb7b808d32f78f840e075d727bb8be4a717325ee9",
+    "build-2.log": "2d660562df3fa4a0f527d66e93d40837c8ef52342897811620faaaa239528aba",
+    "build-3.log": "00342bacd95f6897441955c892d9d128904ae20e55db52b4199ed109aa5a3536",
+    "query-01.log": "ab15c0b0bb748caedc9a29689460a8b6adf59399f900aa58e2ed153c417c72fe",
+    "query-02.log": "88c8c6ec57753269587d2edb6ca3093a1074c76bffbc038d3dc80dceb4c11be4",
+    "query-03.log": "89b4271333cd9cb3afdfe20e052e95f2f901f345960bfea9accadc7077002ba0",
+    "query-04.log": "08857fee1908d5dad3237d79c740eba032a5dae3d045011aaba1494dc602fd58",
+    "query-05.log": "f34a2b1f510e58e2fcd90caef97715d1706474fcc83f0aeb1e42ed0ce18098e0",
+    "query-06.log": "0586d026b4ecd123e4b33ee2ff5b3f0a4661ac24606f83169720f6d51772779e",
+    "query-07.log": "8d6d2a6d881ca9786ddd4af03bae01219f1bd8098120753bc41627da651f9f16",
+    "query-08.log": "5ee2080e3b49934b576d065d54a2257986a48153635c5b96b4257ca5eec3c2ff",
+    "query-09.log": "74fa0fc4b2ab5e9c617443f3377a360bec3e2718e842b8e01eadb006fcd94596",
+    "query-10.log": "342eeeda28e08492828897b6c9dc86e3f30f1509125980c7b651fe36df3c441e",
+    "query-warmup.log": "26d3ddad67d89a225743ec16ec8add628a1e6dbac9db4539566572c6babf76e1",
+    "runner.go.txt": "217a495a60458e0d2558e813e160d95dba53c814b5c951f068cefc90e7712833"
+  }
+}

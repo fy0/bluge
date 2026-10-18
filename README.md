@@ -26,71 +26,135 @@ Bluge v0.2.2 baseline (`5741419`).  It keeps the public document, writer, and
 query APIs familiar while replacing the segment implementation and optimizing
 the indexing and search hot paths.
 
+### Search And Storage Scenarios
+
+| Scenario | API or backend | Storage and lifecycle |
+|---|---|---|
+| Text search | `Writer` / `Reader` | Pure-Go BM25 indexing and search; no native library required. |
+| Segment-integrated chunk search | `EmbeddedUSearchVectorBackend` | Text and vectors share segment snapshots; merges rebuild each segment's ANN payload. |
+| Global sidecar ANN | `USearchVectorBackend` | One global vector index per field, persisted alongside the text index. |
+| Independent embedding models | `Collection` (experimental) | One shared BM25 corpus with named vector spaces, selected-model readers, and independent vector publication and reclamation. |
+| Exact vector baseline | `FlatVectorBackend` or Collection with `VectorStorage: "flat"` | Exact search with a cgo-free backend. |
+
 ### Performance Comparison
 
-| Metric | Current v2 | Bluge Official | Bleve v2.5.7 |
+The following tables summarize the latest recorded results for
+`Current v2[2026.10]`. Each workload lists its measurement conditions and date.
+
+#### Text Indexing And BM25
+
+The cross-engine comparison uses 1,547,580 documents, 176.24 MiB of body text,
+ordinary safe writers with batches of 1,000, and score-descending Top-5
+`LOCATION` searches. All measurements use Windows/amd64 on the same machine.
+The current branch was remeasured on 2026-10-18 at `1df08ad`: build time,
+throughput, and index size are three-run means; memory values are the highest
+after-batch Go heap samples across those runs. Query values are medians from
+ten fresh processes with 20 resident searches each, after one unmeasured
+warm-up process. Other engines retain their July 2026 baselines.
+
+| Metric | Current v2[2026.10] | Bluge Official | Bleve v2.5.7 |
 |---|---:|---:|---:|
 | Writer configuration | ordinary, batch 1,000 | ordinary, batch 1,000 | scorch, batch 1,000 |
-| Indexing time | **2m2.235s average** | 2m39.744s | 2m25.974s |
-| Throughput | **12,674 docs/s** | 9,688 docs/s | 10,602 docs/s |
-| Fresh `LOCATION` lifecycle | **8.203 ms** | 39 ms | 35 ms |
-| Resident `LOCATION` median | **1.630 ms** | 30.1 ms | 16.6 ms |
-| Peak Go `Alloc` | 78.39 MiB | **71.71 MiB** | 78.53 MiB |
-| Peak Go `Sys` | 118.05 MiB | **101.14 MiB** | 108.46 MiB |
-| Final index size | **303.48 MiB average** | 475.40 MiB | 536.47 MiB |
-| Release `.exe` size | **4.53 MiB / 4,749,824 bytes** | 4.60 MiB / 4,819,456 bytes | 10.67 MiB / 11,192,320 bytes |
+| Indexing time | **1m56.025s average** | 2m39.744s | 2m25.974s |
+| Throughput | **13,341 docs/s** | 9,688 docs/s | 10,602 docs/s |
+| Fresh `LOCATION` lifecycle | **6.403 ms** | 39 ms | 35 ms |
+| Resident `LOCATION` median | **1.666 ms** | 30.1 ms | 16.6 ms |
+| Peak Go `Alloc` | 77.80 MiB | **71.71 MiB** | 78.53 MiB |
+| Peak Go `Sys` | 113.71 MiB | **101.14 MiB** | 108.46 MiB |
+| Final index size | **303.45 MiB average** | 475.40 MiB | 536.47 MiB |
+| Release `.exe` size | **4.60 MiB / 4,819,456 bytes** | **4.60 MiB / 4,819,456 bytes** | 10.67 MiB / 11,192,320 bytes |
 
 #### Improvement Ratios
 
-Official Bluge is normalized to 100%. Values below 100% are better for query
-time, index size, binary size, indexing time, and memory; values above 100% are
-better only for throughput.
+Official Bluge is normalized to 100%. Query time uses the fresh lifecycle.
+Lower percentages are better for time, size, and memory; higher percentages
+are better for throughput.
 
 | Engine | Query time | Index size | Binary size | Indexing time | Throughput | Peak `Alloc` | Peak `Sys` |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | Bluge Official | 100% | 100% | 100% | 100% | 100% | 100% | 100% |
-| **Current v2** | **21.03%** | **63.84%** | **98.56%** | **76.52%** | **130.82%** | 109.32% | 116.72% |
+| **Current v2[2026.10]** | **16.42%** | **63.83%** | **100.00%** | **72.63%** | **137.70%** | 108.49% | 112.43% |
 | Bleve v2.5.7 | 89.74% | 112.85% | 232.23% | 91.38% | 109.43% | 109.51% | 107.24% |
 
-Current v2 lowers the fresh query lifecycle by 78.97%, index size by 36.16%,
-and indexing time by 23.48% relative to official Bluge, while increasing
-throughput by 30.82%.
+Relative to official Bluge, the current measurements have an 83.58% lower fresh
+query lifecycle, a 36.17% smaller index, and 27.37% less indexing time, with
+37.70% higher throughput.
 
 #### LanceDB And zvec
 
-| Metric | Current v2 | LanceDB positions | LanceDB Match-only | zvec v0.5.1 adapter |
+| Metric | Current v2[2026.10] | LanceDB positions | LanceDB Match-only | zvec v0.5.1 adapter |
 |---|---:|---:|---:|---:|
-| Build time | **2m2.235s average** | 2m37.440s | **1m32.239s** | 13m6.275s |
-| Throughput | **12,674 docs/s** | 9,830 docs/s | **16,778 docs/s** | 1,968 docs/s |
-| Fresh `LOCATION` lifecycle | **8.203 ms** | 34 ms | 32.5 ms | 227 ms |
-| Final directory | **303.48 MiB average** | 669.00 MiB | **242.95 MiB** | 1,549.43 MiB |
+| Build time | **1m56.025s average** | 2m37.440s | **1m32.239s** | 13m6.275s |
+| Throughput | **13,341 docs/s** | 9,830 docs/s | **16,778 docs/s** | 1,968 docs/s |
+| Fresh `LOCATION` lifecycle | **6.403 ms** | 34 ms | 32.5 ms | 227 ms |
+| Final directory | **303.45 MiB average** | 669.00 MiB | **242.95 MiB** | 1,549.43 MiB |
 
-LanceDB Match-only omits token positions and phrase-query support, so it is not
-feature-equivalent to the position-preserving configurations. The zvec adapter
-uses duplicate pre-tokenized fields and a compatibility vector. External engine
-builds are historical single runs on the same machine and workload; native RSS
-and Go heap samples are not directly comparable.
+LanceDB Match-only omits token positions and phrase-query support. The zvec
+adapter uses duplicate pre-tokenized fields and a compatibility vector.
+External-engine figures retain the original single-run baselines; native RSS
+and Go heap samples use different memory accounting. These tables compare
+text indexing and search, with vector workloads reported separately below.
 
-#### Exact Block-Max BM25 WAND
+See the [October text benchmark report](docs/text-search-benchmark-20261018.md)
+for current per-run data, raw logs, methodology, and reproduction commands, and
+the [cross-engine source report](docs/data-simplification-v2-benchmark.md) plus
+[official Bluge/Bleve baselines](docs/data-simplification-benchmark.md) for
+the comparison measurements.
 
-| Query | Total candidates | Scored candidates | Reduction | Resident median | p95 |
-|---|---:|---:|---:|---:|---:|
-| `LOCATION` | 287,959 | 1,979 | 99.31% | 1.630 ms | 2.249 ms |
-| `THE` | 1,042,353 | 3,136 | 99.70% | 1.684 ms | 2.254 ms |
-| `LOCATION OR THE` | 1,330,312 | 146,084 | 89.02% | not profiled | not profiled |
+#### Multi-Model Collection
 
-The build and directory figures are four-run averages. Query values are medians
-from ten fresh processes, with 20 resident searches per process and no result
-cache. The current v2 memory row is from the validation build; the other memory
-rows retain their original single-run measurements. WAND changes candidate
-traversal but preserves scoring semantics: full indexes matched the ordinary
-collector for Top-1/5/20/100 by document ID, tie
-order, and every bit of the `float64` score.
+One shared text corpus with either one or two independent vector spaces:
 
-See the [detailed v1/v2 benchmark report](docs/data-simplification-v2-benchmark.md)
-for per-run data, root-cause evidence, methodology, validation commands, and
-remaining scheduling risks. The older standalone measurements remain in the
-[historical benchmark report](docs/data-simplification-benchmark.md).
+| Metric | Current v2[2026.10], one model | Current v2[2026.10], two models |
+|---|---:|---:|
+| Final total file size | **8.37 MiB** | **15.52 MiB** |
+| Query p50, per model | **0.0634 ms** | **0.0613 / 0.0633 ms** |
+| Query p95, per model | **0.1027 ms** | **0.0952 / 0.1123 ms** |
+| Total time for two update rounds | **253.2 ms** | **503.1 ms** |
+| Reclamation after releasing the pinned reader | **5.4 ms** | **18.4 ms** |
+| Recall@10, per model | **100%** | **100% / 99.6875%** |
+
+Recorded for the 2026-10-17 report on Windows/amd64, Go 1.24.6,
+`GOMAXPROCS=4`, using the same native DLL. Each model has 10,000 synthetic
+128-dimension vectors, initially written in one batch, followed by two rounds
+of 1% updates. Background merging is disabled; 32 queries per model are each
+timed three times. Each configuration was measured once. The measurements
+precede the final format cleanup and update/key-mapping follow-up changes
+described in the report.
+
+Collection loads selected model spaces, avoids constructing a full filter set
+when all vectors match the text snapshot, and retains the current generation
+plus generations pinned by readers. Vector publication writes a complete
+generation; first load includes integrity checks and document-version reads.
+These small synthetic workloads describe Collection storage and query behavior;
+production scale and cross-engine ANN comparisons require separate measurements.
+
+See the [Collection report](docs/collection-simplification-20261017.md) and
+[machine-readable summary](docs/benchmarks/collection-simplification-20261017/summary.json)
+for configurations, recall validation, and reproduction commands.
+
+#### Embedded Vector Search
+
+Embedded search reads stored identifiers for candidates that reach the global
+Top-K or its cutoff tie group. Reader-bound prepared filters let repeated
+queries reuse the same filter evaluation.
+
+| Workload (26 segments, k=512) | Current v2[2026.10], median query time | Allocations/search |
+|---|---:|---:|
+| 27,000 docs, 64 dimensions, unfiltered | **9.38 ms** | 2,771 |
+| 41,000 docs, 64 dimensions, unfiltered | **12.03 ms** | 2,772 |
+| 27,000 docs, 1024 dimensions, unfiltered | **69.3 ms** | 2,781 |
+| 27,000 docs, 64 dimensions, document-number filter | **11.29 ms** | 10,141 |
+
+These synthetic workloads were measured on Windows/amd64 on 2026-09-14
+through 2026-09-15. Times are medians of three process-level measurements:
+100 iterations per process at 64 dimensions and 50 at 1024 dimensions.
+The document-number filter matches one quarter of the corpus and includes
+per-query filter evaluation. Timing depends on segment count, K, dimensions,
+and filtering.
+
+See the [embedded search report](docs/embedded-usearch-search-hot-path.md)
+for all workloads, raw results, correctness checks, and reproduction commands.
 
 ### Branch Highlights
 
@@ -183,11 +247,13 @@ still requires the native artifact.
 
 For RAG ingestion, one Bluge `Document` should represent one chunk, matching
 the row model used by LanceDB and zvec. Give the chunk its own `_id`, index the
-chunk text for BM25, attach its embedding as a vector field, and store
-`source_id`, chunk position, and other metadata on that same document. Text and
-ANN results then fuse on the same chunk ID; the full source normally remains in
-an external source store instead of being indexed a second time. Bluge does not
-split source material or run an embedding model.
+chunk text for BM25, and store `source_id`, chunk position, and other metadata
+on that same document. With the embedded or sidecar backends, attach its
+embedding as a vector field. With `Collection`, write text once and publish
+embeddings separately to named vector spaces using the matching document
+revision. Text and ANN results then fuse on the same chunk ID; the full source
+normally remains in an external source store instead of being indexed a second
+time. Bluge does not split source material or run an embedding model.
 
 `Writer.InsertMany` and `Writer.UpdateMany` submit a slice of documents as one
 text-index batch and one vector mutation batch. `OfflineWriter.InsertMany`
@@ -217,6 +283,26 @@ resulting native key set into USearch's filtered HNSW traversal without native
 callbacks into Go. The USearch native library is built and published
 independently by the `usearch-ffi` GitHub Actions workflow; it is not compiled
 by `go build`.
+
+### Independent Vector Spaces
+
+The experimental `Collection` API shares one BM25 corpus across independently
+published embedding models. `collection.Reader("model-a")` and
+`OpenCollectionReader(config, "model-a")` select and pin only the named spaces.
+`UpsertDocuments(documents, versions...)` accepts explicit embedding-input
+versions: reuse a version for metadata-only changes, and change it when the
+embedding inputs change. `PendingVectors` lists missing or stale embeddings.
+Model execution, migration, traffic switching, and rollback stay with the
+application.
+
+Vector generations are published atomically. Automatic maintenance reclaims
+obsolete generations while preserving those held by readers, including across
+processes. `Maintain` performs explicit cleanup and `VerifyCollection` checks
+payload checksums and metadata. Current Collection files require checksummed
+catalogs; earlier experimental formats must be rebuilt. USearch update workloads
+require the native adapter built from this branch, which includes the
+compaction/key-mapping fix. See the
+[Collection usage and storage guide](docs/separate-vector-storage-experiment.md).
 
 ### BM25 Scoring Modes
 

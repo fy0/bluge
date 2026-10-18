@@ -1,0 +1,4 @@
+# Preserve the exact benchmark bytes referenced by summary.json.
+*.log -text whitespace=cr-at-eol
+runner.go.txt -text whitespace=cr-at-eol
+summary.json -text whitespace=cr-at-eol

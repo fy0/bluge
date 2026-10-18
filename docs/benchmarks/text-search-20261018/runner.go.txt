@@ -1,0 +1,570 @@
+// Copyright (c) 2026 The Bluge Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+
+package main
+
+import (
+	"archive/tar"
+	"bufio"
+	"compress/bzip2"
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/fy0/bluge"
+)
+
+type stats struct {
+	archiveBytes   int64
+	textBytes      int64
+	indexBytes     int64
+	docs           int
+	files          int
+	buildDuration  time.Duration
+	queryDuration  time.Duration
+	queryProfile   *queryProfile
+	peakAllocBytes uint64
+	peakSysBytes   uint64
+	allocBytes     uint64
+	sysBytes       uint64
+	matches        []match
+	indexPath      string
+	query          string
+	keptIndex      bool
+	archivePath    string
+	batchSize      int
+	limit          int
+}
+
+type queryProfile struct {
+	openDuration  time.Duration
+	firstDuration time.Duration
+	warmDurations []time.Duration
+	closeDuration time.Duration
+}
+
+type match struct {
+	id    string
+	file  string
+	side  string
+	body  string
+	score float64
+}
+
+func main() {
+	var archivePath string
+	var indexPath string
+	var queryText string
+	var limit int
+	var batchSize int
+	var keepIndex bool
+	var queryOnly bool
+	var profileQuery bool
+	var warmQueries int
+
+	flag.StringVar(&archivePath, "archive", `C:\Users\test\Downloads\data-simplification.tar.bz2`, "path to data-simplification.tar.bz2")
+	flag.StringVar(&indexPath, "index", "", "index directory; defaults to a temp directory")
+	flag.StringVar(&queryText, "query", "LOCATION", "match query to validate search")
+	flag.IntVar(&limit, "limit", 0, "maximum documents to index; 0 indexes all text lines")
+	flag.IntVar(&batchSize, "batch", 1000, "documents per Bluge batch")
+	flag.BoolVar(&keepIndex, "keep-index", false, "do not remove a temporary index directory")
+	flag.BoolVar(&queryOnly, "query-only", false, "query an existing index without rebuilding it")
+	flag.BoolVar(&profileQuery, "profile-query", false, "split query time into open, first, same-reader, and close phases")
+	flag.IntVar(&warmQueries, "warm-queries", 10, "same-reader queries to run with -profile-query")
+	flag.Parse()
+
+	if err := validateOptions(batchSize, warmQueries); err != nil {
+		log.Fatal(err)
+	}
+
+	var report *stats
+	var err error
+	if queryOnly {
+		report, err = runQueryOnly(archivePath, indexPath, queryText, batchSize, limit, profileQuery, warmQueries)
+	} else {
+		report, err = run(archivePath, indexPath, queryText, limit, batchSize, keepIndex, profileQuery, warmQueries)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	printReport(report)
+}
+
+func validateOptions(batchSize, warmQueries int) error {
+	if batchSize <= 0 {
+		return fmt.Errorf("-batch must be positive")
+	}
+	if warmQueries < 0 {
+		return fmt.Errorf("-warm-queries must be non-negative")
+	}
+	return nil
+}
+
+func runQueryOnly(archivePath, indexPath, queryText string, batchSize, limit int,
+	profileQuery bool, warmQueries int) (*stats, error) {
+	if indexPath == "" {
+		return nil, fmt.Errorf("-index is required with -query-only")
+	}
+
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat archive: %w", err)
+	}
+	indexBytes, err := directorySize(indexPath)
+	if err != nil {
+		return nil, fmt.Errorf("measure index size: %w", err)
+	}
+
+	queryStart := time.Now()
+	var matches []match
+	var profile *queryProfile
+	if profileQuery {
+		matches, profile, err = profileQueryIndex(indexPath, queryText, 5, warmQueries)
+	} else {
+		matches, err = queryIndex(indexPath, queryText, 5)
+	}
+	if err != nil {
+		return nil, err
+	}
+	queryDuration := time.Since(queryStart)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("query %q returned no matches", queryText)
+	}
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	return &stats{
+		archivePath:    archivePath,
+		archiveBytes:   archiveInfo.Size(),
+		indexPath:      indexPath,
+		indexBytes:     indexBytes,
+		query:          queryText,
+		queryDuration:  queryDuration,
+		queryProfile:   profile,
+		matches:        matches,
+		keptIndex:      true,
+		batchSize:      batchSize,
+		limit:          limit,
+		peakAllocBytes: mem.Alloc,
+		peakSysBytes:   mem.Sys,
+		allocBytes:     mem.Alloc,
+		sysBytes:       mem.Sys,
+	}, nil
+}
+
+func run(archivePath, indexPath, queryText string, limit, batchSize int, keepIndex bool,
+	profileQuery bool, warmQueries int) (*stats, error) {
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("stat archive: %w", err)
+	}
+
+	tempIndex := false
+	if indexPath == "" {
+		indexPath, err = os.MkdirTemp("", "bluge-data-simplification-")
+		if err != nil {
+			return nil, fmt.Errorf("create temp index: %w", err)
+		}
+		tempIndex = true
+	} else {
+		err = os.RemoveAll(indexPath)
+		if err != nil {
+			return nil, fmt.Errorf("reset index directory: %w", err)
+		}
+	}
+	if tempIndex && !keepIndex {
+		defer func() {
+			if removeErr := os.RemoveAll(indexPath); removeErr != nil {
+				log.Printf("remove temp index: %v", removeErr)
+			}
+		}()
+	}
+
+	report := &stats{
+		archivePath:  archivePath,
+		archiveBytes: archiveInfo.Size(),
+		indexPath:    indexPath,
+		query:        queryText,
+		keptIndex:    keepIndex || !tempIndex,
+		batchSize:    batchSize,
+		limit:        limit,
+	}
+
+	start := time.Now()
+	report.docs, report.files, report.textBytes, report.peakAllocBytes, report.peakSysBytes, err =
+		buildIndex(archivePath, indexPath, batchSize, limit)
+	if err != nil {
+		return nil, err
+	}
+	report.buildDuration = time.Since(start)
+
+	report.indexBytes, err = directorySize(indexPath)
+	if err != nil {
+		return nil, fmt.Errorf("measure index size: %w", err)
+	}
+
+	queryStart := time.Now()
+	if profileQuery {
+		report.matches, report.queryProfile, err = profileQueryIndex(indexPath, queryText, 5, warmQueries)
+	} else {
+		report.matches, err = queryIndex(indexPath, queryText, 5)
+	}
+	if err != nil {
+		return nil, err
+	}
+	report.queryDuration = time.Since(queryStart)
+	if len(report.matches) == 0 {
+		return nil, fmt.Errorf("query %q returned no matches", queryText)
+	}
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	report.allocBytes = mem.Alloc
+	report.sysBytes = mem.Sys
+
+	return report, nil
+}
+
+func buildIndex(archivePath, indexPath string, batchSize, limit int) (
+	docs int, files int, textBytes int64, peakAlloc uint64, peakSys uint64, err error) {
+	config := bluge.DefaultConfig(indexPath)
+	writer, err := bluge.OpenWriter(config)
+	if err != nil {
+		return 0, 0, 0, 0, 0, fmt.Errorf("open writer: %w", err)
+	}
+	defer func() {
+		closeErr := writer.Close()
+		if err == nil && closeErr != nil {
+			err = fmt.Errorf("close writer: %w", closeErr)
+		}
+	}()
+
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return 0, 0, 0, 0, 0, fmt.Errorf("open archive: %w", err)
+	}
+	defer archiveFile.Close()
+
+	tr := tar.NewReader(bzip2.NewReader(archiveFile))
+	batch := bluge.NewBatch()
+	batchDocs := 0
+
+	flush := func() error {
+		if batchDocs == 0 {
+			return nil
+		}
+		err := writer.Batch(batch)
+		if err != nil {
+			return err
+		}
+		batch.Reset()
+		batchDocs = 0
+		alloc, sys := memUsage()
+		if alloc > peakAlloc {
+			peakAlloc = alloc
+		}
+		if sys > peakSys {
+			peakSys = sys
+		}
+		return nil
+	}
+
+	for {
+		header, readErr := tr.Next()
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return docs, files, textBytes, peakAlloc, peakSys, fmt.Errorf("read archive: %w", readErr)
+		}
+		if header.Typeflag != tar.TypeReg || !isTextPairFile(header.Name) {
+			continue
+		}
+
+		files++
+		side := sideFromName(header.Name)
+		scanner := bufio.NewScanner(tr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+		lineNumber := 0
+		for scanner.Scan() {
+			lineNumber++
+			body := strings.TrimSpace(scanner.Text())
+			if body == "" {
+				continue
+			}
+			textBytes += int64(len(body))
+			docs++
+
+			id := fmt.Sprintf("%s:%d", header.Name, lineNumber)
+			doc := bluge.NewDocument(id).
+				AddField(bluge.NewTextField("file", header.Name).StoreValue()).
+				AddField(bluge.NewKeywordField("side", side).StoreValue()).
+				AddField(bluge.NewTextField("body", body).StoreValue())
+			batch.Insert(doc)
+			batchDocs++
+
+			if batchDocs >= batchSize {
+				err = flush()
+				if err != nil {
+					return docs, files, textBytes, peakAlloc, peakSys, fmt.Errorf("flush batch: %w", err)
+				}
+			}
+			if limit > 0 && docs >= limit {
+				err = flush()
+				if err != nil {
+					return docs, files, textBytes, peakAlloc, peakSys, fmt.Errorf("flush final limited batch: %w", err)
+				}
+				return docs, files, textBytes, peakAlloc, peakSys, nil
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return docs, files, textBytes, peakAlloc, peakSys, fmt.Errorf("scan %s: %w", header.Name, err)
+		}
+	}
+
+	err = flush()
+	if err != nil {
+		return docs, files, textBytes, peakAlloc, peakSys, fmt.Errorf("flush final batch: %w", err)
+	}
+
+	return docs, files, textBytes, peakAlloc, peakSys, nil
+}
+
+func queryIndex(indexPath, queryText string, size int) ([]match, error) {
+	config := bluge.DefaultConfig(indexPath)
+	reader, err := bluge.OpenReader(config)
+	if err != nil {
+		return nil, fmt.Errorf("open reader: %w", err)
+	}
+	defer reader.Close()
+	return searchReader(reader, queryText, size)
+}
+
+func profileQueryIndex(indexPath, queryText string, size, warmQueries int) ([]match, *queryProfile, error) {
+	profile := &queryProfile{warmDurations: make([]time.Duration, 0, warmQueries)}
+	openStart := time.Now()
+	reader, err := bluge.OpenReader(bluge.DefaultConfig(indexPath))
+	profile.openDuration = time.Since(openStart)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open reader: %w", err)
+	}
+
+	closeReader := func() error {
+		closeStart := time.Now()
+		err := reader.Close()
+		profile.closeDuration = time.Since(closeStart)
+		if err != nil {
+			return fmt.Errorf("close reader: %w", err)
+		}
+		return nil
+	}
+
+	firstStart := time.Now()
+	matches, err := searchReader(reader, queryText, size)
+	profile.firstDuration = time.Since(firstStart)
+	if err != nil {
+		_ = closeReader()
+		return nil, nil, err
+	}
+	for i := 0; i < warmQueries; i++ {
+		warmStart := time.Now()
+		warmMatches, searchErr := searchReader(reader, queryText, size)
+		profile.warmDurations = append(profile.warmDurations, time.Since(warmStart))
+		if searchErr != nil {
+			_ = closeReader()
+			return nil, nil, fmt.Errorf("same-reader query %d: %w", i+1, searchErr)
+		}
+		if err := sameMatches(matches, warmMatches); err != nil {
+			_ = closeReader()
+			return nil, nil, fmt.Errorf("same-reader query %d: %w", i+1, err)
+		}
+	}
+	if err := closeReader(); err != nil {
+		return nil, nil, err
+	}
+	return matches, profile, nil
+}
+
+func searchReader(reader *bluge.Reader, queryText string, size int) ([]match, error) {
+
+	query := bluge.NewMatchQuery(queryText).
+		SetField("body").
+		SetOperator(bluge.MatchQueryOperatorAnd)
+	request := bluge.NewTopNSearch(size, query)
+
+	iterator, err := reader.Search(context.Background(), request)
+	if err != nil {
+		return nil, fmt.Errorf("search: %w", err)
+	}
+
+	var matches []match
+	next, err := iterator.Next()
+	for err == nil && next != nil {
+		m := match{score: next.Score}
+		err = next.VisitStoredFields(func(field string, value []byte) bool {
+			switch field {
+			case "_id":
+				m.id = string(value)
+			case "file":
+				m.file = string(value)
+			case "side":
+				m.side = string(value)
+			case "body":
+				m.body = string(value)
+			}
+			return true
+		})
+		if err != nil {
+			return nil, fmt.Errorf("visit stored fields: %w", err)
+		}
+		matches = append(matches, m)
+		next, err = iterator.Next()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("iterate matches: %w", err)
+	}
+
+	return matches, nil
+}
+
+func sameMatches(want, got []match) error {
+	if len(want) != len(got) {
+		return fmt.Errorf("result count changed from %d to %d", len(want), len(got))
+	}
+	for i := range want {
+		if want[i].id != got[i].id || want[i].score != got[i].score {
+			return fmt.Errorf("result %d changed from %s/%.8f to %s/%.8f",
+				i+1, want[i].id, want[i].score, got[i].id, got[i].score)
+		}
+	}
+	return nil
+}
+
+func isTextPairFile(name string) bool {
+	if strings.HasSuffix(name, ".vocab.tmp.t7") || strings.HasSuffix(name, ".map.t7") {
+		return false
+	}
+	return strings.HasSuffix(name, ".src") || strings.HasSuffix(name, ".dst")
+}
+
+func sideFromName(name string) string {
+	if strings.HasSuffix(name, ".src") {
+		return "src"
+	}
+	if strings.HasSuffix(name, ".dst") {
+		return "dst"
+	}
+	return ""
+}
+
+func directorySize(path string) (int64, error) {
+	var total int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+func memUsage() (alloc uint64, sys uint64) {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	return mem.Alloc, mem.Sys
+}
+
+func printReport(report *stats) {
+	fmt.Printf("archive: %s (%s)\n", report.archivePath, humanBytes(uint64(report.archiveBytes)))
+	fmt.Printf("index:   %s (%s, kept=%v)\n", report.indexPath, humanBytes(uint64(report.indexBytes)), report.keptIndex)
+	if report.files > 0 {
+		fmt.Printf("files:   %d text files\n", report.files)
+	}
+	if report.docs > 0 {
+		fmt.Printf("docs:    %d\n", report.docs)
+	}
+	if report.textBytes > 0 {
+		fmt.Printf("text:    %s uncompressed indexed text\n", humanBytes(uint64(report.textBytes)))
+	}
+	fmt.Printf("batch:   %d docs", report.batchSize)
+	if report.limit > 0 {
+		fmt.Printf(" (limit=%d)", report.limit)
+	}
+	fmt.Println()
+	if report.buildDuration > 0 {
+		docsPerSec := float64(report.docs) / report.buildDuration.Seconds()
+		mbPerSec := bytesToMiB(report.textBytes) / report.buildDuration.Seconds()
+		fmt.Printf("build:   %s, %.0f docs/sec, %.2f MiB/sec\n", report.buildDuration.Round(time.Millisecond), docsPerSec, mbPerSec)
+	}
+	if report.queryProfile != nil {
+		fmt.Printf("profile: %q in %s, %d queries, %d hits shown\n", report.query,
+			report.queryDuration.Round(time.Millisecond), len(report.queryProfile.warmDurations)+1, len(report.matches))
+		fmt.Printf("open:    %s\n", formatMilliseconds(report.queryProfile.openDuration))
+		fmt.Printf("first:   %s\n", formatMilliseconds(report.queryProfile.firstDuration))
+		if len(report.queryProfile.warmDurations) > 0 {
+			formatted := make([]string, len(report.queryProfile.warmDurations))
+			for i, duration := range report.queryProfile.warmDurations {
+				formatted[i] = formatMilliseconds(duration)
+			}
+			fmt.Printf("warm:    %s\n", strings.Join(formatted, "/"))
+		}
+		fmt.Printf("close:   %s\n", formatMilliseconds(report.queryProfile.closeDuration))
+	} else {
+		fmt.Printf("query:   %q in %s, %d hits shown\n", report.query, report.queryDuration.Round(time.Millisecond), len(report.matches))
+	}
+	fmt.Printf("memory:  peak Alloc=%s peak Sys=%s final Alloc=%s final Sys=%s\n",
+		humanBytes(report.peakAllocBytes), humanBytes(report.peakSysBytes),
+		humanBytes(report.allocBytes), humanBytes(report.sysBytes))
+
+	sort.Slice(report.matches, func(i, j int) bool {
+		return report.matches[i].score > report.matches[j].score
+	})
+	for i, match := range report.matches {
+		fmt.Printf("hit %d: score=%.4f id=%s side=%s file=%s\n", i+1, match.score, match.id, match.side, match.file)
+		fmt.Printf("       %s\n", truncate(match.body, 180))
+	}
+}
+
+func formatMilliseconds(duration time.Duration) string {
+	return fmt.Sprintf("%.3fms", float64(duration)/float64(time.Millisecond))
+}
+
+func humanBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func bytesToMiB(n int64) float64 {
+	return float64(n) / 1024 / 1024
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
