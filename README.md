@@ -193,6 +193,45 @@ for all workloads, raw results, correctness checks, and reproduction commands.
 * **32-bit coverage** - atomic counters used by the segment code are aligned
   and the core packages are tested with `GOARCH=386`.
 
+### Writer Memory Tuning
+
+Online writers expose analysis concurrency, merge output buffering, and disk
+merge planning through `Config`. For example, to try one analysis worker, a
+64 KiB output buffer, and up to four input segments per disk merge task:
+
+```go
+import (
+    "github.com/fy0/bluge"
+    "github.com/fy0/bluge/index/mergeplan"
+)
+
+options := mergeplan.DefaultMergePlanOptions
+options.SegmentsPerMergeTask = 4 // Try 2–4 on memory-constrained devices.
+config := bluge.DefaultConfig("index").
+    WithNumAnalysisWorkers(1).
+    WithMergeBufferSize(64 * 1024).
+    WithMergePlanOptions(options)
+writer, err := bluge.OpenWriter(config)
+```
+
+Defaults remain 4 analysis workers, a 1 MiB merge output buffer, and 10 segments
+per disk merge task. `OpenWriter` rejects non-positive worker counts and buffer
+sizes. `WithMergePlanOptions` replaces the complete options value; start from
+the defaults and keep `MaxSegmentsPerTier >= SegmentsPerMergeTask`.
+`WithOfflineWriterConcurrency` applies only to `OfflineWriter`.
+
+These controls are tuning knobs, not a process memory limit. Disk merge tasks
+run serially, but can overlap analysis and persistence. Merge plan options do
+not limit in-memory merges during persistence, and the output buffer excludes
+other merge workspace. All analyzed documents in a batch can remain live until
+segment construction finishes. Applications should also bound batch sizes and
+concurrent writes; the library preserves each batch's atomicity without
+automatically splitting it. Byte-budget backpressure is not implemented by
+these settings.
+
+See the [integer encoding allocation measurements](docs/writer-memory-tuning.md)
+for the accompanying buffer optimization and its measurement limits.
+
 ### Background Write Failures
 
 Background segment merges and snapshot persistence retry with exponential

@@ -96,8 +96,9 @@ func Merge(segments []blugeseg.Segment, drops []*roaring.Bitmap, mergeBufferSize
 	}
 
 	return &merger{
-		segments: zapSegments,
-		drops:    drops,
+		segments:   zapSegments,
+		drops:      drops,
+		bufferSize: mergeBufferSize,
 	}
 }
 
@@ -508,6 +509,7 @@ type merger struct {
 	drops       []*roaring.Bitmap
 	documentMap [][]uint64
 	options     map[string]interface{}
+	bufferSize  int
 }
 
 func (m *merger) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
@@ -516,8 +518,8 @@ func (m *merger) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
 			return 0, fmt.Errorf("cannot merge non-zapx segment at index %d", i)
 		}
 	}
-	docNums, bytesWritten, err := zapxtext.MergeToWriterUsing(m.segments, m.drops, w,
-		closeCh, nil, m.options)
+	docNums, bytesWritten, err := zapxtext.MergeToWriterUsingBufferSize(m.segments, m.drops, w,
+		closeCh, nil, m.options, m.bufferSize)
 	if err != nil {
 		return 0, err
 	}
@@ -534,9 +536,10 @@ func MergeWithOptions(segments []blugeseg.Segment, drops []*roaring.Bitmap,
 		}
 	}
 	return &merger{
-		segments: zapSegments,
-		drops:    drops,
-		options:  options,
+		segments:   zapSegments,
+		drops:      drops,
+		options:    options,
+		bufferSize: mergeBufferSize,
 	}
 }
 

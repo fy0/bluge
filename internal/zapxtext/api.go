@@ -128,6 +128,14 @@ func MergeToWriter(segments []seg.Segment, drops []*roaring.Bitmap, w io.Writer,
 func MergeToWriterUsing(segments []seg.Segment, drops []*roaring.Bitmap, w io.Writer,
 	closeCh chan struct{}, stats seg.StatsReporter, config map[string]interface{}) (
 	[][]uint64, uint64, error) {
+	return MergeToWriterUsingBufferSize(segments, drops, w, closeCh, stats, config, DefaultFileMergerBufferSize)
+}
+
+// MergeToWriterUsingBufferSize merges segments with the requested output buffer
+// size in bytes. Non-positive values use DefaultFileMergerBufferSize.
+func MergeToWriterUsingBufferSize(segments []seg.Segment, drops []*roaring.Bitmap, w io.Writer,
+	closeCh chan struct{}, stats seg.StatsReporter, config map[string]interface{}, bufferSize int) (
+	[][]uint64, uint64, error) {
 	if w == nil {
 		return nil, 0, fmt.Errorf("invalid writer found")
 	}
@@ -147,7 +155,10 @@ func MergeToWriterUsing(segments []seg.Segment, drops []*roaring.Bitmap, w io.Wr
 		}
 	}
 
-	bw := bufio.NewWriterSize(w, DefaultFileMergerBufferSize)
+	if bufferSize <= 0 {
+		bufferSize = DefaultFileMergerBufferSize
+	}
+	bw := bufio.NewWriterSize(w, bufferSize)
 	cw := NewCountHashWriterWithStatsReporter(bw, stats)
 	fw, err := NewFileWriter(cw, nil)
 	if err != nil {

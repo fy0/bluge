@@ -63,6 +63,9 @@ type Writer struct {
 }
 
 func OpenWriter(config Config) (*Writer, error) {
+	if config.NumAnalysisWorkers < 1 {
+		return nil, fmt.Errorf("number of analysis workers must be at least 1")
+	}
 	if config.BackgroundRetryInitialDelay == 0 {
 		config.BackgroundRetryInitialDelay = defaultBackgroundRetryInitialDelay
 	}

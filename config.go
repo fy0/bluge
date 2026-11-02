@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/fy0/bluge/index"
+	"github.com/fy0/bluge/index/mergeplan"
 
 	"github.com/fy0/bluge/search"
 	"github.com/fy0/bluge/search/similarity"
@@ -67,6 +68,14 @@ func (config Config) WithSegmentVersion(ver uint32) Config {
 	return config
 }
 
+// WithNumAnalysisWorkers sets the number of document analysis workers used by
+// OpenWriter (default 4). OpenWriter rejects values below 1. Fewer workers can
+// reduce concurrent analysis memory, but do not bound the size of a batch.
+func (config Config) WithNumAnalysisWorkers(n int) Config {
+	config.indexConfig.NumAnalysisWorkers = n
+	return config
+}
+
 // WithMaxConcurrentBatches limits concurrent online Writer.Batch calls through
 // completion, including analysis and segment building. Zero (default) is unlimited.
 // OpenWriter rejects negative values. Waiting calls are released by Close.
@@ -98,8 +107,23 @@ func (config Config) WithBatchStats(enabled bool) Config {
 	return config
 }
 
+// WithMergeBufferSize sets the merge output buffer size in bytes (default 1 MiB).
+// OpenWriter rejects values below 1. This is not a limit on total merge memory.
+func (config Config) WithMergeBufferSize(bytes int) Config {
+	config.indexConfig.MergeBufferSize = bytes
+	return config
+}
+
+// WithMergePlanOptions replaces the online Writer's disk merge planner options.
+// Start with mergeplan.DefaultMergePlanOptions and adjust the desired fields.
+// These options do not control in-memory merges performed during persistence.
+func (config Config) WithMergePlanOptions(options mergeplan.Options) Config {
+	config.indexConfig.MergePlanOptions = options
+	return config
+}
+
 // WithOfflineWriterConcurrency sets the maximum number of concurrent segment
-// builds and merge tasks used by OfflineWriter.
+// builds and merge tasks used by OfflineWriter. It does not affect OpenWriter.
 func (config Config) WithOfflineWriterConcurrency(concurrency int) Config {
 	config.indexConfig = config.indexConfig.WithOfflineWriterConcurrency(concurrency)
 	return config

@@ -41,6 +41,21 @@ func CreateConfig(name string) (config Config, cleanup func() error) {
 	return rv, func() error { return os.RemoveAll(path) }
 }
 
+func TestOpenWriterRejectsInvalidAnalysisWorkers(t *testing.T) {
+	for _, workers := range []int{0, -1} {
+		config := InMemoryOnlyConfig()
+		config.NumAnalysisWorkers = workers
+		writer, err := OpenWriter(config)
+		if writer != nil {
+			_ = writer.Close()
+			t.Fatalf("workers=%d opened a writer", workers)
+		}
+		if err == nil {
+			t.Fatalf("workers=%d was accepted", workers)
+		}
+	}
+}
+
 type testIdentifier string
 
 func (i testIdentifier) Field() string {

@@ -27,6 +27,11 @@ const (
 	intChunkSnappy
 )
 
+// Reuse ordinary buffers, but do not retain an outlier term's large allocations
+// for the rest of a segment build or merge. This is a per-buffer retention cap,
+// not a limit on the amount of data a coder can encode.
+const maxIntCoderRetainedBytes = 1 << 20
+
 // We can safely use 0 to represent termNotEncoded since 0
 // could never be a valid address for term location information.
 // (stored field index is always non-empty and earlier in the
@@ -61,12 +66,24 @@ func newChunkedIntCoder(chunkSize uint64, maxDocNum uint64) *chunkedIntCoder {
 	return rv
 }
 
-// Reset lets you reuse this chunked int coder.  buffers are reset and reused
-// from previous use.  you cannot change the chunk size or max doc num.
+// Reset lets you reuse this chunked int coder. Ordinary buffers are reused and
+// oversized buffers are released. The chunk size and max doc num are unchanged.
 func (c *chunkedIntCoder) Reset() {
 	c.final = c.final[:0]
+	if cap(c.final) > maxIntCoderRetainedBytes {
+		c.final = nil
+	}
 	c.bytesWritten = 0
 	c.chunkBuf.Reset()
+	if c.chunkBuf.Cap() > maxIntCoderRetainedBytes {
+		c.chunkBuf = bytes.Buffer{}
+	}
+	if cap(c.compressed) > maxIntCoderRetainedBytes {
+		c.compressed = nil
+	}
+	if cap(c.buf) > maxIntCoderRetainedBytes {
+		c.buf = nil
+	}
 	c.currChunk = 0
 	for i := range c.chunkLens {
 		c.chunkLens[i] = 0
@@ -137,8 +154,21 @@ func (c *chunkedIntCoder) AddBytes(docNum uint64, buf []byte) error {
 func (c *chunkedIntCoder) Close() {
 	encodingBytes := c.chunkBuf.Bytes()
 	c.incrementBytesWritten(uint64(len(encodingBytes)))
-	c.chunkLens[c.currChunk] = uint64(len(encodingBytes))
-	c.final = append(c.final, encodingBytes...)
+	if len(encodingBytes) > 0 {
+		// Encode each chunk as it finishes, so Write does not need a second
+		// full-size copy of the integer stream. Keep the existing wire format.
+		c.compressed = snappy.Encode(c.compressed[:cap(c.compressed)], encodingBytes)
+		flag := intChunkRaw
+		if len(c.compressed) < len(encodingBytes) {
+			flag = intChunkSnappy
+			encodingBytes = c.compressed
+		}
+		c.final = append(c.final, flag)
+		c.final = append(c.final, encodingBytes...)
+		c.chunkLens[c.currChunk] = 1 + uint64(len(encodingBytes))
+	} else {
+		c.chunkLens[c.currChunk] = 0
+	}
 	c.currChunk = uint64(cap(c.chunkLens)) // sentinel to detect double close
 }
 
@@ -150,34 +180,11 @@ func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 	}
 	buf := c.buf
 
-	// Encode each non-empty chunk independently so random chunk access remains
-	// bounded. Small or incompressible chunks stay raw.
-	var pos int
-	processedBuf := make([]byte, 0, len(c.final))
-	for i := 0; i < len(c.chunkLens); i++ {
-		if c.chunkLens[i] == 0 {
-			continue
-		}
-		raw := c.final[pos : pos+int(c.chunkLens[i])]
-		c.compressed = snappy.Encode(c.compressed[:cap(c.compressed)], raw)
-		var encoded []byte
-		if len(c.compressed) < len(raw) {
-			processedBuf = append(processedBuf, intChunkSnappy)
-			encoded = c.compressed
-		} else {
-			processedBuf = append(processedBuf, intChunkRaw)
-			encoded = raw
-		}
-		processedBuf = append(processedBuf, encoded...)
-		pos += len(raw)
-		encodedStart := len(processedBuf) - len(encoded) - 1
-		if fw, ok := w.(*FileWriter); ok && fw != nil {
-			processed := fw.process(processedBuf[encodedStart:])
-			processedBuf = append(processedBuf[:encodedStart], processed...)
-		}
-		c.chunkLens[i] = uint64(len(processedBuf) - encodedStart)
+	// Custom callbacks may change chunk lengths and must run before offsets
+	// are written. The ordinary writer needs no additional payload buffer.
+	if fw, ok := w.(*FileWriter); ok && fw != nil && fw.processor != nil {
+		c.processChunks(fw)
 	}
-	c.final = processedBuf
 	// calculate chunk offsets from chunk lengths
 	chunkOffsets := modifyLengthsToEndOffsets(c.chunkLens)
 
@@ -199,6 +206,25 @@ func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 		return tw, err
 	}
 	return tw, nil
+}
+
+func (c *chunkedIntCoder) processChunks(w *FileWriter) {
+	processedBuf := make([]byte, 0, len(c.final))
+	var pos uint64
+	for i, length := range c.chunkLens {
+		if length == 0 {
+			continue
+		}
+		// Limit capacity so an appending callback cannot overwrite the next
+		// chunk before it is processed. Copy the result before the next call,
+		// since callbacks may reuse their own output buffers.
+		end := pos + length
+		processed := w.process(c.final[pos:end:end])
+		processedBuf = append(processedBuf, processed...)
+		c.chunkLens[i] = uint64(len(processed))
+		pos = end
+	}
+	c.final = processedBuf
 }
 
 // writeAt commits all the encoded chunked integers to the provided writer

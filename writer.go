@@ -34,12 +34,20 @@ type Writer struct {
 	closeOnce      sync.Once
 	batchStatsLock sync.Mutex
 	batchStats     BatchStats
+	textImportLock sync.Mutex
 }
 
 func OpenWriter(config Config) (*Writer, error) {
 	if config.maxConcurrentBatches < 0 {
 		return nil, fmt.Errorf("maximum concurrent batches must not be negative")
 	}
+	if config.indexConfig.NumAnalysisWorkers < 1 {
+		return nil, fmt.Errorf("number of analysis workers must be at least 1")
+	}
+	if config.indexConfig.MergeBufferSize < 1 {
+		return nil, fmt.Errorf("merge buffer size must be at least 1 byte")
+	}
+
 	rv := &Writer{
 		config:  config,
 		closeCh: make(chan struct{}),
