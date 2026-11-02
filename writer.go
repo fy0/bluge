@@ -17,6 +17,7 @@ package bluge
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	segment "github.com/fy0/bluge/segment"
 
@@ -27,11 +28,24 @@ type Writer struct {
 	config Config
 	chill  *index.Writer
 	vector VectorIndex
+
+	batchSlots     chan struct{}
+	closeCh        chan struct{}
+	closeOnce      sync.Once
+	batchStatsLock sync.Mutex
+	batchStats     BatchStats
 }
 
 func OpenWriter(config Config) (*Writer, error) {
+	if config.maxConcurrentBatches < 0 {
+		return nil, fmt.Errorf("maximum concurrent batches must not be negative")
+	}
 	rv := &Writer{
-		config: config,
+		config:  config,
+		closeCh: make(chan struct{}),
+	}
+	if config.maxConcurrentBatches > 0 {
+		rv.batchSlots = make(chan struct{}, config.maxConcurrentBatches)
 	}
 
 	var err error
@@ -115,6 +129,44 @@ func (w *Writer) Delete(id segment.Term) error {
 }
 
 func (w *Writer) Batch(batch *index.Batch) error {
+	// Wait outside the index's mutation lock so writes and persistence can drain.
+	if w.batchSlots != nil {
+		select {
+		case w.batchSlots <- struct{}{}:
+		case <-w.closeCh:
+			return segment.ErrClosed
+		}
+		defer func() { <-w.batchSlots }()
+		select {
+		case <-w.closeCh:
+			return segment.ErrClosed
+		default:
+		}
+	}
+	var inputBytes uint64
+	if w.config.batchStatsEnabled {
+		w.batchStatsLock.Lock()
+		w.batchStats.InFlightBatches++
+		w.batchStatsLock.Unlock()
+		defer func() {
+			w.batchStatsLock.Lock()
+			w.batchStats.InFlightBatches--
+			w.batchStats.InFlightInputBytes -= inputBytes
+			w.batchStatsLock.Unlock()
+		}()
+	}
+	if w.config.maxDocumentInputBytes > 0 || w.config.maxBatchInputBytes > 0 || w.config.batchStatsEnabled {
+		var err error
+		inputBytes, err = w.checkBatchInput(batch)
+		if err != nil {
+			return err
+		}
+		if w.config.batchStatsEnabled {
+			w.batchStatsLock.Lock()
+			w.batchStats.InFlightInputBytes += inputBytes
+			w.batchStatsLock.Unlock()
+		}
+	}
 	segmentVectors := usesSegmentVectorBackend(w.config)
 	if w.vector == nil && !segmentVectors {
 		hasVectors, err := batchContainsVectors(batch)
@@ -154,6 +206,9 @@ func (w *Writer) Batch(batch *index.Batch) error {
 }
 
 func (w *Writer) Close() error {
+	// The index's close signal is sent only after active mutations have drained.
+	// Wake admission waiters immediately, then reuse that existing drain lifecycle.
+	w.closeOnce.Do(func() { close(w.closeCh) })
 	return errors.Join(w.chill.Close(), closeVectorIndex(w.vector))
 }
 

@@ -40,6 +40,11 @@ type Config struct {
 
 	SearchStartFunc func(size uint64) error
 	SearchEndFunc   func(size uint64)
+
+	maxConcurrentBatches  int
+	maxDocumentInputBytes uint64
+	maxBatchInputBytes    uint64
+	batchStatsEnabled     bool
 }
 
 // WithVirtualField allows you to describe a field that
@@ -59,6 +64,37 @@ func (config Config) WithSegmentType(typ string) Config {
 
 func (config Config) WithSegmentVersion(ver uint32) Config {
 	config.indexConfig = config.indexConfig.WithSegmentVersion(ver)
+	return config
+}
+
+// WithMaxConcurrentBatches limits concurrent online Writer.Batch calls through
+// completion, including analysis and segment building. Zero (default) is unlimited.
+// OpenWriter rejects negative values. Waiting calls are released by Close.
+func (config Config) WithMaxConcurrentBatches(n int) Config {
+	config.maxConcurrentBatches = n
+	return config
+}
+
+// WithMaxDocumentInputBytes limits each document's pre-analysis sum of
+// len(field.Name()) + len(field.Value()), including repeated fields and _id.
+// Zero (default) disables the limit. This is not a memory limit.
+func (config Config) WithMaxDocumentInputBytes(n uint64) Config {
+	config.maxDocumentInputBytes = n
+	return config
+}
+
+// WithMaxBatchInputBytes limits document input bytes plus the field and term
+// bytes of every update/delete selector. Zero (default) disables the limit.
+// Online Writer rejects the whole batch before analysis or index modification.
+func (config Config) WithMaxBatchInputBytes(n uint64) Config {
+	config.maxBatchInputBytes = n
+	return config
+}
+
+// WithBatchStats enables online Writer.BatchStats workload gauges (default off).
+// Measuring input bytes requires visiting fields before analysis.
+func (config Config) WithBatchStats(enabled bool) Config {
+	config.batchStatsEnabled = enabled
 	return config
 }
 
