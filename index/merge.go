@@ -132,7 +132,11 @@ func (s *Writer) planMergeAtSnapshot(merges chan *segmentMerge, ourSnapshot *Sna
 	var onlyPersistedSnapshots []mergeplan.Segment
 	for _, segmentSnapshot := range ourSnapshot.segment {
 		if segmentSnapshot.segment.Persisted() {
-			onlyPersistedSnapshots = append(onlyPersistedSnapshots, segmentSnapshot)
+			if s.config.MergePlanningByBytes {
+				onlyPersistedSnapshots = append(onlyPersistedSnapshots, byteSizeSegment{segmentSnapshot})
+			} else {
+				onlyPersistedSnapshots = append(onlyPersistedSnapshots, segmentSnapshot)
+			}
 		}
 	}
 
@@ -155,6 +159,12 @@ func (s *Writer) planMergeAtSnapshot(merges chan *segmentMerge, ourSnapshot *Sna
 
 	// process tasks in serial for now
 	for _, task := range resultMergePlan.Tasks {
+		// Execution needs the original snapshots and document-number mappings.
+		for i, planned := range task.Segments {
+			if sized, ok := planned.(byteSizeSegment); ok {
+				task.Segments[i] = sized.segmentSnapshot
+			}
+		}
 		err := s.executeMergeTask(merges, task)
 		if err != nil {
 			return false, err

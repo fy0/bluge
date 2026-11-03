@@ -36,16 +36,18 @@ type Config struct {
 
 	supportedSegmentPlugins map[string]map[uint32]*SegmentPlugin
 
-	UnsafeBatch        bool
-	EventCallback      func(Event)
-	AsyncError         func(error)
-	MergePlanOptions   mergeplan.Options
-	NumAnalysisWorkers int
-	AnalysisChan       chan func()
-	GoFunc             func(func())
-	DeletionPolicyFunc func() DeletionPolicy
-	DirectoryFunc      func() Directory
-	NormCalc           func(string, int) float32
+	UnsafeBatch      bool
+	EventCallback    func(Event)
+	AsyncError       func(error)
+	MergePlanOptions mergeplan.Options
+	// MergePlanningByBytes interprets MaxSegmentSize and FloorSegmentSize as
+	// encoded bytes instead of document counts. Live sizes prorate logical deletes.
+	MergePlanningByBytes bool
+	NumAnalysisWorkers   int
+	GoFunc               func(func())
+	DeletionPolicyFunc   func() DeletionPolicy
+	DirectoryFunc        func() Directory
+	NormCalc             func(string, int) float32
 
 	MergeBufferSize int
 
@@ -241,7 +243,6 @@ func defaultConfig() Config {
 		virtualFields: map[string][]segment.Field{},
 
 		NumAnalysisWorkers: 4,
-		AnalysisChan:       make(chan func()),
 		GoFunc: func(f func()) {
 			go f()
 		},

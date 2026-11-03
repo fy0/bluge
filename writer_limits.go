@@ -9,6 +9,7 @@
 package bluge
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/fy0/bluge/index"
@@ -29,6 +30,7 @@ func (e *InputLimitError) Error() string {
 
 // BatchStats measures admitted online Writer calls through Batch completion,
 // excluding calls waiting for a slot. Input bytes are added after input checks.
+// BatchFunc builders contribute to InFlightBatches while constructing a batch.
 // These are workload gauges, not heap usage or a memory reservation.
 type BatchStats struct {
 	InFlightBatches    uint64
@@ -40,6 +42,50 @@ func (w *Writer) BatchStats() BatchStats {
 	w.batchStatsLock.Lock()
 	defer w.batchStatsLock.Unlock()
 	return w.batchStats
+}
+
+func (w *Writer) acquireBatch(ctx context.Context) error {
+	// Admission holds no index lock, so persistence and active writes can drain.
+	if w.batchSlots != nil {
+		select {
+		case w.batchSlots <- struct{}{}:
+		case <-w.closeCh:
+			return segment.ErrClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// A slot and a close/cancellation signal may become ready together.
+	var err error
+	select {
+	case <-w.closeCh:
+		err = segment.ErrClosed
+	default:
+		err = ctx.Err()
+	}
+	if err != nil {
+		if w.batchSlots != nil {
+			<-w.batchSlots
+		}
+		return err
+	}
+	if w.config.batchStatsEnabled {
+		w.batchStatsLock.Lock()
+		w.batchStats.InFlightBatches++
+		w.batchStatsLock.Unlock()
+	}
+	return nil
+}
+
+func (w *Writer) releaseBatch() {
+	if w.config.batchStatsEnabled {
+		w.batchStatsLock.Lock()
+		w.batchStats.InFlightBatches--
+		w.batchStatsLock.Unlock()
+	}
+	if w.batchSlots != nil {
+		<-w.batchSlots
+	}
 }
 
 func (w *Writer) checkBatchInput(batch *index.Batch) (uint64, error) {

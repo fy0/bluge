@@ -49,6 +49,37 @@ func (s *segmentSnapshot) FullSize() int64 {
 	return int64(s.segment.Count())
 }
 
+// byteSizeSegment is a planner-only view. The snapshot's usual FullSize/LiveSize
+// continue to count rows for deletion mapping and the default merge policy.
+type byteSizeSegment struct{ *segmentSnapshot }
+
+func (s *segmentWrapper) mergeBytes() uint64 {
+	if s.encodedBytes > 0 {
+		return s.encodedBytes
+	}
+	// Custom plugins can omit their encoded byte count for in-memory segments.
+	return uint64(max(s.Size(), 1))
+}
+
+func (s byteSizeSegment) FullSize() int64 {
+	return int64(min(s.segment.mergeBytes(), uint64(1<<63-1)))
+}
+
+func (s byteSizeSegment) LiveSize() int64 {
+	count := s.segment.Count()
+	live := s.Count()
+	if count == 0 || live == 0 {
+		return 0
+	}
+	full := s.FullSize()
+	if live == count {
+		return full
+	}
+	// Logical deletes do not identify an exact byte range in a compressed file.
+	// A proportional estimate is sufficient for scoring; preserve nonempty rows.
+	return max(1, int64(float64(full)*(float64(live)/float64(count))))
+}
+
 func (s segmentSnapshot) LiveSize() int64 {
 	return int64(s.Count())
 }

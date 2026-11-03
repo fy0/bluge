@@ -195,9 +195,10 @@ for all workloads, raw results, correctness checks, and reproduction commands.
 
 ### Writer Memory Tuning
 
-Online writers expose analysis concurrency, merge output buffering, and disk
-merge planning through `Config`. For example, to try one analysis worker, a
-64 KiB output buffer, and up to four input segments per disk merge task:
+For a disk-backed text writer on a 256 MB-class edge device, the following
+is a measured starting point. It allows foreground writes and background
+merges to overlap, but avoids building disproportionately large merge tasks
+when each document is a large text chunk:
 
 ```go
 import (
@@ -206,31 +207,32 @@ import (
 )
 
 options := mergeplan.DefaultMergePlanOptions
-options.SegmentsPerMergeTask = 4 // Try 2–4 on memory-constrained devices.
+options.SegmentsPerMergeTask = 4
+options.FloorSegmentSize = 256 << 10
+options.MaxSegmentSize = 4 << 20
 config := bluge.DefaultConfig("index").
-    WithNumAnalysisWorkers(1).
+    WithNumAnalysisWorkers(2).
+    WithMaxConcurrentBatches(2).
+    WithMaxBatchInputBytes(512 << 10).
     WithMergeBufferSize(64 * 1024).
+    WithMergePlanningByBytes(true).
     WithMergePlanOptions(options)
 writer, err := bluge.OpenWriter(config)
 ```
 
-Defaults remain 4 analysis workers, a 1 MiB merge output buffer, and 10 segments
-per disk merge task. `OpenWriter` rejects non-positive worker counts and buffer
-sizes. `WithMergePlanOptions` replaces the complete options value; start from
-the defaults and keep `MaxSegmentsPerTier >= SegmentsPerMergeTask`.
-`WithOfflineWriterConcurrency` applies only to `OfflineWriter`.
+With byte-based planning, the floor and maximum refer to estimated live encoded
+bytes rather than document counts. Persistence writes oversized groups of
+memory segments directly; subsequent disk merges use the planner. Smaller
+segments can increase query fan-out. Defaults still use document counts,
+4 analysis workers, unlimited admitted batches, and a 1 MiB merge buffer.
 
-These controls are tuning knobs, not a process memory limit. Disk merge tasks
-run serially, but can overlap analysis and persistence. Merge plan options do
-not limit in-memory merges during persistence, and the output buffer excludes
-other merge workspace. All analyzed documents in a batch can remain live until
-segment construction finishes. Applications should also bound batch sizes and
-concurrent writes; the library preserves each batch's atomicity without
-automatically splitting it. Byte-budget backpressure is not implemented by
-these settings.
-
-See the [integer encoding allocation measurements](docs/writer-memory-tuning.md)
-for the accompanying buffer optimization and its measurement limits.
+When concurrent producers create their own documents, use `Writer.BatchFunc`
+to acquire a slot **before** reading or allocating a batch. For large text
+streams use [`ImportText`](docs/text-chunk-import.md). These controls bound
+specific work; they do not set a process or vector memory limit. See the
+[edge-device experiments](docs/writer-edge-memory.md) for process peak memory,
+write time, and search latency, and the [encoder measurements](docs/writer-memory-tuning.md)
+for allocation details.
 
 ### Background Write Failures
 

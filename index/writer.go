@@ -44,6 +44,7 @@ type Writer struct {
 	root     *Snapshot // holds 1 ref-count on the root
 
 	introductions chan *segmentIntroduction
+	analysisChan  chan func()
 
 	rootPersisted      []chan error // closed when root is persisted
 	persistedCallbacks []func(error)
@@ -66,6 +67,11 @@ func OpenWriter(config Config) (*Writer, error) {
 	if config.NumAnalysisWorkers < 1 {
 		return nil, fmt.Errorf("number of analysis workers must be at least 1")
 	}
+	if config.MergePlanningByBytes && (config.MergePlanOptions.MaxSegmentSize < 1 ||
+		config.MergePlanOptions.FloorSegmentSize < 1 ||
+		config.MergePlanOptions.FloorSegmentSize > config.MergePlanOptions.MaxSegmentSize) {
+		return nil, fmt.Errorf("byte-based merge planning requires 0 < floor size <= maximum size")
+	}
 	if config.BackgroundRetryInitialDelay == 0 {
 		config.BackgroundRetryInitialDelay = defaultBackgroundRetryInitialDelay
 	}
@@ -84,6 +90,7 @@ func OpenWriter(config Config) (*Writer, error) {
 		closeCh:        make(chan struct{}),
 		mergeDrains:    make(chan chan error),
 		persistSyncs:   make(chan chan error),
+		analysisChan:   make(chan func()),
 	}
 
 	var err error
@@ -164,7 +171,7 @@ func OpenWriter(config Config) (*Writer, error) {
 	// open never leaves them running against a closed closeCh
 	for i := 0; i < config.NumAnalysisWorkers; i++ {
 		config.GoFunc(func() {
-			analysisWorker(config.AnalysisChan, rv.closeCh)
+			analysisWorker(rv.analysisChan, rv.closeCh)
 		})
 	}
 
@@ -332,7 +339,7 @@ func (s *Writer) Batch(batch *Batch) (err error) {
 				allDocsAnalyzed.Done()
 			}
 			// put the work on the queue
-			s.config.AnalysisChan <- aw
+			s.analysisChan <- aw
 		}
 	}
 
@@ -628,7 +635,8 @@ func (s *Writer) loadSegment(id uint64, plugin *SegmentPlugin) (*segmentWrapper,
 		return nil, fmt.Errorf("error loading segment: %v", err)
 	}
 	return &segmentWrapper{
-		Segment: seg,
+		Segment:      seg,
+		encodedBytes: uint64(data.Len()),
 		refCounter: &closeOnLastRefCounter{
 			closer: closer,
 			refs:   1,

@@ -76,8 +76,9 @@ func (config Config) WithNumAnalysisWorkers(n int) Config {
 	return config
 }
 
-// WithMaxConcurrentBatches limits concurrent online Writer.Batch calls through
-// completion, including analysis and segment building. Zero (default) is unlimited.
+// WithMaxConcurrentBatches limits concurrent online Batch and BatchFunc calls
+// through completion, including construction inside BatchFunc, analysis, and
+// segment building. Zero (default) is unlimited.
 // OpenWriter rejects negative values. Waiting calls are released by Close.
 func (config Config) WithMaxConcurrentBatches(n int) Config {
 	config.maxConcurrentBatches = n
@@ -116,9 +117,24 @@ func (config Config) WithMergeBufferSize(bytes int) Config {
 
 // WithMergePlanOptions replaces the online Writer's disk merge planner options.
 // Start with mergeplan.DefaultMergePlanOptions and adjust the desired fields.
-// These options do not control in-memory merges performed during persistence.
+// Sizes are document counts unless WithMergePlanningByBytes is enabled. In byte
+// mode, MaxSegmentSize also caps inputs to in-memory merges during persistence.
 func (config Config) WithMergePlanOptions(options mergeplan.Options) Config {
 	config.indexConfig.MergePlanOptions = options
+	return config
+}
+
+// WithMergePlanningByBytes uses encoded segment bytes for merge planning instead
+// of document counts. MergePlanOptions.MaxSegmentSize and FloorSegmentSize then
+// use bytes. This helps avoid repeatedly rewriting segments with few large
+// documents. MaxSegmentSize also bounds inputs to persistence's in-memory merges;
+// larger groups are persisted directly and left to the disk planner.
+//
+// Sizes estimate live encoded data, not decoded workspace or process memory.
+// Smaller maximums leave more segments to search. Existing oversized segments
+// and individual batches are not split. Disabled by default.
+func (config Config) WithMergePlanningByBytes(enabled bool) Config {
+	config.indexConfig.MergePlanningByBytes = enabled
 	return config
 }
 

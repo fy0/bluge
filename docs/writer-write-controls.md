@@ -35,6 +35,28 @@ no internal index lock, so existing writes and persistence can continue.
 Writer retains its existing drain and persistence behavior. Slots are released
 on both success and error. Admission does not guarantee FIFO ordering.
 
+When several producers read or allocate their inputs concurrently, construct
+documents **after** admission with `BatchFunc`:
+
+```go
+err := writer.BatchFunc(ctx, func(batch *index.Batch) error {
+    doc, err := loadNextDocument(ctx) // application code: read only after admission
+    if err != nil {
+        return err
+    }
+    batch.Update(doc.ID(), doc)
+    return nil
+})
+```
+
+Here `index` is `github.com/fy0/bluge/index`. `WithMaxConcurrentBatches` bounds
+the total number of admitted builders and writes together. Waiting callers may
+cancel without running their callbacks. A builder error or cancellation before
+submission discards its changes; once submitted, the batch uses ordinary write
+semantics. Builders should fill the supplied batch and avoid recursive writes
+to the same writer. Keep queued inputs as IDs, paths or other small descriptors:
+capturing a prebuilt payload in the callback still retains it while waiting.
+
 Input limits are checked before analysis and before any index changes. Equality
 with a limit is allowed. An oversized document or batch rejects the whole
 batch, including its deletes; no splitting or partial submission occurs.
@@ -83,7 +105,8 @@ not its embedding. Callers must not mutate batches/documents during submission.
 
 With `WithBatchStats(true)`, `writer.BatchStats()` returns a synchronized
 snapshot containing just `InFlightBatches` and `InFlightInputBytes`.
-The count includes admitted calls until return, excluding slot waiters. Bytes
+The count includes admitted calls (including running `BatchFunc` builders)
+until return, excluding slot waiters. Bytes
 are added once input validation succeeds and removed on return. During input
 validation the call contributes to the count but not yet to the byte sum.
 Both gauges return to zero after all calls finish, including failures.

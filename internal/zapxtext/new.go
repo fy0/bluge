@@ -31,6 +31,10 @@ var NewSegmentBufferNumResultsBump int = 100
 var NewSegmentBufferNumResultsFactor float64 = 1.0
 var NewSegmentBufferAvgBytesPerDocFactor float64 = 1.0
 
+// The previous pooled builder may belong to a very different workload. Bound
+// speculative allocation; bytes.Buffer can still grow for actual output.
+const maxNewSegmentPrealloc = 1 << 20
+
 // ValidateDocFields can be set by applications to perform additional checks
 // on fields in a document being added to a new segment, by default it does
 // nothing.
@@ -63,9 +67,19 @@ func (*ZapPlugin) newWithChunkMode(results []*blugeidx.Document,
 		// different docs can lead to low quality estimates
 		estimateAvgBytesPerDoc := int(float64(s.lastOutSize/s.lastNumDocs) *
 			NewSegmentBufferNumResultsFactor)
-		estimateNumResults := int(float64(len(results)+NewSegmentBufferNumResultsBump) *
+		// A fixed extra 100 documents multiplies a one-document batch's buffer
+		// by 101, particularly costly for large text chunks or vector payloads.
+		extraResults := min(NewSegmentBufferNumResultsBump, len(results))
+		estimateNumResults := int(float64(len(results)+extraResults) *
 			NewSegmentBufferAvgBytesPerDocFactor)
-		br.Grow(estimateAvgBytesPerDoc * estimateNumResults)
+		// Compare before multiplying so an outlier estimate cannot overflow.
+		if estimateAvgBytesPerDoc > 0 && estimateNumResults > 0 {
+			estimate := maxNewSegmentPrealloc
+			if estimateAvgBytesPerDoc <= maxNewSegmentPrealloc/estimateNumResults {
+				estimate = estimateAvgBytesPerDoc * estimateNumResults
+			}
+			br.Grow(estimate)
+		}
 	}
 
 	var err error

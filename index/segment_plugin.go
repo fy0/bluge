@@ -86,17 +86,19 @@ func (s *Writer) newSegment(results []segment.Document) (*segmentWrapper, uint64
 		seg, count, err = s.segPlugin.New(results, s.config.NormCalc)
 	}
 	return &segmentWrapper{
-		Segment:    seg,
-		refCounter: noOpRefCounter{},
-		inMemory:   true,
+		Segment:      seg,
+		refCounter:   noOpRefCounter{},
+		inMemory:     true,
+		encodedBytes: count,
 	}, count, err
 }
 
 type segmentWrapper struct {
 	segment.Segment
 	refCounter
-	persisted bool
-	inMemory  bool
+	persisted    bool
+	inMemory     bool
+	encodedBytes uint64
 }
 
 // UnderlyingSegment exposes the concrete segment to optional readers that
@@ -123,10 +125,11 @@ func (s segmentWrapper) Close() error {
 func (s *segmentWrapper) persistedView() *segmentWrapper {
 	s.AddRef()
 	return &segmentWrapper{
-		Segment:    s.Segment,
-		refCounter: s.refCounter,
-		persisted:  true,
-		inMemory:   s.inMemory,
+		Segment:      s.Segment,
+		refCounter:   s.refCounter,
+		persisted:    true,
+		inMemory:     s.inMemory,
+		encodedBytes: s.encodedBytes,
 	}
 }
 

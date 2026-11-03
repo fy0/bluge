@@ -15,6 +15,7 @@
 package bluge
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -137,28 +138,46 @@ func (w *Writer) Delete(id segment.Term) error {
 }
 
 func (w *Writer) Batch(batch *index.Batch) error {
-	// Wait outside the index's mutation lock so writes and persistence can drain.
-	if w.batchSlots != nil {
-		select {
-		case w.batchSlots <- struct{}{}:
-		case <-w.closeCh:
-			return segment.ErrClosed
-		}
-		defer func() { <-w.batchSlots }()
-		select {
-		case <-w.closeCh:
-			return segment.ErrClosed
-		default:
-		}
+	if err := w.acquireBatch(context.Background()); err != nil {
+		return err
 	}
+	defer w.releaseBatch()
+	return w.batch(batch)
+}
+
+// BatchFunc acquires a batch slot before calling build, so waiting callers can
+// defer allocating documents and their payloads. Configure WithMaxConcurrentBatches
+// to bound simultaneous builders and writes. The callback fills the supplied
+// empty batch; it must not submit writes to this Writer itself.
+//
+// Cancellation while waiting skips build. Cancellation or a build error before
+// submission discards the batch. Once submission starts, ordinary Batch semantics
+// apply: cancellation cannot roll back a write. A running build must cooperate
+// with ctx itself. Close wakes waiters but cannot interrupt a running builder.
+// Capturing already-built documents defeats deferred allocation.
+func (w *Writer) BatchFunc(ctx context.Context, build func(*index.Batch) error) error {
+	if ctx == nil || build == nil {
+		return fmt.Errorf("batch context and builder must be provided")
+	}
+	if err := w.acquireBatch(ctx); err != nil {
+		return err
+	}
+	defer w.releaseBatch()
+	batch := NewBatch()
+	if err := build(batch); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return w.batch(batch)
+}
+
+func (w *Writer) batch(batch *index.Batch) error {
 	var inputBytes uint64
 	if w.config.batchStatsEnabled {
-		w.batchStatsLock.Lock()
-		w.batchStats.InFlightBatches++
-		w.batchStatsLock.Unlock()
 		defer func() {
 			w.batchStatsLock.Lock()
-			w.batchStats.InFlightBatches--
 			w.batchStats.InFlightInputBytes -= inputBytes
 			w.batchStatsLock.Unlock()
 		}()

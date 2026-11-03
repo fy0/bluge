@@ -54,13 +54,18 @@ overlap. They do not predict the peak memory of the reported 300 MB workload.
 
 ## Operational limits
 
-Reducing analysis workers limits simultaneous analysis, but a batch's analyzed
+Each online writer owns its analysis queue, including writers opened from the
+same configuration. Reducing workers limits simultaneous analysis, but a batch's analyzed
 documents can all remain live until segment construction. Reducing the merge
-output buffer does not bound other merge workspace. Disk merge planning does
-not control persistence's in-memory merges. Applications should therefore also
+output buffer does not bound other merge workspace. Optional byte-based merge
+planning applies the configured maximum to in-memory merge inputs as well.
+Applications should therefore also
 bound batch size and concurrent submissions, using their own document sizes
 and device measurements.
 
-This change does not introduce byte-budget backpressure or expanded memory
-statistics. It does not split batches, change process-wide GC settings, or
-provide a process memory ceiling.
+The segment builder also caps its speculative initial output allocation at
+1 MiB. Its estimate comes from a pooled builder's previous workload; adding a
+fixed 100 extra documents to a one-document estimate could reserve about 25 MiB
+after a 256 KiB document. The buffer can still grow to fit actual encoded data.
+See the [whole-process experiments](writer-edge-memory.md) for memory and
+performance measurements across writing, merging, and reopening.

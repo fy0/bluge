@@ -104,3 +104,27 @@ func TestOnlineWriterRejectsInvalidMemoryTuning(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalysisWorkersAreIsolatedWhenConfigIsReused(t *testing.T) {
+	cfg := InMemoryOnlyConfig().WithNumAnalysisWorkers(1)
+	first, second := textTestWriter(t, cfg), textTestWriter(t, cfg)
+	gate := newBatchTestGate(t)
+	batch := NewBatch()
+	batch.Insert(&inputTestDocument{NewDocument("one"), gate.block})
+	nextAnalyzed := make(chan struct{})
+	batch.Insert(&inputTestDocument{NewDocument("two"), func() { close(nextAnalyzed) }})
+	done := make(chan error, 1)
+	go func() { done <- first.Batch(batch) }()
+	awaitBatchSignal(t, gate.entered)
+	assertBatchWaiting(t, nextAnalyzed)
+	// The other Writer must still be able to use its own worker independently.
+	otherDone := make(chan error, 1)
+	go func() { otherDone <- second.Insert(NewDocument("other")) }()
+	if err := awaitBatchResult(t, otherDone); err != nil {
+		t.Fatal(err)
+	}
+	gate.open()
+	if err := awaitBatchResult(t, done); err != nil {
+		t.Fatal(err)
+	}
+}
