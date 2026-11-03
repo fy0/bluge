@@ -53,16 +53,16 @@ func (s *segmentSnapshot) FullSize() int64 {
 // continue to count rows for deletion mapping and the default merge policy.
 type byteSizeSegment struct{ *segmentSnapshot }
 
-func (s *segmentWrapper) mergeBytes() uint64 {
+func (s *segmentWrapper) mergeBytes() int64 {
 	if s.encodedBytes > 0 {
 		return s.encodedBytes
 	}
 	// Custom plugins can omit their encoded byte count for in-memory segments.
-	return uint64(max(s.Size(), 1))
+	return int64(max(s.Size(), 1))
 }
 
 func (s byteSizeSegment) FullSize() int64 {
-	return int64(min(s.segment.mergeBytes(), uint64(1<<63-1)))
+	return s.segment.mergeBytes()
 }
 
 func (s byteSizeSegment) LiveSize() int64 {

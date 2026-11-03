@@ -17,6 +17,7 @@ package index
 import (
 	"fmt"
 	"io"
+	"math"
 	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -89,8 +90,16 @@ func (s *Writer) newSegment(results []segment.Document) (*segmentWrapper, uint64
 		Segment:      seg,
 		refCounter:   noOpRefCounter{},
 		inMemory:     true,
-		encodedBytes: count,
+		encodedBytes: mergePlanSize(count),
 	}, count, err
+}
+
+// Plugins return unsigned sizes; the planner uses signed sizes throughout.
+func mergePlanSize(size uint64) int64 {
+	if size > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(size)
 }
 
 type segmentWrapper struct {
@@ -98,7 +107,7 @@ type segmentWrapper struct {
 	refCounter
 	persisted    bool
 	inMemory     bool
-	encodedBytes uint64
+	encodedBytes int64
 }
 
 // UnderlyingSegment exposes the concrete segment to optional readers that

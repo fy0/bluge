@@ -16,6 +16,11 @@ import (
 	"github.com/fy0/bluge/segment"
 )
 
+const (
+	documentInputScope = "document"
+	batchInputScope    = "batch"
+)
+
 // InputLimitError reports a rejected document or batch. Actual and Limit are
 // input bytes, not heap usage. Scope is either "document" or "batch".
 type InputLimitError struct {
@@ -114,7 +119,7 @@ func (w *Writer) checkBatchInput(batch *index.Batch) (uint64, error) {
 				return false
 			}
 			if limit := w.config.maxDocumentInputBytes; limit > 0 && documentBytes > limit {
-				err = &InputLimitError{Scope: "document", Actual: documentBytes, Limit: limit}
+				err = &InputLimitError{Scope: documentInputScope, Actual: documentBytes, Limit: limit}
 				return false
 			}
 			inputBytes += documentBytes
@@ -128,7 +133,7 @@ func (w *Writer) checkBatchInput(batch *index.Batch) (uint64, error) {
 		return 0, err
 	}
 	if limit := w.config.maxBatchInputBytes; limit > 0 && inputBytes > limit {
-		return 0, &InputLimitError{Scope: "batch", Actual: inputBytes, Limit: limit}
+		return 0, &InputLimitError{Scope: batchInputScope, Actual: inputBytes, Limit: limit}
 	}
 	return inputBytes, nil
 }

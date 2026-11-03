@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -22,9 +23,16 @@ var writerMemoryCase = flag.String("writer-memory-case", "", "opt-in process mem
 var writerMemoryProfile = flag.String("writer-memory-profile", "default", "default, balanced, small, edge, edge-burst, or edge-single")
 var writerMemoryLazy = flag.Bool("writer-memory-lazy", false, "build parallel batches only after admission")
 var writerMemoryProducers = flag.Int("writer-memory-producers", 8, "parallel batch producers")
-var writerMemoryMiB = flag.Int("writer-memory-mib", 32, "input MiB (plus a quarter-size replacement for stream)")
+var writerMemoryMiB = flag.Uint64("writer-memory-mib", 32, "input MiB (plus a quarter-size replacement for stream)")
 var writerMemoryDense = flag.Bool("writer-memory-dense", false, "use dense short tokens and term positions")
 var writerMemoryMergeMiB = flag.Int64("writer-memory-merge-mib", 4, "maximum segment MiB in byte-planned profiles")
+
+func experimentInputBytes(mib uint64) (int64, error) {
+	if mib == 0 || mib > math.MaxInt64/(1<<20+1<<18) {
+		return 0, fmt.Errorf("input MiB must be positive and fit in an int64 with its replacement")
+	}
+	return int64(mib) << 20, nil
+}
 
 // Run each experiment in a fresh test process, with -test.run restricted to this
 // test. OS peak RSS includes mappings and runtime overhead; sampled HeapAlloc
@@ -33,8 +41,10 @@ func TestWriterMemoryExperiment(t *testing.T) {
 	if *writerMemoryCase == "" {
 		t.Skip("set -writer-memory-case to run")
 	}
-	if *writerMemoryMiB < 1 {
-		t.Fatal("input MiB must be positive")
+	mib := *writerMemoryMiB
+	inputBytes, err := experimentInputBytes(mib)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if *writerMemoryProducers < 1 {
 		t.Fatal("producers must be positive")
@@ -112,7 +122,6 @@ func TestWriterMemoryExperiment(t *testing.T) {
 	}
 	defer w.Close()
 	var expected uint64
-	inputBytes := int64(*writerMemoryMiB) * 1024 * 1024
 	switch *writerMemoryCase {
 	case "stream":
 		opts := TextChunkOptions{MaxChunkBytes: 64 * 1024, BatchSize: 4}
@@ -156,10 +165,10 @@ func TestWriterMemoryExperiment(t *testing.T) {
 			submit = builder.BatchFunc
 		}
 		const docsPerBatch, docBytes = 64, 4096
-		batches := int(inputBytes) / (docsPerBatch * docBytes)
+		batches := mib * (1 << 20) / (docsPerBatch * docBytes)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		jobs := make(chan int)
+		jobs := make(chan uint64)
 		errors := make(chan error, *writerMemoryProducers)
 		var wg sync.WaitGroup
 		for worker := 0; worker < *writerMemoryProducers; worker++ {
@@ -194,7 +203,7 @@ func TestWriterMemoryExperiment(t *testing.T) {
 		}
 		go func() {
 			defer close(jobs)
-			for n := 0; n < batches; n++ {
+			for n := range batches {
 				select {
 				case jobs <- n:
 				case <-ctx.Done():
@@ -207,7 +216,7 @@ func TestWriterMemoryExperiment(t *testing.T) {
 		for err := range errors {
 			t.Fatal(err)
 		}
-		expected = uint64(batches * docsPerBatch)
+		expected = batches * docsPerBatch
 	default:
 		t.Fatal("unknown case")
 	}

@@ -275,13 +275,13 @@ func (s *Writer) persistSnapshotMaybeMerge(merges chan *segmentMerge, persists c
 	var sbs []segment.Segment
 	var sbsDrops []*roaring.Bitmap
 	var sbsIndexes []int
-	var mergeBytes uint64
+	var mergeBytes int64
 
 	for i, segmentSnapshot := range snapshot.segment {
 		if !segmentSnapshot.segment.Persisted() {
 			if s.config.MergePlanningByBytes {
 				size := segmentSnapshot.segment.mergeBytes()
-				limit := uint64(s.config.MergePlanOptions.MaxSegmentSize)
+				limit := s.config.MergePlanOptions.MaxSegmentSize
 				if size > limit-mergeBytes {
 					// Drain directly instead of adding merge workspace to a large
 					// backlog of memory segments. Disk planning will group them.

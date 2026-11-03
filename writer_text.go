@@ -108,13 +108,16 @@ func (w *Writer) ImportText(sourceID, field string, input io.Reader,
 	}
 	w.textImportLock.Lock()
 	defer w.textImportLock.Unlock()
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("import text %q: source deleted=%t, committed chunks [0,%d), bytes [0,%d): %w",
-				sourceID, result.SourceDeleted, result.CommittedChunks, result.CommittedEndByte, err)
-		}
-	}()
+	result, err = w.importTextChunks(sourceID, field, input, options)
+	if err != nil {
+		err = fmt.Errorf("import text %q: source deleted=%t, committed chunks [0,%d), bytes [0,%d): %w",
+			sourceID, result.SourceDeleted, result.CommittedChunks, result.CommittedEndByte, err)
+	}
+	return result, err
+}
 
+func (w *Writer) importTextChunks(sourceID, field string, input io.Reader,
+	options TextChunkOptions) (result TextImportResult, err error) {
 	deletion := NewBatch()
 	deletion.Delete(textSourceTerm(sourceID))
 	if _, err = w.checkBatchInput(deletion); err != nil {
@@ -122,18 +125,17 @@ func (w *Writer) ImportText(sourceID, field string, input io.Reader,
 	}
 	chunks := newTextChunkReader(input, options)
 	batch := NewBatch()
-	var batchBytes uint64
+	var batchBytes, nextOrdinal uint64
 	var batchStart, batchEnd int64
 	flush := func() error {
 		if batch.OperationCount() == 0 {
 			return nil
 		}
-		count := uint64(batch.OperationCount())
 		if err := w.Batch(batch); err != nil {
 			return fmt.Errorf("submitting chunks [%d,%d), bytes [%d,%d) (may have been applied): %w",
-				result.CommittedChunks, result.CommittedChunks+count, batchStart, batchEnd, err)
+				result.CommittedChunks, nextOrdinal, batchStart, batchEnd, err)
 		}
-		result.CommittedChunks += count
+		result.CommittedChunks = nextOrdinal
 		result.CommittedEndByte = batchEnd
 		// Reset retains references to analyzed documents; allocate an empty Batch
 		// instead so the importer does not retain previous batches' analysis.
@@ -149,16 +151,10 @@ func (w *Writer) ImportText(sourceID, field string, input io.Reader,
 		var singleBytes uint64
 		var doc *Document
 		if readErr != io.EOF {
-			ordinal := result.CommittedChunks + uint64(batch.OperationCount())
-			doc = newTextChunkDocument(sourceID, field, ordinal, chunk)
-			single := NewBatch()
-			single.Insert(doc)
-			// Reuse the same pre-analysis accounting as ordinary Batch, including
-			// IDs, field names, and all stored metadata. Never resize a chunk to
-			// silently accommodate an incompatible document or batch limit.
-			singleBytes, err = w.checkBatchInput(single)
+			doc = newTextChunkDocument(sourceID, field, nextOrdinal, chunk)
+			singleBytes, err = w.textChunkInputBytes(doc)
 			if err != nil {
-				return result, fmt.Errorf("checking chunk %d: %w", ordinal, err)
+				return result, fmt.Errorf("checking chunk %d: %w", nextOrdinal, err)
 			}
 		}
 		if !result.SourceDeleted {
@@ -180,6 +176,7 @@ func (w *Writer) ImportText(sourceID, field string, input io.Reader,
 			batchStart = chunk.start
 		}
 		batch.Insert(doc)
+		nextOrdinal++
 		batchBytes += singleBytes
 		batchEnd = chunk.end
 		if batch.OperationCount() >= options.BatchSize {
@@ -188,6 +185,13 @@ func (w *Writer) ImportText(sourceID, field string, input io.Reader,
 			}
 		}
 	}
+}
+
+// Use ordinary Batch accounting, including IDs, field names and stored metadata.
+func (w *Writer) textChunkInputBytes(doc *Document) (uint64, error) {
+	single := NewBatch()
+	single.Insert(doc)
+	return w.checkBatchInput(single)
 }
 
 func (o TextChunkOptions) validate() error {
@@ -262,35 +266,7 @@ func (r *textChunkReader) next() (textChunk, error) {
 	if len(buffer) > r.options.MaxChunkBytes {
 		// Prefer boundaries in the latter half, and require at least one new
 		// rune beyond the previous chunk's end even when using overlap.
-		minimum := cut / 2
-		if newByte := int(r.end-r.start) + 1; minimum < newByte {
-			minimum = newByte
-		}
-		var paragraph, line, space int
-		for pos, char := range string(buffer[:cut]) {
-			end := pos + utf8.RuneLen(char)
-			if end < minimum {
-				continue
-			}
-			if unicode.IsSpace(char) {
-				space = end
-			}
-			if char == '\r' || char == '\n' {
-				line = end
-			}
-			if char == '\n' && (pos > 0 && buffer[pos-1] == '\n' ||
-				pos > 1 && buffer[pos-1] == '\r' && buffer[pos-2] == '\n') {
-				paragraph = end
-			}
-		}
-		switch {
-		case paragraph > 0:
-			cut = paragraph
-		case line > 0:
-			cut = line
-		case space > 0:
-			cut = space
-		}
+		cut = preferredTextBoundary(buffer[:cut], max(cut/2, int(r.end-r.start)+1))
 	}
 	chunk := textChunk{
 		text: append([]byte(nil), buffer[:cut]...), start: r.start, end: r.start + int64(cut),
@@ -314,4 +290,34 @@ func (r *textChunkReader) next() (textChunk, error) {
 	r.start += int64(advance)
 	r.end = chunk.end
 	return chunk, nil
+}
+
+func preferredTextBoundary(buffer []byte, minimum int) int {
+	var paragraph, line, space int
+	for pos, char := range string(buffer) {
+		end := pos + utf8.RuneLen(char)
+		if end < minimum {
+			continue
+		}
+		if unicode.IsSpace(char) {
+			space = end
+		}
+		if char == '\r' || char == '\n' {
+			line = end
+		}
+		if char == '\n' && (pos > 0 && buffer[pos-1] == '\n' ||
+			pos > 1 && buffer[pos-1] == '\r' && buffer[pos-2] == '\n') {
+			paragraph = end
+		}
+	}
+	switch {
+	case paragraph > 0:
+		return paragraph
+	case line > 0:
+		return line
+	case space > 0:
+		return space
+	default:
+		return len(buffer)
+	}
 }

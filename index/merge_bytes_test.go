@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/fy0/bluge/segment"
 )
 

@@ -174,17 +174,8 @@ func (w *Writer) BatchFunc(ctx context.Context, build func(*index.Batch) error) 
 }
 
 func (w *Writer) batch(batch *index.Batch) error {
-	var inputBytes uint64
-	if w.config.batchStatsEnabled {
-		defer func() {
-			w.batchStatsLock.Lock()
-			w.batchStats.InFlightInputBytes -= inputBytes
-			w.batchStatsLock.Unlock()
-		}()
-	}
 	if w.config.maxDocumentInputBytes > 0 || w.config.maxBatchInputBytes > 0 || w.config.batchStatsEnabled {
-		var err error
-		inputBytes, err = w.checkBatchInput(batch)
+		inputBytes, err := w.checkBatchInput(batch)
 		if err != nil {
 			return err
 		}
@@ -192,6 +183,11 @@ func (w *Writer) batch(batch *index.Batch) error {
 			w.batchStatsLock.Lock()
 			w.batchStats.InFlightInputBytes += inputBytes
 			w.batchStatsLock.Unlock()
+			defer func() {
+				w.batchStatsLock.Lock()
+				w.batchStats.InFlightInputBytes -= inputBytes
+				w.batchStatsLock.Unlock()
+			}()
 		}
 	}
 	segmentVectors := usesSegmentVectorBackend(w.config)
@@ -209,9 +205,6 @@ func (w *Writer) batch(batch *index.Batch) error {
 	changes, hasVectors, err := vectorChangesForBatch(batch)
 	if err != nil {
 		return err
-	}
-	if hasVectors && w.vector == nil && !segmentVectors {
-		return ErrVectorUnsupported
 	}
 	if segmentVectors {
 		if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {

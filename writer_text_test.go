@@ -501,8 +501,8 @@ func (r *generatedTextReader) Read(p []byte) (int, error) {
 }
 
 func TestImportText50MiBStreaming(t *testing.T) {
-	const maximum, batchSize = 64 * 1024, 4
-	input := &generatedTextReader{total: 50 * 1024 * 1024}
+	const maximum, batchSize, total = 64 * 1024, 4, 50 * 1024 * 1024
+	input := &generatedTextReader{total: total}
 	config := DefaultConfig(t.TempDir()).WithMaxConcurrentBatches(1).
 		WithMaxDocumentInputBytes(maximum + 256).WithMaxBatchInputBytes(batchSize * (maximum + 256))
 	built := 0
@@ -522,8 +522,8 @@ func TestImportText50MiBStreaming(t *testing.T) {
 	})
 	w := textTestWriter(t, config)
 	result, err := w.ImportText("large", "body", input, TextChunkOptions{MaxChunkBytes: maximum, BatchSize: batchSize})
-	if err != nil || result.CommittedEndByte != int64(input.total) || result.CommittedChunks != uint64(input.total/maximum) ||
-		input.maxRead > maximum+utf8.UTFMax || built != int(result.CommittedChunks) {
+	if err != nil || result.CommittedEndByte != total || result.CommittedChunks != total/maximum ||
+		input.maxRead > maximum+utf8.UTFMax || built != total/maximum {
 		t.Fatalf("large import: result=%+v reader=%+v built=%d err=%v", result, input, built, err)
 	}
 }

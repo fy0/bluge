@@ -636,7 +636,7 @@ func (s *Writer) loadSegment(id uint64, plugin *SegmentPlugin) (*segmentWrapper,
 	}
 	return &segmentWrapper{
 		Segment:      seg,
-		encodedBytes: uint64(data.Len()),
+		encodedBytes: int64(data.Len()),
 		refCounter: &closeOnLastRefCounter{
 			closer: closer,
 			refs:   1,

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	bleveindex "github.com/blevesearch/bleve_index_api"
+
 	"github.com/fy0/bluge/internal/blugeidx"
 )
 

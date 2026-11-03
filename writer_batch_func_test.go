@@ -57,7 +57,10 @@ func TestBatchFuncWaitingCancellationAndClose(t *testing.T) {
 	defer cancel()
 	waiting := make(chan error, 1)
 	called, built := make(chan struct{}), make(chan struct{}, 2)
-	build := func(*index.Batch) error { built <- struct{}{}; return nil }
+	build := func(*index.Batch) error {
+		built <- struct{}{}
+		return errors.New("waiting callback ran")
+	}
 	go func() { close(called); waiting <- w.BatchFunc(ctx, build) }()
 	awaitBatchSignal(t, called)
 	cancel()
