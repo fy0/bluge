@@ -18,8 +18,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"math"
+	"os"
 	"reflect"
 	"sort"
 	"testing"
@@ -31,7 +31,7 @@ import (
 )
 
 var segType = flag.String("segType", "", "force scorch segment type")
-var segVer = flag.Int("segVer", 0, "force scorch segment version")
+var segVer = flag.Uint("segVer", 0, "force scorch segment version")
 
 func collectHits(dmi search.DocumentMatchIterator) (rv []*match, err error) {
 	var next *search.DocumentMatch
@@ -76,6 +76,11 @@ var standardAggs = search.Aggregations{
 }
 
 func TestIntegration(t *testing.T) {
+	version := *segVer
+	if version > math.MaxUint32 {
+		t.Fatal("invalid segment version")
+		return
+	}
 	integrationTests := []IntegrationTest{
 		{
 			Name:     "basic",
@@ -110,7 +115,7 @@ func TestIntegration(t *testing.T) {
 	}
 
 	for _, intTest := range integrationTests {
-		path, err := ioutil.TempDir("", "bluge-integration-test-"+intTest.Name)
+		path, err := os.MkdirTemp("", "bluge-integration-test-"+intTest.Name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,9 +125,9 @@ func TestIntegration(t *testing.T) {
 			cfg = cfg.WithSegmentType(*segType)
 			t.Logf("forcing segment type: %s", *segType)
 		}
-		if *segVer != 0 {
-			cfg = cfg.WithSegmentVersion(uint32(*segVer))
-			t.Logf("forcing segment version: %d", *segVer)
+		if version != 0 {
+			cfg = cfg.WithSegmentVersion(uint32(version))
+			t.Logf("forcing segment version: %d", version)
 		}
 		idx, err := bluge.OpenWriter(cfg)
 		if err != nil {

@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"math"
 	"reflect"
 	"testing"
 
@@ -26,7 +27,7 @@ import (
 func TestPhraseSearch(t *testing.T) {
 	soptions := search.SearcherOptions{
 		SimilarityForField: func(field string) search.Similarity {
-			return similarity.NewLegacyBM25Similarity()
+			return similarity.NewBM25Similarity()
 		},
 		Explain:            true,
 		IncludeTermVectors: true,
@@ -48,7 +49,7 @@ func TestPhraseSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("2"),
-					Score:  1.0935524440417954,
+					Score:  2.405815376891950,
 				},
 			},
 			locations:  map[string]map[string][]search.Location{"desc": {"beer": {{Pos: 2, Start: 6, End: 10}}, "angst": {{Pos: 1, Start: 0, End: 5}}}},
@@ -75,7 +76,7 @@ func TestPhraseSearch(t *testing.T) {
 				if next.Number != test.results[i].Number {
 					t.Errorf("expected result %d to have number %d got %d for test %d\n", i, test.results[i].Number, next.Number, testIndex)
 				}
-				if next.Score != test.results[i].Score {
+				if math.Abs(next.Score-test.results[i].Score) > 1e-12 {
 					t.Errorf("expected result %d to have score %v got %v for test %d\n", i, test.results[i].Score, next.Score, testIndex)
 					t.Logf("scoring explanation: %s\n", next.Explanation)
 				}
@@ -109,7 +110,7 @@ func TestPhraseSearch(t *testing.T) {
 func TestMultiPhraseSearch(t *testing.T) {
 	soptions := search.SearcherOptions{
 		SimilarityForField: func(field string) search.Similarity {
-			return similarity.NewLegacyBM25Similarity()
+			return similarity.NewBM25Similarity()
 		},
 		Explain:            true,
 		IncludeTermVectors: true,
@@ -162,7 +163,7 @@ func TestMultiPhraseSearch(t *testing.T) {
 func TestSloppyMultiPhraseSearch(t *testing.T) {
 	soptions := search.SearcherOptions{
 		SimilarityForField: func(field string) search.Similarity {
-			return similarity.NewLegacyBM25Similarity()
+			return similarity.NewBM25Similarity()
 		},
 		Explain:            true,
 		IncludeTermVectors: true,

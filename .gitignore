@@ -17,3 +17,9 @@ vendor/**
 /search/query/y.output
 *.test
 tags
+/tmp/
+*.exe
+usearch-ffi/target*/
+usearch-ffi/artifact/
+.playwright-mcp/
+**/node_modules/

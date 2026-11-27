@@ -21,6 +21,7 @@ import (
 )
 
 func open(path string, flag int, perm os.FileMode, exclusive bool) (LockedFile, error) {
+	// #nosec G703 -- The caller configures the lock file path.
 	f, err := os.OpenFile(path, flag, perm)
 	if err != nil {
 		return nil, err

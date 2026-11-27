@@ -16,6 +16,8 @@ package aggregations
 
 import "github.com/fy0/bluge/search"
 
+const countKey = "count"
+
 var staticCount = []float64{1}
 
 type countingSource struct{}

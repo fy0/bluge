@@ -15,10 +15,11 @@
 package ar
 
 import (
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/fy0/bluge/analysis"
 	"github.com/fy0/bluge/analysis/token"
 	"github.com/fy0/bluge/analysis/tokenizer"
-	"golang.org/x/text/unicode/norm"
 )
 
 func Analyzer() *analysis.Analyzer {

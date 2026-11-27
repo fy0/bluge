@@ -17,6 +17,7 @@ package sv
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/swedish"
+
 	"github.com/fy0/bluge/analysis"
 )
 

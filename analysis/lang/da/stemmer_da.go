@@ -17,6 +17,7 @@ package da
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/danish"
+
 	"github.com/fy0/bluge/analysis"
 )
 

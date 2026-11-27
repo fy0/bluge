@@ -124,11 +124,12 @@ func TestWriterBatchSlotCoversWholeCall(t *testing.T) {
 	config := DefaultConfig(path).WithMaxConcurrentBatches(1).WithBatchStats(true)
 	config.indexConfig = config.indexConfig.WithSegmentPlugin(&index.SegmentPlugin{
 		Type: zapxbluge.Type, Version: zapxbluge.Version,
-		New: func(docs []segment.Document, norm func(string, int) float32) (segment.Segment, uint64, error) {
+		New: func(docs []segment.Document, norm func(string, int) float32,
+			opts segment.BuildOptions) (segment.Segment, uint64, error) {
 			if builds.Add(1) == 1 {
 				build.block()
 			}
-			return zapxbluge.New(docs, norm)
+			return zapxbluge.New(docs, norm, opts)
 		},
 		Load: zapxbluge.Load, Merge: zapxbluge.Merge,
 	})
@@ -240,11 +241,12 @@ func TestWriterBatchErrorsReleaseSlotAndStats(t *testing.T) {
 	config := InMemoryOnlyConfig().WithMaxConcurrentBatches(1).WithBatchStats(true)
 	config.indexConfig = config.indexConfig.WithSegmentPlugin(&index.SegmentPlugin{
 		Type: zapxbluge.Type, Version: zapxbluge.Version,
-		New: func(docs []segment.Document, norm func(string, int) float32) (segment.Segment, uint64, error) {
+		New: func(docs []segment.Document, norm func(string, int) float32,
+			opts segment.BuildOptions) (segment.Segment, uint64, error) {
 			if builds.Add(1) == 1 {
 				return nil, 0, wantErr
 			}
-			return zapxbluge.New(docs, norm)
+			return zapxbluge.New(docs, norm, opts)
 		},
 		Load: zapxbluge.Load, Merge: zapxbluge.Merge,
 	})

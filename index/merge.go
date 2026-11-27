@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/fy0/bluge/index/mergeplan"
 	segment "github.com/fy0/bluge/segment"
 )
@@ -231,15 +232,18 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 		notifyCh:      make(chan *mergeTaskIntroStatus),
 	}
 
+	return s.introduceMergeTask(merges, sm)
+}
+
+func (s *Writer) introduceMergeTask(merges chan *segmentMerge, sm *segmentMerge) error {
 	s.fireEvent(EventKindMergeTaskIntroductionStart, 0)
 
-	// give it to the introducer
 	select {
 	case <-s.closeCh:
-		if seg != nil {
-			_ = seg.Close()
+		if sm.new != nil {
+			_ = sm.new.Close()
 			// the merged segment file is not referenced by any snapshot
-			_ = s.directory.Remove(ItemKindSegment, newSegmentID)
+			_ = s.directory.Remove(ItemKindSegment, sm.id)
 		}
 		return segment.ErrClosed
 	case merges <- sm:
@@ -247,8 +251,7 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 	}
 
 	introStartTime := time.Now()
-	// it is safe to blockingly wait for the merge introduction
-	// here as the introducer is bound to handle the notify channel.
+	// The introducer always sends a result for an accepted merge.
 	mergeTaskIntroStatus := <-sm.notifyCh
 	introTime := uint64(time.Since(introStartTime))
 	atomic.AddUint64(&s.stats.TotFileMergeZapIntroductionTime, introTime)
@@ -258,14 +261,12 @@ func (s *Writer) executeMergeTask(merges chan *segmentMerge, task *mergeplan.Mer
 	atomic.AddUint64(&s.stats.TotFileMergeIntroductionsDone, 1)
 	if mergeTaskIntroStatus != nil && mergeTaskIntroStatus.snapshot != nil {
 		_ = mergeTaskIntroStatus.snapshot.Close()
-		if mergeTaskIntroStatus.skipped && seg != nil {
-			// decrement the ref counts on skipping introduction, and
-			// remove the merged segment file, which is not referenced
-			// by any snapshot
-			_ = seg.Close()
-			if err := s.directory.Remove(ItemKindSegment, newSegmentID); err != nil {
+		if mergeTaskIntroStatus.skipped && sm.new != nil {
+			// No snapshot references a skipped merge.
+			_ = sm.new.Close()
+			if err := s.directory.Remove(ItemKindSegment, sm.id); err != nil {
 				s.fireAsyncError(fmt.Errorf("error removing skipped merge segment %d: %v",
-					newSegmentID, err))
+					sm.id, err))
 			}
 		}
 	}
@@ -434,13 +435,7 @@ func (s *Writer) mergeSegmentBases(merges chan *segmentMerge, snapshot *Snapshot
 
 func (s *Writer) merge(segments []segment.Segment, drops []*roaring.Bitmap, id uint64) (
 	[][]uint64, error) {
-	var merger segment.Merger
-	if s.segPlugin.MergeWithOptions != nil {
-		merger = s.segPlugin.MergeWithOptions(segments, drops, s.config.MergeBufferSize,
-			s.config.SegmentOptions)
-	} else {
-		merger = s.segPlugin.Merge(segments, drops, s.config.MergeBufferSize)
-	}
+	merger := s.segPlugin.Merge(segments, drops, s.config.MergeBufferSize, s.config.SegmentOptions)
 
 	err := s.directory.Persist(ItemKindSegment, id, merger, s.closeCh)
 	if err != nil {

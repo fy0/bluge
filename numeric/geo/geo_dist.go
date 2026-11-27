@@ -21,6 +21,12 @@ import (
 	"strings"
 )
 
+const (
+	kilometerSuffix  = "km"
+	millimeterSuffix = "mm"
+	mileSuffix       = "mi"
+)
+
 type DistanceUnit struct {
 	conv     float64
 	suffixes []string
@@ -29,11 +35,11 @@ type DistanceUnit struct {
 var Inch = DistanceUnit{0.0254, []string{"in", "inches"}}
 var Yard = DistanceUnit{0.9144, []string{"yd", "yards"}}
 var Feet = DistanceUnit{0.3048, []string{"ft", "feet"}}
-var Kilometer = DistanceUnit{1000, []string{"km", "kilometers"}}
+var Kilometer = DistanceUnit{1000, []string{kilometerSuffix, "kilometers"}}
 var NauticalMile = DistanceUnit{1852.0, []string{"nm", "nauticalmiles"}}
-var Millimeter = DistanceUnit{0.001, []string{"mm", "millimeters"}}
+var Millimeter = DistanceUnit{0.001, []string{millimeterSuffix, "millimeters"}}
 var Centimeter = DistanceUnit{0.01, []string{"cm", "centimeters"}}
-var Mile = DistanceUnit{1609.344, []string{"mi", "mile"}}
+var Mile = DistanceUnit{1609.344, []string{mileSuffix, "mile"}}
 var Meter = DistanceUnit{1, []string{"m", "meters"}}
 
 var distanceUnits = []*DistanceUnit{

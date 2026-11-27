@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"math"
 	"testing"
 
 	"github.com/fy0/bluge/search/similarity"
@@ -124,7 +125,7 @@ func TestConjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  3.4046497795824324,
+					Score:  7.490229515081352,
 				},
 			},
 		},
@@ -133,7 +134,7 @@ func TestConjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("2"),
-					Score:  1.0935524440417954,
+					Score:  2.405815376891950,
 				},
 			},
 		},
@@ -146,11 +147,11 @@ func TestConjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("2"),
-					Score:  0.49141344993743563,
+					Score:  1.081109589862358,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.49141344993743563,
+					Score:  1.081109589862358,
 				},
 			},
 		},
@@ -159,7 +160,7 @@ func TestConjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("2"),
-					Score:  0.3863538726893489,
+					Score:  0.8499785199165677,
 				},
 			},
 		},
@@ -168,7 +169,7 @@ func TestConjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("2"),
-					Score:  1.3260189334614976,
+					Score:  2.917241653615295,
 				},
 			},
 		},
@@ -192,7 +193,7 @@ func TestConjunctionSearch(t *testing.T) {
 				if next.Number != test.results[i].Number {
 					t.Errorf("expected result %d to have number %d got %d for test %d", i, test.results[i].Number, next.Number, testIndex)
 				}
-				if !scoresCloseEnough(next.Score, test.results[i].Score) {
+				if math.Abs(next.Score-test.results[i].Score) > 1e-12 {
 					t.Errorf("expected result %d to have score %v got  %v for test %d", i, test.results[i].Score, next.Score, testIndex)
 					t.Logf("scoring explanation: %s", next.Explanation)
 				}

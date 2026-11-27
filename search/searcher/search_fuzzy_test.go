@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"math"
 	"testing"
 
 	"github.com/fy0/bluge/search/similarity"
@@ -56,19 +57,19 @@ func TestFuzzySearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  0.19048558277791944,
+					Score:  0.4190682821114228,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("2"),
-					Score:  0.1409497591158223,
+					Score:  0.3100894700548091,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.1409497591158223,
+					Score:  0.3100894700548091,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("4"),
-					Score:  0.20310645955140216,
+					Score:  0.4468342110130848,
 				},
 			},
 		},
@@ -81,7 +82,7 @@ func TestFuzzySearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.5433716591324194,
+					Score:  1.195417650091323,
 				},
 			},
 		},
@@ -90,7 +91,7 @@ func TestFuzzySearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("5"),
-					Score:  1.021066668246945,
+					Score:  2.246346670143279,
 				},
 			},
 		},
@@ -114,7 +115,7 @@ func TestFuzzySearch(t *testing.T) {
 				if next.Number != test.results[i].Number {
 					t.Errorf("expected result %d to have number %d got %d for test %d", i, test.results[i].Number, next.Number, testIndex)
 				}
-				if next.Score != test.results[i].Score {
+				if math.Abs(next.Score-test.results[i].Score) > 1e-12 {
 					t.Errorf("expected result %d to have score %v got %v for test %d", i, test.results[i].Score, next.Score, testIndex)
 					t.Logf("scoring explanation: %s", next.Explanation)
 				}

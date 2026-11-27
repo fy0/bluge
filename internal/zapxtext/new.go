@@ -17,6 +17,7 @@ package zap
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"sort"
 	"sync"
@@ -24,55 +25,32 @@ import (
 
 	index "github.com/blevesearch/bleve_index_api"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
+
 	"github.com/fy0/bluge/internal/blugeidx"
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
 var NewSegmentBufferNumResultsBump int = 100
 var NewSegmentBufferNumResultsFactor float64 = 1.0
 var NewSegmentBufferAvgBytesPerDocFactor float64 = 1.0
 
-// The previous pooled builder may belong to a very different workload. Bound
-// speculative allocation; bytes.Buffer can still grow for actual output.
 const maxNewSegmentPrealloc = 1 << 20
 
-// ValidateDocFields can be set by applications to perform additional checks
-// on fields in a document being added to a new segment, by default it does
-// nothing.
-// This API is experimental and may be removed at any time.
-var ValidateDocFields = func(field *blugeidx.Field) error {
-	return nil
-}
-
-// New creates an in-memory zap-encoded SegmentBase from a set of Documents
-func (z *ZapPlugin) New(results []*blugeidx.Document) (
-	segment.Segment, uint64, error) {
-	return z.newWithChunkMode(results, DefaultChunkMode, nil, nil)
-}
-
-func (z *ZapPlugin) NewUsing(results []*blugeidx.Document, config map[string]interface{}) (
-	segment.Segment, uint64, error) {
-	return z.newWithChunkMode(results, DefaultChunkMode, config, nil)
-}
-
-func (*ZapPlugin) newWithChunkMode(results []*blugeidx.Document,
-	chunkMode uint32, config map[string]interface{}, normCalc func(string, int) float32) (
-	segment.Segment, uint64, error) {
+func New(results []*blugeidx.Document, normCalc func(string, int) float32,
+	options blugeseg.BuildOptions) (*SegmentBase, uint64, error) {
+	if len(results) > math.MaxUint32 {
+		return nil, 0, errors.New("too many segment documents")
+	}
+	chunkMode := DefaultChunkMode
 	s := interimPool.Get().(*interim)
 
 	var br bytes.Buffer
 	if s.lastNumDocs > 0 {
-		// use previous results to initialize the buf with an estimate
-		// size, but note that the interim instance comes from a
-		// global interimPool, so multiple scorch instances indexing
-		// different docs can lead to low quality estimates
 		estimateAvgBytesPerDoc := int(float64(s.lastOutSize/s.lastNumDocs) *
 			NewSegmentBufferNumResultsFactor)
-		// A fixed extra 100 documents multiplies a one-document batch's buffer
-		// by 101, particularly costly for large text chunks or vector payloads.
 		extraResults := min(NewSegmentBufferNumResultsBump, len(results))
 		estimateNumResults := int(float64(len(results)+extraResults) *
 			NewSegmentBufferAvgBytesPerDocFactor)
-		// Compare before multiplying so an outlier estimate cannot overflow.
 		if estimateAvgBytesPerDoc > 0 && estimateNumResults > 0 {
 			estimate := maxNewSegmentPrealloc
 			if estimateAvgBytesPerDoc <= maxNewSegmentPrealloc/estimateNumResults {
@@ -84,12 +62,11 @@ func (*ZapPlugin) newWithChunkMode(results []*blugeidx.Document,
 
 	var err error
 	s.results = results
-	clear(s.edgeList)
-	s.config = config
+	s.options = options
 	s.chunkMode = chunkMode
 	s.normCalc = normCalc
 
-	s.w = NewFileWriterEmpty(NewCountHashWriter(&br))
+	s.w = NewCountHashWriter(&br)
 
 	storedIndexOffset, sectionsIndexOffset, err := s.convert()
 	if err != nil {
@@ -97,10 +74,8 @@ func (*ZapPlugin) newWithChunkMode(results []*blugeidx.Document,
 	}
 
 	sb, err := InitSegmentBase(br.Bytes(), s.w.Sum32(), chunkMode,
-		uint64(len(s.results)), storedIndexOffset, sectionsIndexOffset, config)
+		uint64(len(s.results)), storedIndexOffset, sectionsIndexOffset)
 
-	// get the bytes written before the interim's reset() call
-	// write it to the newly formed segment base.
 	totalBytesWritten := s.getBytesWritten()
 	if err == nil && s.reset() == nil {
 		s.lastNumDocs = len(results)
@@ -114,31 +89,21 @@ func (*ZapPlugin) newWithChunkMode(results []*blugeidx.Document,
 
 var interimPool = sync.Pool{New: func() interface{} { return &interim{} }}
 
-// interim holds temporary working data used while converting from
-// analysis results to a zap-encoded segment
 type interim struct {
 	bytesWritten atomic.Uint64
 
 	results []*blugeidx.Document
 
-	// edge list for nested documents: child -> parent
-	edgeList map[uint64]uint64
-
 	chunkMode uint32
 
-	w *FileWriter
+	w *CountHashWriter
 
-	config map[string]interface{}
+	options blugeseg.BuildOptions
 
-	// FieldsMap adds 1 to field id to avoid zero value issues
-	//  name -> field id + 1
 	FieldsMap map[string]uint16
 
-	// FieldsOptions holds the indexing options for each field
 	FieldsOptions map[string]index.FieldIndexingOptions
 
-	// FieldsInv is the inverse of FieldsMap
-	//  field id -> name
 	FieldsInv []string
 
 	metaBuf bytes.Buffer
@@ -156,7 +121,6 @@ func (s *interim) reset() (err error) {
 	s.results = nil
 	s.chunkMode = 0
 	s.w = nil
-	clear(s.edgeList)
 	clear(s.FieldsMap)
 	clear(s.FieldsOptions)
 	s.FieldsInv = s.FieldsInv[:0]
@@ -166,8 +130,6 @@ func (s *interim) reset() (err error) {
 	s.lastOutSize = 0
 	s.normCalc = nil
 
-	// reset the bytes written stat count
-	// to avoid leaking of bytesWritten across reuse cycles.
 	s.setBytesWritten(0)
 
 	if s.opaque != nil {
@@ -208,9 +170,6 @@ func (s *interim) convert() (uint64, uint64, error) {
 	}
 
 	s.getOrDefineField(blugeidx.IDFieldName) // _id field is fieldID 0
-	// special case _id field options: the _id is the canonical document identifier and
-	// must always be both indexed and stored so that it can be used for lookups/queries
-	// and retrieved back from the stored fields, regardless of user-specified field options.
 	s.FieldsOptions[blugeidx.IDFieldName] = index.IndexField | index.StoreField
 
 	var fName string
@@ -220,7 +179,7 @@ func (s *interim) convert() (uint64, uint64, error) {
 			s.getOrDefineField(fName)
 			s.FieldsOptions[fName] |= field.Options()
 		})
-		if vectorSegmentBackend(s.config) != nil {
+		if s.options.VectorBackend != nil {
 			result.VisitVectors(func(vector *blugeidx.Vector) {
 				fName = vector.Name()
 				s.getOrDefineField(fName)
@@ -235,27 +194,23 @@ func (s *interim) convert() (uint64, uint64, error) {
 		s.FieldsMap[fieldName] = uint16(fieldID + 1)
 	}
 
-	args := map[string]interface{}{
-		"results":       s.results,
-		"chunkMode":     s.chunkMode,
-		"fieldsMap":     s.FieldsMap,
-		"fieldsInv":     s.FieldsInv,
-		"fieldsOptions": s.FieldsOptions,
-		"normCalc":      s.normCalc,
-	}
-	if s.config != nil {
-		args["config"] = s.config
+	args := sectionConfig{
+		results:       s.results,
+		chunkMode:     s.chunkMode,
+		fieldsMap:     s.FieldsMap,
+		fieldsInv:     s.FieldsInv,
+		fieldsOptions: s.FieldsOptions,
+		normCalc:      s.normCalc,
+		options:       s.options,
 	}
 	if s.opaque == nil {
 		s.opaque = map[int]resetable{}
 		for i, x := range segmentSections {
-			s.opaque[int(i)] = x.InitOpaque(args)
+			s.opaque[i] = x.InitOpaque(args)
 		}
 	} else {
-		for k, v := range args {
-			for _, op := range s.opaque {
-				op.Set(k, v)
-			}
+		for _, op := range s.opaque {
+			op.Configure(args)
 		}
 	}
 
@@ -266,8 +221,6 @@ func (s *interim) convert() (uint64, uint64, error) {
 		return 0, 0, err
 	}
 
-	// we can persist the various sections at this point.
-	// the rule of thumb here is that each section must persist field wise.
 	for _, x := range segmentSections {
 		err = x.Persist(s.opaque, s.w)
 		if err != nil {
@@ -275,7 +228,6 @@ func (s *interim) convert() (uint64, uint64, error) {
 		}
 	}
 
-	// after persisting the sections to the writer, account corresponding
 	for _, opaque := range s.opaque {
 		opaqueIO, ok := opaque.(segment.DiskStatsReporter)
 		if ok {
@@ -283,8 +235,6 @@ func (s *interim) convert() (uint64, uint64, error) {
 		}
 	}
 
-	// we can persist a new fields section here
-	// this new fields section will point to the various indexes available
 	stats := s.opaque[SectionInvertedTextIndex].(*invertedIndexOpaque).fieldStats
 	sectionsIndexOffset, err := persistFieldsSection(s.FieldsInv, s.FieldsOptions, s.w, s.opaque, stats)
 	if err != nil {
@@ -294,7 +244,7 @@ func (s *interim) convert() (uint64, uint64, error) {
 	return storedIndexOffset, sectionsIndexOffset, nil
 }
 
-func (s *interim) getOrDefineField(fieldName string) int {
+func (s *interim) getOrDefineField(fieldName string) uint16 {
 	fieldIDPlus1, exists := s.FieldsMap[fieldName]
 	if !exists {
 		fieldIDPlus1 = uint16(len(s.FieldsInv) + 1)
@@ -302,7 +252,7 @@ func (s *interim) getOrDefineField(fieldName string) int {
 		s.FieldsInv = append(s.FieldsInv, fieldName)
 	}
 
-	return int(fieldIDPlus1 - 1)
+	return fieldIDPlus1 - 1
 }
 
 func (s *interim) processDocuments() {
@@ -314,7 +264,7 @@ func (s *interim) processDocuments() {
 func (s *interim) processDocument(docNum uint32,
 	result *blugeidx.Document) {
 	visitField := func(field *blugeidx.Field) {
-		fieldID := uint16(s.getOrDefineField(field.Name()))
+		fieldID := s.getOrDefineField(field.Name())
 
 		for _, section := range segmentSections {
 			section.Process(s.opaque, docNum, field, fieldID)
@@ -322,29 +272,16 @@ func (s *interim) processDocument(docNum uint32,
 	}
 	result.VisitFields(visitField)
 
-	if vectorSegmentBackend(s.config) != nil {
+	if s.options.VectorBackend != nil {
 		result.VisitVectors(func(vector *blugeidx.Vector) {
-			// Segment field IDs are defined by the existing uint16 field table.
-			fieldID := uint16(s.getOrDefineField(vector.Name())) //nolint:gosec
-			for _, section := range segmentSections {
-				if vectorProcessor, ok := section.(interface {
-					ProcessVector(map[int]resetable, uint32, *blugeidx.Vector, uint16)
-				}); ok {
-					vectorProcessor.ProcessVector(s.opaque, docNum, vector, fieldID)
-				}
-			}
+			fieldID := s.getOrDefineField(vector.Name())
+			segmentSections[SectionVectorIndex].(*vectorIndexSection).ProcessVector(s.opaque, docNum, vector, fieldID)
 		})
 	}
 
-	// given that as part of visiting each field, there may some kind of totalling
-	// or accumulation that can be updated, it becomes necessary to commit or
-	// put that totalling/accumulation into effect. However, for certain section
-	// types this particular step need not be valid, in which case it would be a
-	// no-op in the implmentation of the section's process API.
 	for _, section := range segmentSections {
 		section.Process(s.opaque, docNum, nil, math.MaxUint16)
 	}
-
 }
 
 func (s *interim) getBytesWritten() uint64 {
@@ -367,7 +304,6 @@ func (s *interim) writeStoredFields() (
 	defer func() { s.tmp0 = data }()
 	blockWriter := newStoredBlockWriter(s.w, uint64(len(s.results)))
 
-	// keyed by fieldID, for the current doc in the loop
 	docStoredFields := map[uint16]interimStoredField{}
 
 	for _, result := range s.results {
@@ -375,32 +311,21 @@ func (s *interim) writeStoredFields() (
 			delete(docStoredFields, fieldID)
 		}
 
-		var validationErr error
 		result.VisitFields(func(field *blugeidx.Field) {
-			fieldID := uint16(s.getOrDefineField(field.Name()))
+			fieldID := s.getOrDefineField(field.Name())
 
 			if field.Options().IsStored() {
 				isf := docStoredFields[fieldID]
 				isf.vals = append(isf.vals, field.Value())
 				docStoredFields[fieldID] = isf
 			}
-
-			err := ValidateDocFields(field)
-			if err != nil && validationErr == nil {
-				validationErr = err
-			}
 		})
-		if validationErr != nil {
-			return 0, validationErr
-		}
 
 		var curr int
 
 		s.metaBuf.Reset()
 		data = data[:0]
 
-		// Store every field, including _id, in one compressed payload so repeated
-		// values within a document can share Snappy back-references.
 		for fieldID := 0; fieldID < len(s.FieldsInv); fieldID++ {
 			isf, exists := docStoredFields[uint16(fieldID)]
 			if exists {
@@ -427,31 +352,6 @@ func (s *interim) writeStoredFields() (
 	}
 	s.incrementBytesWritten(blockWriter.bytesWritten)
 
-	// write the number of edges in the child -> parent edge list
-	// this will be zero if there are no nested documents
-	// and this number also reflects the number of nested documents
-	// in the segment
-	buf := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutUvarint(buf, uint64(len(s.edgeList)))
-	_, err = s.w.Write(buf[:n])
-	if err != nil {
-		return 0, err
-	}
-	// write the child -> parent edge list
-	// child and parent are both flattened doc ids
-	for child, parent := range s.edgeList {
-		n = binary.PutUvarint(buf, child)
-		_, err = s.w.Write(buf[:n])
-		if err != nil {
-			return 0, err
-		}
-		n = binary.PutUvarint(buf, parent)
-		_, err = s.w.Write(buf[:n])
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	return storedIndexOffset, nil
 }
 
@@ -459,9 +359,7 @@ func (s *interim) setBytesWritten(val uint64) {
 	s.bytesWritten.Store(val)
 }
 
-// returns the total # of bytes needed to encode the given uint64's
-// into binary.PutUVarint() encoding
-func totalUvarintBytes(a, b, c, d, e uint64, more []uint64) (n int) {
+func totalUvarintBytes(a, b, c, d, e uint64, more []uint64) (n uint64) {
 	n = numUvarintBytes(a)
 	n += numUvarintBytes(b)
 	n += numUvarintBytes(c)
@@ -473,8 +371,7 @@ func totalUvarintBytes(a, b, c, d, e uint64, more []uint64) (n int) {
 	return n
 }
 
-// returns # of bytes needed to encode x in binary.PutUvarint() encoding
-func numUvarintBytes(x uint64) (n int) {
+func numUvarintBytes(x uint64) (n uint64) {
 	for x >= 0x80 {
 		x >>= 7
 		n++

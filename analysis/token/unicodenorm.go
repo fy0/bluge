@@ -15,8 +15,9 @@
 package token
 
 import (
-	"github.com/fy0/bluge/analysis"
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/fy0/bluge/analysis"
 )
 
 type UnicodeNormalizeFilter struct {

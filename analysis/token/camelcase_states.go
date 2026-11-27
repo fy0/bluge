@@ -44,7 +44,7 @@ type UpperCaseState struct {
 }
 
 func (s *UpperCaseState) Member(sym rune, peek *rune) bool {
-	if !(unicode.IsLower(sym) || unicode.IsUpper(sym)) {
+	if !unicode.IsLower(sym) && !unicode.IsUpper(sym) {
 		return false
 	}
 

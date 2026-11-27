@@ -27,15 +27,8 @@ const (
 	intChunkSnappy
 )
 
-// Reuse ordinary buffers, but do not retain an outlier term's large allocations
-// for the rest of a segment build or merge. This is a per-buffer retention cap,
-// not a limit on the amount of data a coder can encode.
 const maxIntCoderRetainedBytes = 1 << 20
 
-// We can safely use 0 to represent termNotEncoded since 0
-// could never be a valid address for term location information.
-// (stored field index is always non-empty and earlier in the
-// file)
 const termNotEncoded = 0
 
 type chunkedIntCoder struct {
@@ -48,13 +41,8 @@ type chunkedIntCoder struct {
 	buf []byte
 
 	compressed []byte
-
-	bytesWritten uint64
 }
 
-// newChunkedIntCoder returns a new chunk int coder which packs data into
-// chunks based on the provided chunkSize and supports up to the specified
-// maxDocNum
 func newChunkedIntCoder(chunkSize uint64, maxDocNum uint64) *chunkedIntCoder {
 	total := maxDocNum/chunkSize + 1
 	rv := &chunkedIntCoder{
@@ -66,14 +54,11 @@ func newChunkedIntCoder(chunkSize uint64, maxDocNum uint64) *chunkedIntCoder {
 	return rv
 }
 
-// Reset lets you reuse this chunked int coder. Ordinary buffers are reused and
-// oversized buffers are released. The chunk size and max doc num are unchanged.
 func (c *chunkedIntCoder) Reset() {
 	c.final = c.final[:0]
 	if cap(c.final) > maxIntCoderRetainedBytes {
 		c.final = nil
 	}
-	c.bytesWritten = 0
 	c.chunkBuf.Reset()
 	if c.chunkBuf.Cap() > maxIntCoderRetainedBytes {
 		c.chunkBuf = bytes.Buffer{}
@@ -90,32 +75,19 @@ func (c *chunkedIntCoder) Reset() {
 	}
 }
 
-// SetChunkSize changes the chunk size.  It is only valid to do so
-// with a new chunkedIntCoder, or immediately after calling Reset()
 func (c *chunkedIntCoder) SetChunkSize(chunkSize uint64, maxDocNum uint64) {
-	total := int(maxDocNum/chunkSize + 1)
+	total := maxDocNum/chunkSize + 1
 	c.chunkSize = chunkSize
-	if cap(c.chunkLens) < total {
+	if uint64(cap(c.chunkLens)) < total {
 		c.chunkLens = make([]uint64, total)
 	} else {
 		c.chunkLens = c.chunkLens[:total]
 	}
 }
 
-func (c *chunkedIntCoder) incrementBytesWritten(val uint64) {
-	c.bytesWritten += val
-}
-
-func (c *chunkedIntCoder) getBytesWritten() uint64 {
-	return c.bytesWritten
-}
-
-// Add encodes the provided integers into the correct chunk for the provided
-// doc num.  You MUST call Add() with increasing docNums.
 func (c *chunkedIntCoder) Add(docNum uint64, vals ...uint64) error {
 	chunk := docNum / c.chunkSize
 	if chunk != c.currChunk {
-		// starting a new chunk
 		c.Close()
 		c.chunkBuf.Reset()
 		c.currChunk = chunk
@@ -139,7 +111,6 @@ func (c *chunkedIntCoder) Add(docNum uint64, vals ...uint64) error {
 func (c *chunkedIntCoder) AddBytes(docNum uint64, buf []byte) error {
 	chunk := docNum / c.chunkSize
 	if chunk != c.currChunk {
-		// starting a new chunk
 		c.Close()
 		c.chunkBuf.Reset()
 		c.currChunk = chunk
@@ -149,14 +120,9 @@ func (c *chunkedIntCoder) AddBytes(docNum uint64, buf []byte) error {
 	return err
 }
 
-// Close indicates you are done calling Add() this allows the final chunk
-// to be encoded.
 func (c *chunkedIntCoder) Close() {
 	encodingBytes := c.chunkBuf.Bytes()
-	c.incrementBytesWritten(uint64(len(encodingBytes)))
 	if len(encodingBytes) > 0 {
-		// Encode each chunk as it finishes, so Write does not need a second
-		// full-size copy of the integer stream. Keep the existing wire format.
 		c.compressed = snappy.Encode(c.compressed[:cap(c.compressed)], encodingBytes)
 		flag := intChunkRaw
 		if len(c.compressed) < len(encodingBytes) {
@@ -172,7 +138,6 @@ func (c *chunkedIntCoder) Close() {
 	c.currChunk = uint64(cap(c.chunkLens)) // sentinel to detect double close
 }
 
-// Write commits all the encoded chunked integers to the provided writer.
 func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 	bufNeeded := binary.MaxVarintLen64 * (1 + len(c.chunkLens))
 	if len(c.buf) < bufNeeded {
@@ -180,15 +145,8 @@ func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 	}
 	buf := c.buf
 
-	// Custom callbacks may change chunk lengths and must run before offsets
-	// are written. The ordinary writer needs no additional payload buffer.
-	if fw, ok := w.(*FileWriter); ok && fw != nil && fw.processor != nil {
-		c.processChunks(fw)
-	}
-	// calculate chunk offsets from chunk lengths
 	chunkOffsets := modifyLengthsToEndOffsets(c.chunkLens)
 
-	// write out the number of chunks & each chunk offsets
 	n := binary.PutUvarint(buf, uint64(len(chunkOffsets)))
 	for _, chunkOffset := range chunkOffsets {
 		n += binary.PutUvarint(buf[n:], chunkOffset)
@@ -199,7 +157,6 @@ func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 		return tw, err
 	}
 
-	// write out the data
 	nw, err := w.Write(c.final)
 	tw += nw
 	if err != nil {
@@ -208,59 +165,19 @@ func (c *chunkedIntCoder) Write(w io.Writer) (int, error) {
 	return tw, nil
 }
 
-func (c *chunkedIntCoder) processChunks(w *FileWriter) {
-	processedBuf := make([]byte, 0, len(c.final))
-	var pos uint64
-	for i, length := range c.chunkLens {
-		if length == 0 {
-			continue
-		}
-		// Limit capacity so an appending callback cannot overwrite the next
-		// chunk before it is processed. Copy the result before the next call,
-		// since callbacks may reuse their own output buffers.
-		end := pos + length
-		processed := w.process(c.final[pos:end:end])
-		processedBuf = append(processedBuf, processed...)
-		c.chunkLens[i] = uint64(len(processed))
-		pos = end
+func (c *chunkedIntCoder) writeAt(w *CountHashWriter) (uint64, error) {
+	if len(c.final) == 0 {
+		return termNotEncoded, nil
 	}
-	c.final = processedBuf
-}
-
-// writeAt commits all the encoded chunked integers to the provided writer
-// and returns the starting offset, total bytes written and an error
-func (c *chunkedIntCoder) writeAt(w io.Writer) (uint64, int, error) {
-	startOffset := uint64(termNotEncoded)
-	if len(c.final) <= 0 {
-		return startOffset, 0, nil
-	}
-
-	if fw, ok := w.(*FileWriter); ok && fw != nil {
-		startOffset = uint64(fw.Count())
-	}
-
-	tw, err := c.Write(w)
-	return startOffset, tw, err
+	offset := w.Count()
+	_, err := c.Write(w)
+	return offset, err
 }
 
 func (c *chunkedIntCoder) FinalSize() int {
 	return len(c.final)
 }
 
-// modifyLengthsToEndOffsets converts the chunk length array
-// to a chunk offset array. The readChunkBoundary
-// will figure out the start and end of every chunk from
-// these offsets. Starting offset of i'th index is stored
-// in i-1'th position except for 0'th index and ending offset
-// is stored at i'th index position.
-// For 0'th element, starting position is always zero.
-// eg:
-// Lens ->  5 5 5 5 => 5 10 15 20
-// Lens ->  0 5 0 5 => 0 5 5 10
-// Lens ->  0 0 0 5 => 0 0 0 5
-// Lens ->  5 0 0 0 => 5 5 5 5
-// Lens ->  0 5 0 0 => 0 5 5 5
-// Lens ->  0 0 5 0 => 0 0 5 5
 func modifyLengthsToEndOffsets(lengths []uint64) []uint64 {
 	var runningOffset uint64
 	var index, i int

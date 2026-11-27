@@ -111,8 +111,8 @@ type FakeField struct {
 }
 
 func NewFakeGeoField(name string, lon, lat float64) *FakeField {
-	mHash := geo.MortonHash(lon, lat)
-	prefixCoded := numeric.MustNewPrefixCodedInt64(int64(mHash), 0)
+	mHash := int64(geo.MortonHash(lon, lat))
+	prefixCoded := numeric.MustNewPrefixCodedInt64(mHash, 0)
 
 	rv := &FakeField{
 		N:  name,
@@ -121,7 +121,7 @@ func NewFakeGeoField(name string, lon, lat float64) *FakeField {
 		DV: true,
 	}
 
-	terms := addShiftTokens([]numeric.PrefixCoded{prefixCoded}, int64(mHash), 9)
+	terms := addShiftTokens([]numeric.PrefixCoded{prefixCoded}, mHash, 9)
 	for _, term := range terms {
 		ft := &FakeTerm{
 			T: string(term),

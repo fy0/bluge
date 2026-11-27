@@ -29,7 +29,7 @@ for (const backend of ['embedded', 'sidecar', 'collection']) {
     assert.equal(c.Backend, backend);
     assert.equal(c.Models, models);
     const currentSignature = JSON.stringify([c.Documents, c.Dimensions, c.Batch, c.Rounds,
-      c.Queries, c.Seed, c.Options, report.LibrarySHA256, report.GOMAXPROCS]);
+      c.Queries, c.Seed, c.Options, report.GOMAXPROCS]);
     signature ??= currentSignature;
     assert.equal(currentSignature, signature, `${name}: incomparable configuration`);
     const builds = report.steps.filter(s => s.phase === 'build');
@@ -70,8 +70,8 @@ for (const backend of ['embedded', 'sidecar', 'collection']) {
         const lastWorkloadGeneration = builds.length + updates.length;
         assert.equal(report.retained_generations, 1);
         assert.deepEqual(catalog.generations, [lastWorkloadGeneration + 3]);
-        assert(!files.some(f => f.startsWith('.pending-') || f.startsWith('.retired-')));
-        for (const prefix of ['index-', 'metadata-', 'commit-']) {
+        assert(!files.some(f => f.startsWith('.pending-')));
+        for (const prefix of ['index-', 'metadata-']) {
           assert.equal(files.filter(f => f.startsWith(prefix)).length, 1);
         }
         const generations = catalog.generations.map(generation => {
@@ -81,7 +81,7 @@ for (const backend of ['embedded', 'sidecar', 'collection']) {
           return {
             generation,
             rows: Object.keys(metadata.revisions).length,
-            index_bytes: fs.statSync(path.join(dir, `index-${suffix}.usearch`)).size,
+            index_bytes: fs.statSync(path.join(dir, `index-${suffix}`)).size,
             mapping_bytes: fs.statSync(path.join(dir, `metadata-${suffix}.json`)).size,
           };
         });

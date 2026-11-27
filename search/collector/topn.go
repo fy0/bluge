@@ -164,7 +164,7 @@ func (hc *TopNCollector) Collect(ctx context.Context, aggs search.Aggregations,
 			if used {
 				hc.scoredCandidates = raw.ScoredCandidates
 				hc.totalCandidates = raw.TotalCandidates
-				return hc.finishRawTopN(raw.Matches, searchContext, bucket)
+				return hc.finishRawTopN(raw.Matches, searchContext, bucket), nil
 			}
 		}
 	}
@@ -217,7 +217,7 @@ func (hc *TopNCollector) Collect(ctx context.Context, aggs search.Aggregations,
 }
 
 func (hc *TopNCollector) finishRawTopN(matches search.DocumentMatchCollection,
-	searchContext *search.Context, bucket *search.Bucket) (search.DocumentMatchIterator, error) {
+	searchContext *search.Context, bucket *search.Bucket) search.DocumentMatchIterator {
 	skip := hc.skip
 	if skip > len(matches) {
 		skip = len(matches)
@@ -238,7 +238,7 @@ func (hc *TopNCollector) finishRawTopN(matches search.DocumentMatchCollection,
 	}
 	hc.results = matches
 	bucket.Finish()
-	return &TopNIterator{results: hc.results, bucket: bucket}, nil
+	return &TopNIterator{results: hc.results, bucket: bucket}
 }
 
 func (hc *TopNCollector) collectSingle(ctx *search.Context, d *search.DocumentMatch, bucket *search.Bucket) error {

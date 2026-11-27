@@ -175,8 +175,9 @@ func TestImportTextDefaultAndSearch(t *testing.T) {
 		return a < b
 	})
 	var joined strings.Builder
-	for i, hit := range hits {
-		if hit[_idField] != string(TextChunkID(source, uint64(i))) ||
+	for i := range uint64(len(hits)) {
+		hit := hits[i]
+		if hit[_idField] != string(TextChunkID(source, i)) ||
 			hit[TextChunkStartField] != strconv.Itoa(joined.Len()) {
 			t.Fatalf("invalid identity/range: %v", hit)
 		}
@@ -340,12 +341,13 @@ func TestImportTextFailureProgress(t *testing.T) {
 	config := InMemoryOnlyConfig()
 	config.indexConfig = config.indexConfig.WithSegmentPlugin(&index.SegmentPlugin{
 		Type: zapxbluge.Type, Version: zapxbluge.Version,
-		New: func(docs []segment.Document, norm func(string, int) float32) (segment.Segment, uint64, error) {
+		New: func(docs []segment.Document, norm func(string, int) float32,
+			opts segment.BuildOptions) (segment.Segment, uint64, error) {
 			builds++
 			if builds == 2 {
 				return nil, 0, wantErr
 			}
-			return zapxbluge.New(docs, norm)
+			return zapxbluge.New(docs, norm, opts)
 		},
 		Load: zapxbluge.Load, Merge: zapxbluge.Merge,
 	})
@@ -508,7 +510,8 @@ func TestImportText50MiBStreaming(t *testing.T) {
 	built := 0
 	config.indexConfig = config.indexConfig.WithSegmentPlugin(&index.SegmentPlugin{
 		Type: zapxbluge.Type, Version: zapxbluge.Version,
-		New: func(docs []segment.Document, norm func(string, int) float32) (segment.Segment, uint64, error) {
+		New: func(docs []segment.Document, norm func(string, int) float32,
+			opts segment.BuildOptions) (segment.Segment, uint64, error) {
 			if len(docs) > batchSize || input.read > (built+len(docs))*maximum+utf8.UTFMax {
 				t.Errorf("read/accumulated ahead: read=%d built=%d batch=%d", input.read, built, len(docs))
 			}
@@ -516,7 +519,7 @@ func TestImportText50MiBStreaming(t *testing.T) {
 				t.Error("read entire input before first segment")
 			}
 			built += len(docs)
-			return zapxbluge.New(docs, norm)
+			return zapxbluge.New(docs, norm, opts)
 		},
 		Load: zapxbluge.Load, Merge: zapxbluge.Merge,
 	})

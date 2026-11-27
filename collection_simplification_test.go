@@ -178,6 +178,9 @@ func TestCollectionExplicitInputRevisions(t *testing.T) {
 			t.Fatal("accepted invalid input revisions", revisions)
 		}
 	}
+	if err := c.loadRevisions(); err != nil {
+		t.Fatal(err)
+	}
 	if c.revisions["a"] != revs[0].Revision || c.revisions["b"] != revs[1].Revision {
 		t.Fatal("invalid batch changed revisions")
 	}

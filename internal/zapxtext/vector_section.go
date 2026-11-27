@@ -10,338 +10,243 @@ import (
 	"github.com/RoaringBitmap/roaring/v2"
 
 	"github.com/fy0/bluge/internal/blugeidx"
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
-const (
-	vectorPayloadVersion uint64 = 1
-	vectorFieldsMapKey          = "fieldsMap"
-)
+const vectorPayloadVersion uint64 = 1
 
-var ErrVectorPayloadNotFound = errors.New("vector payload was not found")
+var ErrVectorPayloadNotFound = errors.New("vector payload not found")
 
 type vectorIndexSection struct{}
 
 type vectorIndexOpaque struct {
-	backend   VectorSegmentBackend
+	backend   blugeseg.VectorSegmentBackend
 	fieldsMap map[string]uint16
-	records   map[string][]VectorRecord
-	addrs     map[int]int
-}
-
-func init() {
-	registerSegmentSection(SectionVectorIndex, &vectorIndexSection{})
+	records   map[string][]blugeseg.VectorRecord
+	addrs     map[int]uint64
 }
 
 func (v *vectorIndexSection) Process(map[int]resetable, uint32, *blugeidx.Field, uint16) {}
 
 func (v *vectorIndexSection) ProcessVector(opaque map[int]resetable, docNum uint32,
-	vector *blugeidx.Vector, fieldID uint16) {
-	io := getVectorIndexOpaque(opaque)
-	if io.backend == nil || vector == nil || fieldID == math.MaxUint16 {
-		return
-	}
-	io.records[vector.Name()] = append(io.records[vector.Name()], VectorRecord{
+	vector *blugeidx.Vector, _ uint16) {
+	op := getVectorIndexOpaque(opaque)
+	op.records[vector.Name()] = append(op.records[vector.Name()], blugeseg.VectorRecord{
 		DocNum:     docNum,
-		Values:     append([]float32(nil), vector.Values()...),
+		Values:     vector.Values(),
 		Similarity: vector.Similarity(),
 	})
 }
 
-func (v *vectorIndexSection) Persist(opaque map[int]resetable, w *FileWriter) error {
-	io := getVectorIndexOpaque(opaque)
-	if io.backend == nil {
+func (v *vectorIndexSection) Persist(opaque map[int]resetable, w *CountHashWriter) error {
+	op := getVectorIndexOpaque(opaque)
+	if op.backend == nil {
 		return nil
 	}
-	fields := make([]string, 0, len(io.records))
-	for field := range io.records {
+	fields := make([]string, 0, len(op.records))
+	for field := range op.records {
 		fields = append(fields, field)
 	}
 	sort.Strings(fields)
 	for _, field := range fields {
-		fieldID, ok := io.fieldsMap[field]
-		if !ok || len(io.records[field]) == 0 {
-			continue
-		}
-		payload, err := io.backend.BuildVectorPayload(field, io.records[field])
+		payload, err := op.backend.BuildVectorPayload(field, op.records[field])
 		if err != nil {
-			return fmt.Errorf("build embedded vector field %q: %w", field, err)
+			return err
 		}
-		io.addrs[int(fieldID-1)] = w.Count()
+		op.addrs[int(op.fieldsMap[field]-1)] = w.Count()
 		if err := writeVectorPayload(w, payload); err != nil {
-			return fmt.Errorf("write embedded vector field %q: %w", field, err)
+			return err
 		}
 	}
 	return nil
 }
 
-func (v *vectorIndexSection) AddrForField(opaque map[int]resetable, fieldID int) int {
+func (v *vectorIndexSection) AddrForField(opaque map[int]resetable, fieldID int) uint64 {
 	return getVectorIndexOpaque(opaque).addrs[fieldID]
 }
 
 func (v *vectorIndexSection) Merge(opaque map[int]resetable, segments []*SegmentBase,
-	drops []*roaring.Bitmap, fieldsInv []string, newDocNumsIn [][]uint64,
-	w *FileWriter, closeCh chan struct{}) error {
-	io := getVectorIndexOpaque(opaque)
-	if io.backend == nil {
+	_ []*roaring.Bitmap, fields []string, newDocNums [][]uint64, w *CountHashWriter, closeCh chan struct{}) error {
+	op := getVectorIndexOpaque(opaque)
+	if op.backend == nil {
 		return nil
 	}
-	for fieldID, field := range fieldsInv {
+	for fieldID, field := range fields {
 		if isClosed(closeCh) {
-			return errors.New("embedded vector merge canceled")
+			return errors.New("vector merge canceled")
 		}
-		inputs := make([]VectorMergeInput, 0, len(segments))
-		for segmentID, sb := range segments {
-			payload, err := sb.VectorPayload(field)
-			if errors.Is(err, ErrVectorPayloadNotFound) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("read embedded vector field %q from segment %d: %w",
-					field, segmentID, err)
-			}
-			inputs = append(inputs, VectorMergeInput{
-				Payload:    payload,
-				NewDocNums: newDocNumsIn[segmentID],
-			})
+		inputs, err := vectorMergeInputs(segments, field, newDocNums)
+		if err != nil {
+			return err
 		}
 		if len(inputs) == 0 {
 			continue
 		}
-		payload, err := io.backend.MergeVectorPayload(field, inputs)
+		payload, err := op.backend.MergeVectorPayload(field, inputs)
 		if err != nil {
-			return fmt.Errorf("merge embedded vector field %q: %w", field, err)
+			return err
 		}
-		if len(payload.DocIDs) == 0 || len(payload.Data) == 0 {
+		if len(payload.DocIDs) == 0 {
 			continue
 		}
-		io.addrs[fieldID] = w.Count()
+		op.addrs[fieldID] = w.Count()
 		if err := writeVectorPayload(w, payload); err != nil {
-			return fmt.Errorf("write merged embedded vector field %q: %w", field, err)
+			return err
 		}
 	}
 	return nil
 }
 
-func (v *vectorIndexSection) InitOpaque(args map[string]interface{}) resetable {
-	config, _ := args["config"].(map[string]interface{})
-	return &vectorIndexOpaque{
-		backend:   vectorSegmentBackend(config),
-		fieldsMap: copyVectorFieldsMap(args[vectorFieldsMapKey]),
-		records:   make(map[string][]VectorRecord),
-		addrs:     make(map[int]int),
+func vectorMergeInputs(segments []*SegmentBase, field string, newDocNums [][]uint64) ([]blugeseg.VectorMergeInput, error) {
+	inputs := make([]blugeseg.VectorMergeInput, 0, len(segments))
+	for i, sb := range segments {
+		payload, err := sb.VectorPayload(field)
+		if errors.Is(err, ErrVectorPayloadNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, blugeseg.VectorMergeInput{Payload: payload, NewDocNums: newDocNums[i]})
 	}
+	return inputs, nil
+}
+
+func (v *vectorIndexSection) InitOpaque(args sectionConfig) resetable {
+	op := &vectorIndexOpaque{records: make(map[string][]blugeseg.VectorRecord), addrs: make(map[int]uint64)}
+	op.Configure(args)
+	return op
 }
 
 func getVectorIndexOpaque(opaque map[int]resetable) *vectorIndexOpaque {
-	if value, ok := opaque[SectionVectorIndex].(*vectorIndexOpaque); ok {
-		return value
-	}
-	return &vectorIndexOpaque{
-		records: make(map[string][]VectorRecord),
-		addrs:   make(map[int]int),
-	}
+	return opaque[SectionVectorIndex].(*vectorIndexOpaque)
 }
 
 func (v *vectorIndexOpaque) Reset() error {
 	clear(v.records)
 	clear(v.addrs)
+	v.backend = nil
+	v.fieldsMap = nil
 	return nil
 }
 
-func (v *vectorIndexOpaque) Set(key string, value interface{}) {
-	switch key {
-	case "config":
-		config, _ := value.(map[string]interface{})
-		v.backend = vectorSegmentBackend(config)
-	case vectorFieldsMapKey:
-		v.fieldsMap = copyVectorFieldsMap(value)
-	}
+func (v *vectorIndexOpaque) Configure(args sectionConfig) {
+	v.backend = args.options.VectorBackend
+	v.fieldsMap = args.fieldsMap
 }
 
-func copyVectorFieldsMap(value interface{}) map[string]uint16 {
-	fields, _ := value.(map[string]uint16)
-	if fields == nil {
-		return nil
-	}
-	rv := make(map[string]uint16, len(fields))
-	for field, id := range fields {
-		rv[field] = id
-	}
-	return rv
-}
-
-func writeVectorPayload(w *FileWriter, payload VectorPayload) error {
-	if payload.Backend == "" || len(payload.DocIDs) == 0 || len(payload.Data) == 0 {
-		return fmt.Errorf("empty embedded vector payload")
-	}
-	if int(payload.Dimensions) <= 0 {
-		return fmt.Errorf("embedded vector payload has invalid dimensions %d", payload.Dimensions)
-	}
-	if len(payload.DocIDs) > math.MaxInt32 {
-		return fmt.Errorf("embedded vector payload has too many vectors: %d", len(payload.DocIDs))
-	}
-
-	if _, err := writeUvarints(w, math.MaxUint64, math.MaxUint64,
-		vectorPayloadVersion, uint64(payload.Dimensions), uint64(len(payload.DocIDs))); err != nil {
+func writeVectorPayload(w *CountHashWriter, payload blugeseg.VectorPayload) error {
+	if err := writeUvarints(w, vectorPayloadVersion, uint64(payload.Dimensions), uint64(len(payload.DocIDs))); err != nil {
 		return err
 	}
-	if err := writeVectorBytes(w, []byte(payload.Backend)); err != nil {
-		return err
-	}
-	if err := writeVectorBytes(w, []byte(payload.Similarity)); err != nil {
-		return err
-	}
-
-	docBytes := make([]byte, 0, len(payload.DocIDs)*binary.MaxVarintLen64)
-	var buf [binary.MaxVarintLen64]byte
+	docBytes := make([]byte, 0, len(payload.DocIDs)*binary.MaxVarintLen32)
 	for _, docID := range payload.DocIDs {
-		n := binary.PutUvarint(buf[:], uint64(docID))
-		docBytes = append(docBytes, buf[:n]...)
+		docBytes = binary.AppendUvarint(docBytes, uint64(docID))
 	}
-	if err := writeVectorBytes(w, docBytes); err != nil {
-		return err
+	for _, data := range [][]byte{[]byte(payload.Backend), []byte(payload.Similarity), docBytes, payload.Data} {
+		if err := writeUvarints(w, uint64(len(data))); err != nil {
+			return err
+		}
+		if _, err := w.Write(data); err != nil {
+			return err
+		}
 	}
-	return writeVectorBytes(w, payload.Data)
+	return nil
 }
 
-func writeVectorBytes(w *FileWriter, data []byte) error {
-	processed := w.process(data)
-	if _, err := writeUvarints(w, uint64(len(processed))); err != nil {
-		return err
+func (sb *SegmentBase) VectorPayload(field string) (blugeseg.VectorPayload, error) {
+	fieldID := sb.fieldsMap[field]
+	if fieldID == 0 {
+		return blugeseg.VectorPayload{}, ErrVectorPayloadNotFound
 	}
-	_, err := w.Write(processed)
-	return err
-}
-
-// VectorPayload returns the opaque native payload for one field. It is kept on
-// SegmentBase so a higher-level backend can open the native index without
-// making zapx depend on that backend's runtime.
-func (sb *SegmentBase) VectorPayload(field string) (VectorPayload, error) {
-	fieldIDPlusOne, ok := sb.fieldsMap[field]
-	if !ok {
-		return VectorPayload{}, ErrVectorPayloadNotFound
-	}
-	addr := sb.fieldsSectionsMap[fieldIDPlusOne-1][SectionVectorIndex]
+	addr := sb.fieldsSectionsMap[fieldID-1][SectionVectorIndex]
 	if addr == 0 {
-		return VectorPayload{}, ErrVectorPayloadNotFound
+		return blugeseg.VectorPayload{}, ErrVectorPayloadNotFound
 	}
-	pos, err := vectorUint64ToInt(addr, "offset")
-	if err != nil {
-		return VectorPayload{}, err
+	if addr >= uint64(len(sb.mem)) {
+		return blugeseg.VectorPayload{}, fmt.Errorf("invalid vector offset")
 	}
-	return readVectorPayload(sb, pos)
+	return readVectorPayload(sb.mem[addr:])
 }
 
-func vectorUint64ToInt(value uint64, label string) (int, error) {
-	if value > uint64(^uint(0)>>1) {
-		return 0, fmt.Errorf("vector payload %s %d exceeds platform limits", label, value)
-	}
-	return int(value), nil
+type vectorPayloadReader struct {
+	data []byte
+	pos  int
 }
 
-func readVectorPayload(sb *SegmentBase, pos int) (VectorPayload, error) {
-	read := func() (uint64, error) {
-		if pos < 0 || pos >= len(sb.mem) {
-			return 0, fmt.Errorf("vector payload offset %d is out of range", pos)
-		}
-		value, n := binary.Uvarint(sb.mem[pos:])
-		if n <= 0 {
-			return 0, fmt.Errorf("invalid vector payload varint at %d", pos)
-		}
-		pos += n
-		return value, nil
+func (r *vectorPayloadReader) read() (uint64, error) {
+	value, n := binary.Uvarint(r.data[r.pos:])
+	if n <= 0 {
+		return 0, fmt.Errorf("invalid vector varint")
 	}
-	readBytes := func() ([]byte, error) {
-		length, err := read()
-		if err != nil {
-			return nil, err
-		}
-		size, err := vectorUint64ToInt(length, "length")
-		if err != nil {
-			return nil, err
-		}
-		if size > len(sb.mem)-pos {
-			return nil, fmt.Errorf("vector payload length %d exceeds segment", length)
-		}
-		data, err := sb.fileReader.process(sb.mem[pos : pos+size])
-		if err != nil {
-			return nil, err
-		}
-		pos += size
-		return data, nil
-	}
+	r.pos += n
+	return value, nil
+}
 
-	if _, err := read(); err != nil { // invalid doc-values start
-		return VectorPayload{}, err
-	}
-	if _, err := read(); err != nil { // invalid doc-values end
-		return VectorPayload{}, err
-	}
-	version, err := read()
+func (r *vectorPayloadReader) readBytes() ([]byte, error) {
+	size, err := r.read()
 	if err != nil {
-		return VectorPayload{}, err
+		return nil, err
 	}
-	if version != vectorPayloadVersion {
-		return VectorPayload{}, fmt.Errorf("unsupported vector payload version %d", version)
+	remaining := r.data[r.pos:]
+	if size > uint64(len(remaining)) {
+		return nil, fmt.Errorf("invalid vector length")
 	}
-	dimensions, err := read()
-	if err != nil {
-		return VectorPayload{}, err
-	}
-	count, err := read()
-	if err != nil {
-		return VectorPayload{}, err
-	}
-	if dimensions == 0 || dimensions > math.MaxUint32 {
-		return VectorPayload{}, fmt.Errorf("vector payload has invalid dimensions %d", dimensions)
-	}
-	backend, err := readBytes()
-	if err != nil {
-		return VectorPayload{}, err
-	}
-	similarity, err := readBytes()
-	if err != nil {
-		return VectorPayload{}, err
-	}
-	docBytes, err := readBytes()
-	if err != nil {
-		return VectorPayload{}, err
-	}
-	data, err := readBytes()
-	if err != nil {
-		return VectorPayload{}, err
-	}
+	data := remaining[:size]
+	r.pos += len(data)
+	return data, nil
+}
 
-	documentCount, err := vectorUint64ToInt(count, "document count")
-	if err != nil {
-		return VectorPayload{}, err
-	}
-	if documentCount > len(sb.mem) {
-		return VectorPayload{}, fmt.Errorf("vector payload has unreasonable document count %d", count)
-	}
-	docIDs := make([]uint32, 0, documentCount)
-	docPos := 0
-	for docPos < len(docBytes) && uint64(len(docIDs)) < count {
-		docID, n := binary.Uvarint(docBytes[docPos:])
-		if n <= 0 || docID > math.MaxUint32 {
-			return VectorPayload{}, fmt.Errorf("invalid vector document mapping")
+func readVectorPayload(data []byte) (blugeseg.VectorPayload, error) {
+	r := vectorPayloadReader{data: data}
+	var header [3]uint64
+	for i := range header {
+		value, err := r.read()
+		if err != nil {
+			return blugeseg.VectorPayload{}, err
 		}
-		docIDs = append(docIDs, uint32(docID))
-		docPos += n
+		header[i] = value
 	}
-	if uint64(len(docIDs)) != count {
-		return VectorPayload{}, fmt.Errorf("vector document mapping has %d entries, expected %d",
-			len(docIDs), count)
+	dimensions := header[1]
+	if header[0] != vectorPayloadVersion || dimensions == 0 || dimensions > math.MaxUint32 {
+		return blugeseg.VectorPayload{}, fmt.Errorf("invalid vector header")
 	}
-	if docPos != len(docBytes) {
-		return VectorPayload{}, fmt.Errorf("vector document mapping has trailing bytes")
+	var parts [4][]byte
+	for i := range parts {
+		value, err := r.readBytes()
+		if err != nil {
+			return blugeseg.VectorPayload{}, err
+		}
+		parts[i] = value
 	}
-
-	return VectorPayload{
-		Backend:    string(backend),
+	docIDs, err := readVectorDocIDs(parts[2], header[2])
+	if err != nil {
+		return blugeseg.VectorPayload{}, err
+	}
+	return blugeseg.VectorPayload{
+		Backend:    string(parts[0]),
 		Dimensions: uint32(dimensions),
-		Similarity: string(similarity),
+		Similarity: string(parts[1]),
 		DocIDs:     docIDs,
-		Data:       data,
+		Data:       parts[3],
 	}, nil
+}
+
+func readVectorDocIDs(data []byte, count uint64) ([]uint32, error) {
+	if count > uint64(len(data)) {
+		return nil, fmt.Errorf("invalid vector document count")
+	}
+	docIDs := make([]uint32, count)
+	for i := range docIDs {
+		id, n := binary.Uvarint(data)
+		if n <= 0 || id > math.MaxUint32 {
+			return nil, fmt.Errorf("invalid vector document mapping")
+		}
+		docIDs[i] = uint32(id)
+		data = data[n:]
+	}
+	if len(data) != 0 {
+		return nil, fmt.Errorf("trailing vector document mapping")
+	}
+	return docIDs, nil
 }

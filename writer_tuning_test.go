@@ -36,13 +36,13 @@ func TestOnlineWriterMemoryTuning(t *testing.T) {
 	config.indexConfig = config.indexConfig.WithSegmentPlugin(&index.SegmentPlugin{
 		Type: zapxbluge.Type, Version: zapxbluge.Version,
 		New: zapxbluge.New, Load: zapxbluge.Load,
-		MergeWithOptions: func(segments []segment.Segment, drops []*roaring.Bitmap,
-			size int, opts map[string]interface{}) segment.Merger {
+		Merge: func(segments []segment.Segment, drops []*roaring.Bitmap,
+			size int, opts segment.BuildOptions) segment.Merger {
 			merges.Add(1)
 			if size != bufferSize || len(segments) > 2 {
 				t.Errorf("merge received buffer size %d and %d segments", size, len(segments))
 			}
-			return zapxbluge.MergeWithOptions(segments, drops, size, opts)
+			return zapxbluge.Merge(segments, drops, size, opts)
 		},
 	})
 	writer, err := OpenWriter(config)

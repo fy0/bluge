@@ -150,29 +150,17 @@ func (s *BigramFilter) outputBigram(r *ring.Ring, itemsInRing *int) *analysis.To
 }
 
 func (s *BigramFilter) buildUnigram(r *ring.Ring, itemsInRing *int) *analysis.Token {
-	if *itemsInRing == 2 {
-		thisShingleRing := r.Move(-1)
-		// do first token
-		prev := thisShingleRing.Value.(*analysis.Token)
-		token := analysis.Token{
-			Type:         analysis.Single,
-			Term:         prev.Term,
-			PositionIncr: 0,
-			Start:        prev.Start,
-			End:          prev.End,
-		}
-		return &token
-	} else if *itemsInRing == 1 {
-		// do first token
-		prev := r.Value.(*analysis.Token)
-		token := analysis.Token{
-			Type:         analysis.Single,
-			Term:         prev.Term,
-			PositionIncr: 0,
-			Start:        prev.Start,
-			End:          prev.End,
-		}
-		return &token
+	var previous *analysis.Token
+	switch *itemsInRing {
+	case 2:
+		previous = r.Move(-1).Value.(*analysis.Token)
+	case 1:
+		previous = r.Value.(*analysis.Token)
+	default:
+		return nil
 	}
-	return nil
+	return &analysis.Token{
+		Type: analysis.Single, Term: previous.Term,
+		PositionIncr: 0, Start: previous.Start, End: previous.End,
+	}
 }

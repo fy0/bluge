@@ -176,7 +176,7 @@ func newStubTermFieldReader(field, term string, list stubList,
 		includeFreq:        includeFreq,
 		includeNorm:        includeNorm,
 		includeTermVectors: includeTermVectors,
-		similarity:         similarity.NewLegacyBM25Similarity(),
+		similarity:         similarity.NewBM25Similarity(),
 	}
 }
 
@@ -192,7 +192,7 @@ func (s *stubTermFieldReader) Next() (segment.Posting, error) {
 	}
 	rv.number = s.list[s.i].num
 	if s.includeFreq {
-		rv.freq = uint64(s.list[s.i].freq.freq)
+		rv.freq = s.list[s.i].freq.freq
 	}
 	if s.includeNorm {
 		tmp := s.similarity.ComputeNorm(s.list[s.i].length)
@@ -471,7 +471,7 @@ func (tfv *stubTermFieldVector) Size() int {
 type stubTermFieldDoc struct {
 	term    string
 	number  uint64
-	freq    uint64
+	freq    int
 	norm    float64
 	vectors []segment.Location
 }
@@ -486,7 +486,7 @@ func (tfd *stubTermFieldDoc) SetNumber(n uint64) {
 	tfd.number = n
 }
 func (tfd *stubTermFieldDoc) Frequency() int {
-	return int(tfd.freq)
+	return tfd.freq
 }
 func (tfd *stubTermFieldDoc) Norm() float64 {
 	return tfd.norm

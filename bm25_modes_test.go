@@ -71,7 +71,6 @@ func TestBM25ModesShareNormEncoding(t *testing.T) {
 
 	for _, sim := range []search.Similarity{
 		similarity.NewBM25Similarity(),
-		similarity.NewLegacyBM25Similarity(),
 		similarity.NewBleveBM25Similarity(),
 	} {
 		config := DefaultConfig(path)

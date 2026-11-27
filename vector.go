@@ -10,27 +10,27 @@ package bluge
 
 import (
 	"errors"
-	"fmt"
+	"maps"
+	"sync"
 
 	"github.com/fy0/bluge/index"
+	"github.com/fy0/bluge/segment"
 )
 
 var ErrVectorUnsupported = errors.New("vector search is not enabled")
 
 var (
 	ErrVectorBackendReadOnly   = errors.New("vector backend is read-only")
-	ErrVectorFieldNotFound     = errors.New("vector field was not found")
-	ErrVectorInvalidDimension  = errors.New("vector dimension is invalid")
-	ErrVectorInvalidK          = errors.New("vector k must be greater than zero")
+	ErrVectorFieldNotFound     = errors.New("vector field not found")
+	ErrVectorInvalidDimension  = errors.New("invalid dimension")
+	ErrVectorInvalidK          = errors.New("invalid k")
 	ErrVectorInvalidValue      = errors.New("vector contains NaN or infinity")
-	ErrVectorInvalidField      = errors.New("vector field is invalid")
-	ErrVectorFilterUnsupported = errors.New("vector backend does not support query filters")
-	// ErrVectorPreparedFilter rejects a PreparedVectorFilter that is nil,
-	// already closed, bound to a different reader, or whose reader is closed.
-	ErrVectorPreparedFilter = errors.New("prepared vector filter cannot be used")
+	ErrVectorInvalidField      = errors.New("invalid vector field")
+	ErrVectorFilterUnsupported = errors.New("vector filter unsupported")
+	ErrVectorPreparedFilter    = errors.New("invalid prepared filter")
 )
 
-type VectorSimilarity string
+type VectorSimilarity = segment.VectorSimilarity
 
 const (
 	VectorL2     VectorSimilarity = "l2_norm"
@@ -59,8 +59,6 @@ type VectorIndex interface {
 	Close() error
 }
 
-// VectorChange is the mutation sent to a writable vector backend after the
-// corresponding text batch has been accepted.
 type VectorChange struct {
 	ID         Identifier
 	Field      string
@@ -69,43 +67,40 @@ type VectorChange struct {
 	Delete     bool
 }
 
-// VectorBatcher is implemented by backends that can receive document changes.
-// A delete with an empty Field removes every vector belonging to the ID.
 type VectorBatcher interface {
 	ApplyVectorChanges(changes []VectorChange) error
 }
 
-// VectorBatchValidator can reject a batch before the text index is mutated.
-// Backends should implement it when dimension or metric validation depends on
-// the current index state.
-type VectorBatchValidator interface {
-	ValidateVectorChanges(changes []VectorChange) error
+type vectorBatchTransaction interface {
+	applyVectorBatch(changes []VectorChange, commit func() error) error
 }
 
-// VectorChangeValidator is the segment-integrated spelling of
-// VectorBatchValidator. It is an alias because both validators run before
-// the text batch is submitted and share the same contract.
-type VectorChangeValidator = VectorBatchValidator
+type vectorFieldSchema interface {
+	vectorFieldSpecs() map[string]VectorFieldSpec
+}
 
-// VectorSnapshotter creates a read-only point-in-time view for Reader values
-// obtained from a live Writer. It is useful for in-memory backends whose Open
-// method intentionally returns a shared writer instance.
 type VectorSnapshotter interface {
 	SnapshotVectorIndex() VectorIndex
 }
 
-// VectorCandidateSearcher lets Reader apply a Bluge Query filter before the
-// backend ranks candidates. It avoids asking an ANN/native backend to know
-// about Bluge's query language.
 type VectorCandidateSearcher interface {
 	SearchCandidates(field string, query []float32, k int,
 		allowed map[Identifier]struct{}) ([]VectorHit, error)
 }
 
-// vectorDocumentCandidateSearcher is reserved for snapshot-integrated
-// backends whose native keys can be derived directly from global document
-// numbers. Reader uses it to avoid materializing stored identifiers solely for
-// filter pushdown.
+type vectorCandidateExecutor interface {
+	searchVectorCandidates(field string, query []float32, k int,
+		allowed map[Identifier]struct{}) ([]VectorHit, error)
+}
+
+func searchVectorCandidates(index VectorIndex, field string, query []float32, k int,
+	allowed map[Identifier]struct{}) ([]VectorHit, error) {
+	if executor, ok := index.(vectorCandidateExecutor); ok {
+		return executor.searchVectorCandidates(field, query, k, allowed)
+	}
+	return index.(VectorCandidateSearcher).SearchCandidates(field, query, k, allowed)
+}
+
 type vectorDocumentCandidateSearcher interface {
 	searchDocumentCandidates(field string, query []float32, k int,
 		allowed []uint64) ([]VectorHit, error)
@@ -116,50 +111,214 @@ type VectorBackend interface {
 	Open(config Config) (VectorIndex, error)
 }
 
+type segmentVectorBackend interface {
+	VectorBackend
+	segment.VectorSegmentBackend
+	OpenSnapshot(*index.Snapshot) (VectorIndex, error)
+	VectorFieldSpecs(*index.Snapshot) (map[string]VectorFieldSpec, error)
+}
+
 func (config Config) WithVectorBackend(backend VectorBackend) Config {
 	config.VectorBackend = backend
-	if _, embedded := backend.(interface{ SegmentVectorBackend() }); embedded {
-		config.indexConfig = config.indexConfig.WithSegmentOptions(map[string]interface{}{
-			"vector_backend": backend,
-		})
-	} else {
-		config.indexConfig = config.indexConfig.WithSegmentOptions(nil)
+	options := segment.BuildOptions{}
+	if embedded, ok := backend.(segmentVectorBackend); ok {
+		options.VectorBackend = embedded
 	}
+	config.indexConfig = config.indexConfig.WithSegmentOptions(options)
 	return config
 }
 
-func usesSegmentVectorBackend(config Config) bool {
-	if config.VectorBackend == nil {
-		return false
-	}
-	_, ok := config.VectorBackend.(interface{ SegmentVectorBackend() })
-	return ok
+type vectorCoordinator interface {
+	initialize(*index.Writer) error
+	batch(*index.Batch, func() error) error
+	stage(*index.Batch, func() error) error
+	finish(func() error) error
+	reader(*index.Writer) (*index.Snapshot, VectorIndex, error)
+	close() error
 }
 
-func openVectorIndex(config Config) (VectorIndex, error) {
-	if config.VectorBackend == nil || config.VectorBackend.Name() == vectorBackendUnsupportedName ||
-		usesSegmentVectorBackend(config) {
+type vectorState struct {
+	mu       sync.Mutex
+	fields   map[string]VectorFieldSpec
+	config   Config
+	index    VectorIndex
+	embedded segmentVectorBackend
+	pending  []VectorChange
+}
+
+func newVectorState(config Config) *vectorState {
+	embedded, _ := config.VectorBackend.(segmentVectorBackend)
+	return &vectorState{config: config, embedded: embedded, fields: make(map[string]VectorFieldSpec)}
+}
+
+func openVectorCoordinator(config Config) (vectorCoordinator, error) {
+	state := newVectorState(config)
+	if state.embedded != nil {
+		return state, nil
+	}
+	var err error
+	state.index, err = state.open()
+	if schema, ok := state.index.(vectorFieldSchema); ok {
+		state.fields = schema.vectorFieldSpecs()
+	}
+	return state, err
+}
+
+func (v *vectorState) open() (VectorIndex, error) {
+	backend := v.config.VectorBackend
+	if backend == nil || backend.Name() == vectorBackendUnsupportedName {
 		return nil, nil
 	}
-	index, err := config.VectorBackend.Open(config)
-	if err != nil {
-		return nil, fmt.Errorf("open vector backend %q: %w", config.VectorBackend.Name(), err)
-	}
-	if index == nil {
-		return nil, fmt.Errorf("vector backend %q returned a nil index", config.VectorBackend.Name())
-	}
-	return index, nil
+	return backend.Open(v.config)
 }
 
-func openVectorIndexForSnapshot(config Config, snapshot *index.Snapshot) (VectorIndex, error) {
-	if snapshotBackend, ok := config.VectorBackend.(interface {
-		OpenSnapshot(*index.Snapshot) (VectorIndex, error)
-	}); ok {
-		vector, err := snapshotBackend.OpenSnapshot(snapshot)
-		if errors.Is(err, ErrVectorUnsupported) {
-			return nil, nil
+func (v *vectorState) changes(batch *index.Batch) ([]VectorChange, error) {
+	if v.index == nil && v.embedded == nil {
+		hasVectors, err := batchContainsVectors(batch)
+		if hasVectors {
+			return nil, ErrVectorUnsupported
 		}
-		return vector, err
+		return nil, err
 	}
-	return openVectorIndex(config)
+	changes, err := vectorChangesForBatch(batch)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePublicVectorChanges(changes); err != nil {
+		return nil, err
+	}
+	return changes, nil
+}
+
+func mergeVectorFieldSpecs(changes []VectorChange, fields map[string]VectorFieldSpec) (map[string]VectorFieldSpec, error) {
+	next := maps.Clone(fields)
+	for _, change := range changes {
+		if change.Delete {
+			continue
+		}
+		spec := VectorFieldSpec{Name: change.Field, Dims: len(change.Vector), Similarity: change.Similarity}
+		if prior, ok := next[change.Field]; ok {
+			if prior.Dims != spec.Dims {
+				return nil, ErrVectorInvalidDimension
+			}
+			if prior.Similarity != spec.Similarity {
+				return nil, ErrVectorInvalidField
+			}
+		}
+		next[change.Field] = spec
+	}
+	return next, nil
+}
+
+func (v *vectorState) initialize(writer *index.Writer) error {
+	if v.embedded == nil {
+		return nil
+	}
+	snapshot, err := writer.Reader()
+	if err != nil {
+		return err
+	}
+	defer snapshot.Close()
+	v.fields, err = v.embedded.VectorFieldSpecs(snapshot)
+	return err
+}
+
+func (v *vectorState) commit(changes []VectorChange, commit func() error) error {
+	if v.embedded != nil || v.index == nil || len(changes) == 0 {
+		return commit()
+	}
+	if transaction, ok := v.index.(vectorBatchTransaction); ok {
+		return transaction.applyVectorBatch(changes, commit)
+	}
+	batcher, writable := v.index.(VectorBatcher)
+	if !writable {
+		for _, change := range changes {
+			if !change.Delete {
+				return ErrVectorBackendReadOnly
+			}
+		}
+		return commit()
+	}
+	if err := commit(); err != nil {
+		return err
+	}
+	return batcher.ApplyVectorChanges(changes)
+}
+
+func (v *vectorState) snapshot(snapshot *index.Snapshot) (VectorIndex, error) {
+	if v.embedded != nil {
+		return v.embedded.OpenSnapshot(snapshot)
+	}
+	if snapshotter, ok := v.index.(VectorSnapshotter); ok {
+		return snapshotter.SnapshotVectorIndex(), nil
+	}
+	return v.open()
+}
+
+func (v *vectorState) batch(batch *index.Batch, commit func() error) error {
+	return v.write(batch, commit, false)
+}
+
+func (v *vectorState) stage(batch *index.Batch, commit func() error) error {
+	return v.write(batch, commit, true)
+}
+
+func (v *vectorState) write(batch *index.Batch, commit func() error, deferred bool) error {
+	if v.embedded != nil || v.index != nil {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+	}
+	changes, err := v.changes(batch)
+	if err != nil {
+		return err
+	}
+	fields := v.fields
+	if len(changes) > 0 {
+		fields, err = mergeVectorFieldSpecs(changes, fields)
+		if err != nil {
+			return err
+		}
+	}
+	if deferred {
+		err = commit()
+		if err == nil && v.index != nil {
+			v.pending = append(v.pending, changes...)
+		}
+	} else {
+		err = v.commit(changes, commit)
+	}
+	if err == nil && len(changes) > 0 {
+		v.fields = fields
+	}
+	return err
+}
+
+func (v *vectorState) finish(commit func() error) error {
+	if err := commit(); err != nil {
+		return err
+	}
+	return v.commit(v.pending, func() error { return nil })
+}
+
+func (v *vectorState) reader(writer *index.Writer) (*index.Snapshot, VectorIndex, error) {
+	if v.embedded != nil || v.index != nil {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+	}
+	text, err := writer.Reader()
+	if err != nil {
+		return nil, nil, err
+	}
+	vector, err := v.snapshot(text)
+	if err != nil {
+		_ = text.Close()
+		return nil, nil, err
+	}
+	return text, vector, nil
+}
+
+func (v *vectorState) close() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return closeVectorIndex(v.index)
 }

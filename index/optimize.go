@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	segment "github.com/fy0/bluge/segment"
 )
 

@@ -29,13 +29,11 @@ type chunkedIntDecoder struct {
 	uncompressed    []byte
 	data            []byte
 	r               *memUvarintReader
-	fr              *FileReader
 
 	bytesRead uint64
 }
 
-// newChunkedIntDecoder expects an optional or reset chunkedIntDecoder for better reuse.
-func newChunkedIntDecoder(buf []byte, offset uint64, rv *chunkedIntDecoder, fr *FileReader) *chunkedIntDecoder {
+func newChunkedIntDecoder(buf []byte, offset uint64, rv *chunkedIntDecoder) *chunkedIntDecoder {
 	if rv == nil {
 		rv = &chunkedIntDecoder{startOffset: offset, data: buf}
 	} else {
@@ -52,26 +50,20 @@ func newChunkedIntDecoder(buf []byte, offset uint64, rv *chunkedIntDecoder, fr *
 	}
 
 	n += uint64(read)
-	if cap(rv.chunkOffsets) >= int(numChunks) {
-		rv.chunkOffsets = rv.chunkOffsets[:int(numChunks)]
+	if uint64(cap(rv.chunkOffsets)) >= numChunks {
+		rv.chunkOffsets = rv.chunkOffsets[:numChunks]
 	} else {
-		rv.chunkOffsets = make([]uint64, int(numChunks))
+		rv.chunkOffsets = make([]uint64, numChunks)
 	}
-	for i := 0; i < int(numChunks); i++ {
+	for i := range rv.chunkOffsets {
 		rv.chunkOffsets[i], read = binary.Uvarint(buf[offset+n : offset+n+binary.MaxVarintLen64])
 		n += uint64(read)
 	}
 	rv.bytesRead += n
 	rv.dataStartOffset = offset + n
-	rv.fr = fr
 	return rv
 }
 
-// A util function which fetches the query time
-// specific bytes encoded by intcoder (for eg the
-// freqNorm and location details of a term in document)
-// the loadChunk retrieves the next chunk and the
-// number of bytes retrieve in that operation is accounted
 func (d *chunkedIntDecoder) getBytesRead() uint64 {
 	return d.bytesRead
 }
@@ -93,10 +85,7 @@ func (d *chunkedIntDecoder) loadChunk(chunk int) error {
 	end += e
 
 	var err error
-	encoded, err := d.fr.process(d.data[start:end])
-	if err != nil {
-		return fmt.Errorf("error processing chunk %d: %w", chunk, err)
-	}
+	encoded := d.data[start:end]
 	if len(encoded) == 0 {
 		return fmt.Errorf("empty encoded integer chunk %d", chunk)
 	}
@@ -136,7 +125,7 @@ func (d *chunkedIntDecoder) reset() {
 }
 
 func (d *chunkedIntDecoder) isNil() bool {
-	return d.curChunkBytes == nil || len(d.curChunkBytes) == 0
+	return len(d.curChunkBytes) == 0
 }
 
 func (d *chunkedIntDecoder) readUvarint() (uint64, error) {

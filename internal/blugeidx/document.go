@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	bleveindex "github.com/blevesearch/bleve_index_api"
+
 	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/analysis"
@@ -44,7 +45,7 @@ type Vector struct {
 func NewVector(name string, values []float32, similarity string) *Vector {
 	return &Vector{
 		name:       name,
-		values:     append([]float32(nil), values...),
+		values:     values,
 		similarity: similarity,
 	}
 }
@@ -53,35 +54,16 @@ func (v *Vector) Name() string       { return v.name }
 func (v *Vector) Values() []float32  { return v.values }
 func (v *Vector) Similarity() string { return v.similarity }
 
-// FromSegmentDocument preserves native Bluge token frequencies when the field
-// exposes them and falls back to the segment API for custom fields.
 func FromSegmentDocument(doc blugeseg.Document) (*Document, error) {
-	if doc == nil {
-		return nil, fmt.Errorf("nil document")
-	}
-
 	var fields []*Field
 	var vectors []*Vector
-	var conversionErr error
 	doc.EachField(func(field blugeseg.Field) {
-		if conversionErr != nil {
+		if values, similarity, ok := VectorFromField(field); ok {
+			vectors = append(vectors, NewVector(field.Name(), values, similarity))
 			return
 		}
-		if field == nil {
-			conversionErr = fmt.Errorf("nil field")
-			return
-		}
-		if vectorField, ok := field.(interface{ VectorValue() []float32 }); ok {
-			similarity := "cosine"
-			vectors = append(vectors, NewVector(field.Name(), vectorField.VectorValue(), similarity))
-			return
-		}
-
 		fields = append(fields, newField(field))
 	})
-	if conversionErr != nil {
-		return nil, conversionErr
-	}
 	rv, err := NewDocument(fields)
 	if err != nil {
 		return nil, err
@@ -90,14 +72,26 @@ func FromSegmentDocument(doc blugeseg.Document) (*Document, error) {
 	return rv, nil
 }
 
+func VectorFromField(field blugeseg.Field) ([]float32, string, bool) {
+	value, ok := field.(blugeseg.VectorFieldValue)
+	if !ok {
+		return nil, "", false
+	}
+	var similarity string
+	if configured, ok := field.(blugeseg.VectorField); ok {
+		similarity = string(configured.VectorSimilarity())
+	}
+	if similarity == "" {
+		similarity = "cosine"
+	}
+	return value.VectorValue(), similarity, true
+}
+
 // NewDocument creates a native build document from already analyzed fields.
 func NewDocument(fields []*Field) (*Document, error) {
 	rv := &Document{fields: fields}
 	var idStored bool
 	for _, field := range fields {
-		if field == nil {
-			return nil, fmt.Errorf("nil field")
-		}
 		if field.name == IDFieldName {
 			field.options |= bleveindex.IndexField | bleveindex.StoreField
 			idStored = true
@@ -128,12 +122,6 @@ func (d *Document) VisitVectors(visitor func(*Vector)) {
 	}
 }
 
-func (d *Document) AddVector(vector *Vector) {
-	if vector != nil {
-		d.vectors = append(d.vectors, vector)
-	}
-}
-
 func (d *Document) NumPlainTextBytes() uint64 { return d.numPlainTextBytes }
 func (d *Document) StoredFieldsBytes() uint64 { return d.storedFieldsBytes }
 func (d *Document) Indexed() bool             { return d.indexedFieldExists }
@@ -150,8 +138,6 @@ type plainTextSizedField interface {
 	NumPlainTextBytes() int
 }
 
-// Field retains the source field for compatibility while providing direct
-// access to Bluge's native token map on the common path.
 type Field struct {
 	name               string
 	value              []byte
@@ -194,6 +180,9 @@ func newField(field blugeseg.Field) *Field {
 	}
 	if field.IndexDocValues() {
 		rv.options |= bleveindex.DocValues
+	}
+	if canonical, ok := field.(blugeseg.CanonicalDocValuesField); ok {
+		rv.canonicalDocValues = canonical.CanonicalDocValues()
 	}
 	if native, ok := field.(analyzedField); ok {
 		rv.analyzedTokenFreqs = native.AnalyzedTokenFrequencies()

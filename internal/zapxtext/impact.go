@@ -30,7 +30,6 @@ type impactCoder struct {
 	frontier      [impactBlockSize]blugeseg.Impact
 	frontierLen   int
 	encodedBlocks []byte
-	raw           []byte
 	buf           [binary.MaxVarintLen64]byte
 }
 
@@ -81,8 +80,6 @@ func (c *impactCoder) flushBlock() {
 		return
 	}
 	frontier := c.frontier[:c.frontierLen]
-	// The frontier has at most 64 entries; insertion sort avoids a per-block
-	// interface allocation from sort.Slice.
 	for i := 1; i < len(frontier); i++ {
 		impact := frontier[i]
 		j := i
@@ -115,40 +112,23 @@ func (c *impactCoder) writeUvarint(value uint64) {
 	c.encodedBlocks = binary.AppendUvarint(c.encodedBlocks, value)
 }
 
-func (c *impactCoder) writeAt(w *FileWriter) (uint64, error) {
+func (c *impactCoder) writeAt(w *CountHashWriter) (uint64, error) {
 	if !c.enabled {
 		return 0, nil
 	}
 	c.flushBlock()
 
 	blockCountLen := binary.PutUvarint(c.buf[:], c.blocks)
-	if w.processor == nil {
-		// The default writer can stream the header and retained buffer directly.
-		offset := uint64(w.Count())
-		n := binary.PutUvarint(c.buf[:], uint64(blockCountLen+len(c.encodedBlocks)))
-		if _, err := w.Write(c.buf[:n]); err != nil {
-			return 0, err
-		}
-		n = binary.PutUvarint(c.buf[:], c.blocks)
-		if _, err := w.Write(c.buf[:n]); err != nil {
-			return 0, err
-		}
-		if _, err := w.Write(c.encodedBlocks); err != nil {
-			return 0, err
-		}
-		return offset, nil
-	}
-
-	c.raw = binary.AppendUvarint(c.raw[:0], c.blocks)
-	c.raw = append(c.raw, c.encodedBlocks...)
-	encoded := w.process(c.raw)
-
-	offset := uint64(w.Count())
-	n := binary.PutUvarint(c.buf[:], uint64(len(encoded)))
+	offset := w.Count()
+	n := binary.PutUvarint(c.buf[:], uint64(blockCountLen+len(c.encodedBlocks)))
 	if _, err := w.Write(c.buf[:n]); err != nil {
 		return 0, err
 	}
-	if _, err := w.Write(encoded); err != nil {
+	n = binary.PutUvarint(c.buf[:], c.blocks)
+	if _, err := w.Write(c.buf[:n]); err != nil {
+		return 0, err
+	}
+	if _, err := w.Write(c.encodedBlocks); err != nil {
 		return 0, err
 	}
 	return offset, nil
@@ -197,10 +177,10 @@ func (d *impactDecoder) advanceShallow(docNum uint64) (uint64, []blugeseg.Impact
 		if count == 0 || count > impactBlockSize {
 			return 0, nil, false, fmt.Errorf("invalid impact count %d", count)
 		}
-		if cap(d.impacts) < int(count) {
-			d.impacts = make([]blugeseg.Impact, int(count))
+		if uint64(cap(d.impacts)) < count {
+			d.impacts = make([]blugeseg.Impact, count)
 		} else {
-			d.impacts = d.impacts[:int(count)]
+			d.impacts = d.impacts[:count]
 		}
 		for i := range d.impacts {
 			freq, err := d.readUvarint()

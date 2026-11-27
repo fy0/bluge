@@ -22,8 +22,6 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 )
 
-// writes out the length of the roaring bitmap in bytes as varint
-// then writes out the roaring bitmap itself
 func writeRoaringWithLen(r *roaring.Bitmap, w io.Writer,
 	reuseBufVarint []byte) (int, error) {
 	buf, err := r.ToBytes()
@@ -33,11 +31,6 @@ func writeRoaringWithLen(r *roaring.Bitmap, w io.Writer,
 
 	var tw int
 
-	if fw, ok := w.(*FileWriter); ok && fw != nil {
-		buf = fw.process(buf)
-	}
-
-	// write out the length
 	n := binary.PutUvarint(reuseBufVarint, uint64(len(buf)))
 	nw, err := w.Write(reuseBufVarint[:n])
 	tw += nw
@@ -45,7 +38,6 @@ func writeRoaringWithLen(r *roaring.Bitmap, w io.Writer,
 		return tw, err
 	}
 
-	// write out the roaring bytes
 	nw, err = w.Write(buf)
 	tw += nw
 	if err != nil {
@@ -56,50 +48,42 @@ func writeRoaringWithLen(r *roaring.Bitmap, w io.Writer,
 }
 
 func persistFieldsSection(fieldsInv []string,
-	fieldsOptions map[string]index.FieldIndexingOptions, w *FileWriter,
+	fieldsOptions map[string]index.FieldIndexingOptions, w *CountHashWriter,
 	opaque map[int]resetable, stats []fieldStats) (uint64, error) {
 	var rv uint64
 	fieldsOffsets := make([]uint64, 0, len(fieldsInv))
 
 	for fieldID, fieldName := range fieldsInv {
-		// record start of this field
-		fieldsOffsets = append(fieldsOffsets, uint64(w.Count()))
+		fieldsOffsets = append(fieldsOffsets, w.Count())
 		fieldOpts := fieldsOptions[fieldName]
-		fieldName := w.process([]byte(fieldName))
+		fieldName := []byte(fieldName)
 
-		// write field name length
-		_, err := writeUvarints(w, uint64(len(fieldName)))
+		err := writeUvarints(w, uint64(len(fieldName)))
 		if err != nil {
 			return 0, err
 		}
 
-		// write out the field name
 		_, err = w.Write(fieldName)
 		if err != nil {
 			return 0, err
 		}
 
-		// write out the field options
-		_, err = writeUvarints(w, uint64(fieldOpts))
+		err = writeUvarints(w, uint64(fieldOpts))
 		if err != nil {
 			return 0, err
 		}
 
-		// write out the number of field-specific indexes
-		_, err = writeUvarints(w, uint64(len(segmentSections)))
+		err = writeUvarints(w, uint64(len(segmentSections)))
 		if err != nil {
 			return 0, err
 		}
 
-		// now write pairs of index section ids, and start addresses for each field
-		// which has a specific section's data. this serves as the starting point
-		// using which a field's section data can be read and parsed.
 		for segmentSectionType, segmentSectionImpl := range segmentSections {
-			err = binary.Write(w, binary.BigEndian, segmentSectionType)
+			err = binary.Write(w, binary.BigEndian, uint16(segmentSectionType))
 			if err != nil {
 				return 0, err
 			}
-			err = binary.Write(w, binary.BigEndian, uint64(segmentSectionImpl.AddrForField(opaque, fieldID)))
+			err = binary.Write(w, binary.BigEndian, segmentSectionImpl.AddrForField(opaque, fieldID))
 			if err != nil {
 				return 0, err
 			}
@@ -109,19 +93,17 @@ func persistFieldsSection(fieldsInv []string,
 		if fieldID < len(stats) {
 			fieldStats = stats[fieldID]
 		}
-		_, err = writeUvarints(w, fieldStats.documentCount, fieldStats.sumTotalTermFrequency)
+		err = writeUvarints(w, fieldStats.documentCount, fieldStats.sumTotalTermFrequency)
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	rv = uint64(w.Count())
-	// write out number of fields
-	_, err := writeUvarints(w, uint64(len(fieldsInv)))
+	rv = w.Count()
+	err := writeUvarints(w, uint64(len(fieldsInv)))
 	if err != nil {
 		return 0, err
 	}
-	// now write out the fields index
 	for fieldID := range fieldsInv {
 		err := binary.Write(w, binary.BigEndian, fieldsOffsets[fieldID])
 		if err != nil {
@@ -132,59 +114,38 @@ func persistFieldsSection(fieldsInv []string,
 	return rv, nil
 }
 
-// FooterSize is the size of the footer record in bytes
-// crc + id length + ver + chunk + sectionsIndexOffset + stored offset + num docs
-// Does not include the length of the id because it is variable length
-const FooterSize = 4 + 4 + 4 + 4 + 8 + 8 + 8
+const FooterSize = 36
 
 func persistFooter(numDocs, storedIndexOffset, sectionsIndexOffset uint64,
-	chunkMode, crcBeforeFooter uint32, writerIn io.Writer, fileWriterID string) error {
+	chunkMode, crcBeforeFooter uint32, writerIn io.Writer) error {
 	w := NewCountHashWriter(writerIn)
 	w.crc = crcBeforeFooter
 
-	// Write the writer id
-	_, err := w.Write([]byte(fileWriterID))
+	err := binary.Write(w, binary.BigEndian, numDocs)
 	if err != nil {
 		return err
 	}
 
-	// Write the length of the writer id
-	err = binary.Write(w, binary.BigEndian, uint32(len(fileWriterID)))
-	if err != nil {
-		return err
-	}
-
-	// write out the number of docs
-	err = binary.Write(w, binary.BigEndian, numDocs)
-	if err != nil {
-		return err
-	}
-
-	// write out the stored field index location:
 	err = binary.Write(w, binary.BigEndian, storedIndexOffset)
 	if err != nil {
 		return err
 	}
 
-	// write out the sections index location
 	err = binary.Write(w, binary.BigEndian, sectionsIndexOffset)
 	if err != nil {
 		return err
 	}
 
-	// write out 32-bit chunk factor
 	err = binary.Write(w, binary.BigEndian, chunkMode)
 	if err != nil {
 		return err
 	}
 
-	// write out 32-bit version
 	err = binary.Write(w, binary.BigEndian, Version)
 	if err != nil {
 		return err
 	}
 
-	// write out CRC-32 of everything upto but not including this CRC
 	err = binary.Write(w, binary.BigEndian, w.crc)
 	if err != nil {
 		return err
@@ -192,16 +153,13 @@ func persistFooter(numDocs, storedIndexOffset, sectionsIndexOffset uint64,
 	return nil
 }
 
-func writeUvarints(w io.Writer, vals ...uint64) (tw int, err error) {
-	buf := make([]byte, binary.MaxVarintLen64)
-	for _, val := range vals {
-		n := binary.PutUvarint(buf, val)
-		var nw int
-		nw, err = w.Write(buf[:n])
-		tw += nw
-		if err != nil {
-			return tw, err
+func writeUvarints(w io.Writer, vals ...uint64) error {
+	var buf [binary.MaxVarintLen64]byte
+	for _, value := range vals {
+		n := binary.PutUvarint(buf[:], value)
+		if _, err := w.Write(buf[:n]); err != nil {
+			return err
 		}
 	}
-	return tw, err
+	return nil
 }

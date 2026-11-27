@@ -17,6 +17,7 @@ package nl
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/dutch"
+
 	"github.com/fy0/bluge/analysis"
 )
 

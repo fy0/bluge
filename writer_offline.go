@@ -24,10 +24,9 @@ import (
 )
 
 type OfflineWriter struct {
-	config               Config
-	writer               *index.WriterOffline
-	vector               VectorIndex
-	pendingVectorChanges []VectorChange
+	config Config
+	writer *index.WriterOffline
+	vector vectorCoordinator
 
 	batchSize  int
 	batch      *index.Batch
@@ -49,16 +48,14 @@ func OpenOfflineWriter(config Config, batchSize, maxSegmentsToMerge int) (*Offli
 	}
 
 	var err error
-	rv.vector, err = openVectorIndex(config)
+	rv.vector, err = openVectorCoordinator(config)
 	if err != nil {
 		return nil, err
 	}
 	rv.writer, err = index.OpenOfflineWriterWithMergeMax(
 		config.indexConfigForWriting(), maxSegmentsToMerge)
 	if err != nil {
-		if rv.vector != nil {
-			_ = rv.vector.Close()
-		}
+		_ = rv.vector.close()
 		return nil, fmt.Errorf("error opening index: %w", err)
 	}
 
@@ -110,44 +107,8 @@ func (w *OfflineWriter) flushBatch() error {
 	if w.batchCount == 0 {
 		return nil
 	}
-	segmentVectors := usesSegmentVectorBackend(w.config)
-	if w.vector == nil && !segmentVectors {
-		hasVectors, err := batchContainsVectors(w.batch)
-		if err != nil {
-			return err
-		}
-		if hasVectors {
-			return ErrVectorUnsupported
-		}
-		if err := w.writer.Batch(w.batch); err != nil {
-			return err
-		}
-		w.batch.Reset()
-		w.batchCount = 0
-		return nil
-	}
-
-	changes, hasVectors, err := vectorChangesForBatch(w.batch)
-	if err != nil {
+	if err := w.vector.stage(w.batch, func() error { return w.writer.Batch(w.batch) }); err != nil {
 		return err
-	}
-	if hasVectors && w.vector == nil && !segmentVectors {
-		return ErrVectorUnsupported
-	}
-	if segmentVectors {
-		if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
-			if err := validator.ValidateVectorChanges(changes); err != nil {
-				return err
-			}
-		}
-	} else if err := validateVectorChanges(w.vector, changes, hasVectors); err != nil {
-		return err
-	}
-	if err := w.writer.Batch(w.batch); err != nil {
-		return err
-	}
-	if _, ok := w.vector.(VectorBatcher); ok {
-		w.pendingVectorChanges = append(w.pendingVectorChanges, changes...)
 	}
 	w.batch.Reset()
 	w.batchCount = 0
@@ -163,11 +124,6 @@ func (w *OfflineWriter) Close() error {
 	if w.batchCount > 0 {
 		batchErr = w.flushBatch()
 	}
-	closeErr := w.writer.Close()
-	var vectorErr error
-	if closeErr == nil && len(w.pendingVectorChanges) > 0 {
-		vectorErr = applyVectorChanges(w.vector, w.pendingVectorChanges, true)
-	}
-	vectorCloseErr := closeVectorIndex(w.vector)
-	return errors.Join(batchErr, closeErr, vectorErr, vectorCloseErr)
+	commitErr := w.vector.finish(w.writer.Close)
+	return errors.Join(batchErr, commitErr, w.vector.close())
 }

@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/bits-and-blooms/bitset"
+
 	"github.com/fy0/bluge/analysis"
 )
 

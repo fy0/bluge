@@ -9,17 +9,20 @@
 package bluge
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"unsafe"
+
+	"github.com/fy0/bluge/internal/fsatomic"
 )
 
 const usearchManifestVersion = uint32(1)
@@ -32,9 +35,6 @@ type USearchVectorOptions struct {
 	ExpansionSearch int
 }
 
-// USearchHardwareInfo reports the ISA families compiled into the native library
-// and the subset available on the current CPU. It is useful for diagnosing a
-// serial fallback or a mismatched release artifact.
 type USearchHardwareInfo struct {
 	Compiled  string
 	Available string
@@ -65,23 +65,12 @@ func (o USearchVectorOptions) normalized() (USearchVectorOptions, error) {
 	return o, nil
 }
 
-// USearchVectorBackend stores one USearch HNSW index per vector field. path is
-// a directory containing the manifest and native index files. The native library
-// is loaded through a small C ABI and can be supplied explicitly with
-// NewUSearchVectorBackendWithLibrary or BLUGE_USEARCH_LIBRARY_PATH.
-//
-// The algorithm, graph construction, distance kernels, deletion and native
-// serialization are provided by USearch. This type owns only the Bluge ID
-// mapping, field metadata, and the sidecar lifecycle.
 type USearchVectorBackend struct {
 	path        string
 	libraryPath string
 	options     USearchVectorOptions
 }
 
-// NewUSearchVectorBackend creates a persistent USearch backend. The native
-// library is resolved from BLUGE_USEARCH_LIBRARY_PATH, the executable
-// directory, or the platform library search path.
 func NewUSearchVectorBackend(path string) *USearchVectorBackend {
 	return &USearchVectorBackend{
 		path:    path,
@@ -89,25 +78,18 @@ func NewUSearchVectorBackend(path string) *USearchVectorBackend {
 	}
 }
 
-// NewUSearchVectorBackendWithLibrary creates a persistent backend with an
-// explicit path to the separately-built native library.
 func NewUSearchVectorBackendWithLibrary(path, libraryPath string) *USearchVectorBackend {
 	backend := NewUSearchVectorBackend(path)
 	backend.libraryPath = libraryPath
 	return backend
 }
 
-// NewUSearchVectorBackendWithOptions creates a backend with explicit HNSW
-// construction and search parameters.
 func NewUSearchVectorBackendWithOptions(path string, options USearchVectorOptions) *USearchVectorBackend {
 	return &USearchVectorBackend{path: path, options: options}
 }
 
 // WithLibraryPath returns a copy configured to load libraryPath.
 func (b *USearchVectorBackend) WithLibraryPath(libraryPath string) *USearchVectorBackend {
-	if b == nil {
-		return nil
-	}
 	copy := *b
 	copy.libraryPath = libraryPath
 	return &copy
@@ -116,7 +98,7 @@ func (b *USearchVectorBackend) WithLibraryPath(libraryPath string) *USearchVecto
 func (b *USearchVectorBackend) Name() string { return vectorBackendUSearchName }
 
 func (b *USearchVectorBackend) Open(_ Config) (VectorIndex, error) {
-	if b == nil || b.path == "" {
+	if b.path == "" {
 		return nil, errors.New("usearch vector backend requires a sidecar directory")
 	}
 	options, err := b.options.normalized()
@@ -130,21 +112,12 @@ func (b *USearchVectorBackend) Open(_ Config) (VectorIndex, error) {
 	return openUSearchVectorIndex(api, b.path, options)
 }
 
-// HardwareAcceleration inspects the separately-built native library without
-// opening a vector sidecar. Older ABI-compatible libraries may not expose the
-// optional probe symbols; those return empty strings.
 func (b *USearchVectorBackend) HardwareAcceleration() (USearchHardwareInfo, error) {
-	if b == nil {
-		return USearchHardwareInfo{}, errors.New("nil usearch vector backend")
-	}
 	api, err := loadUSearchAPI(b.libraryPath)
 	if err != nil {
 		return USearchHardwareInfo{}, err
 	}
-	probe, ok := api.(usearchHardwareAPI)
-	if !ok {
-		return USearchHardwareInfo{}, nil
-	}
+	probe := api.(usearchHardwareAPI)
 	return USearchHardwareInfo{
 		Compiled:  probe.hardwareAccelerationCompiled(),
 		Available: probe.hardwareAccelerationAvailable(),
@@ -172,16 +145,7 @@ type usearchBatchAdder struct {
 
 func newUSearchBatchAdder(api usearchNativeAPI, handle unsafe.Pointer,
 	dimensions int) *usearchBatchAdder {
-	rows := 1
-	if dimensions > 0 {
-		rows = usearchBatchTargetFloats / dimensions
-		if rows < 1 {
-			rows = 1
-		}
-		if rows > usearchBatchMaxRows {
-			rows = usearchBatchMaxRows
-		}
-	}
+	rows := max(1, min(usearchBatchTargetFloats/dimensions, usearchBatchMaxRows))
 	return &usearchBatchAdder{
 		api:        api,
 		handle:     handle,
@@ -192,10 +156,6 @@ func newUSearchBatchAdder(api usearchNativeAPI, handle unsafe.Pointer,
 }
 
 func (b *usearchBatchAdder) Add(key uint64, vector []float32) error {
-	if len(vector) != b.dimensions {
-		return fmt.Errorf("%w: batch vector has %d dimensions, expected %d",
-			ErrVectorInvalidDimension, len(vector), b.dimensions)
-	}
 	if len(b.keys) == cap(b.keys) {
 		if err := b.Flush(); err != nil {
 			return err
@@ -335,198 +295,156 @@ func (u *usearchVectorIndex) destroyLocked() {
 	}
 }
 
-func (u *usearchVectorIndex) ValidateVectorChanges(changes []VectorChange) error {
+func (u *usearchVectorIndex) vectorFieldSpecs() map[string]VectorFieldSpec {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	if u.closed {
-		return errors.New("usearch vector index is closed")
-	}
-	return validateUsearchVectorChanges(changes, u.manifest.Fields)
-}
-
-func validateUsearchVectorChanges(changes []VectorChange,
-	fields map[string]VectorFieldSpec) error {
-	nextFields := make(map[string]VectorFieldSpec, len(fields))
-	for field, spec := range fields {
-		nextFields[field] = spec
-	}
-	for _, change := range changes {
-		if change.Delete {
-			continue
-		}
-		if err := validateVectorChange(change); err != nil {
-			return err
-		}
-		spec, ok := nextFields[change.Field]
-		if !ok {
-			nextFields[change.Field] = VectorFieldSpec{
-				Name:       change.Field,
-				Dims:       len(change.Vector),
-				Similarity: change.Similarity,
-			}
-			continue
-		}
-		if spec.Dims != len(change.Vector) {
-			return fmt.Errorf("%w: field %q has %d dimensions, got %d",
-				ErrVectorInvalidDimension, change.Field, spec.Dims, len(change.Vector))
-		}
-		if spec.Similarity != change.Similarity {
-			return fmt.Errorf("field %q changes similarity from %q to %q",
-				change.Field, spec.Similarity, change.Similarity)
-		}
-	}
-	return nil
+	return maps.Clone(u.manifest.Fields)
 }
 
 func (u *usearchVectorIndex) ApplyVectorChanges(changes []VectorChange) error {
-	if len(changes) == 0 {
-		return nil
+	if err := validatePublicVectorChanges(changes); err != nil {
+		return err
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	if _, err := mergeVectorFieldSpecs(changes, u.manifest.Fields); err != nil {
+		return err
+	}
+	return u.applyVectorBatchLocked(changes, func() error { return nil })
+}
+
+func (u *usearchVectorIndex) applyVectorBatch(changes []VectorChange, commit func() error) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.applyVectorBatchLocked(changes, commit)
+}
+
+func (u *usearchVectorIndex) applyVectorBatchLocked(changes []VectorChange, commit func() error) error {
 	if u.closed {
 		return errors.New("usearch vector index is closed")
 	}
-	if err := validateUsearchVectorChanges(changes, u.manifest.Fields); err != nil {
+	if err := commit(); err != nil {
 		return err
 	}
-
-	dirty := make(map[string]struct{})
-	removals := make(map[string]map[uint64]struct{})
-	additions := make(map[string]map[uint64][]float32)
-	compact := make(map[string]bool)
-	queueRemoval := func(field string, key uint64, shouldCompact bool) {
-		fieldRemovals := removals[field]
-		if fieldRemovals == nil {
-			fieldRemovals = make(map[uint64]struct{})
-			removals[field] = fieldRemovals
-		}
-		fieldRemovals[key] = struct{}{}
-		dirty[field] = struct{}{}
-		if shouldCompact {
-			compact[field] = true
-		}
-	}
-	for _, change := range changes {
-		key, known := u.manifest.IDs[string(change.ID)]
-		if change.Delete {
-			if !known {
-				continue
-			}
-			if change.Field == "" {
-				for field := range u.indices {
-					queueRemoval(field, key, true)
-					delete(additions[field], key)
-				}
-			} else if u.indices[change.Field] != nil {
-				queueRemoval(change.Field, key, true)
-				delete(additions[change.Field], key)
-			}
-			continue
-		}
-
-		if !known {
-			key = u.manifest.NextKey
-			if key == 0 {
-				key = 1
-			}
-			u.manifest.NextKey = key + 1
-			u.manifest.IDs[string(change.ID)] = key
-			u.reverse[key] = change.ID
-		}
-
-		spec := u.manifest.Fields[change.Field]
-		handle := u.indices[change.Field]
-		if handle == nil {
-			spec = VectorFieldSpec{
-				Name:       change.Field,
-				Dims:       len(change.Vector),
-				Similarity: change.Similarity,
-			}
-			handle = u.api.create(uintptr(spec.Dims), usearchMetric(spec.Similarity),
-				uintptr(u.options.Connectivity), uintptr(u.options.ExpansionAdd),
-				uintptr(u.options.ExpansionSearch))
-			if handle == nil {
-				return fmt.Errorf("create usearch field %q: native index could not be created", change.Field)
-			}
-			u.indices[change.Field] = handle
-			u.manifest.Fields[change.Field] = spec
-		}
-
-		// Replacement semantics match the flat backend and make direct
-		// VectorBatcher callers idempotent even without an explicit delete.
-		queueRemoval(change.Field, key, false)
-		fieldAdditions := additions[change.Field]
-		if fieldAdditions == nil {
-			fieldAdditions = make(map[uint64][]float32)
-			additions[change.Field] = fieldAdditions
-		}
-		fieldAdditions[key] = change.Vector
-	}
-
-	fields := make([]string, 0, len(dirty))
-	for field := range dirty {
-		fields = append(fields, field)
-	}
-	sort.Strings(fields)
-	for _, field := range fields {
-		handle := u.indices[field]
-		if handle == nil {
-			continue
-		}
-		removeKeys := sortedUSearchKeys(removals[field])
-		if len(removeKeys) > 0 {
-			if err := u.nativeStatus(handle, u.api.removeBatch(handle, removeKeys), "remove batch"); err != nil {
-				return err
-			}
-		}
-		if compact[field] && len(removeKeys) > 0 {
-			// USearch keeps deleted slots until compaction. Compact only
-			// batches containing deletes, where reclaiming those slots also
-			// bounds long-running update/delete workloads.
-			if err := u.nativeStatus(handle, u.api.compact(handle), "compact"); err != nil {
-				return err
-			}
-		}
-		fieldAdditions := additions[field]
-		if len(fieldAdditions) > 0 {
-			if err := u.nativeStatus(handle,
-				u.api.reserve(handle, u.api.size(handle)+len(fieldAdditions)), "reserve batch"); err != nil {
-				return err
-			}
-			adder := newUSearchBatchAdder(u.api, handle, u.manifest.Fields[field].Dims)
-			for _, key := range sortedUSearchVectorKeys(fieldAdditions) {
-				if err := adder.Add(key, fieldAdditions[key]); err != nil {
-					return err
-				}
-			}
-			if err := adder.Flush(); err != nil {
-				return err
-			}
-		}
-		if err := u.persistField(field, handle); err != nil {
+	batches := u.coalesceChanges(changes)
+	for _, field := range sortedMapKeys(batches) {
+		if err := u.applyFieldChanges(field, batches[field]); err != nil {
 			return err
 		}
 	}
 	return writeUsearchManifest(u.root, u.manifest)
 }
 
-func sortedUSearchKeys(keys map[uint64]struct{}) []uint64 {
-	result := make([]uint64, 0, len(keys))
-	for key := range keys {
-		result = append(result, key)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
-	return result
+type usearchFieldChanges struct {
+	removals  map[uint64]struct{}
+	additions map[uint64][]float32
+	compact   bool
 }
 
-func sortedUSearchVectorKeys(vectors map[uint64][]float32) []uint64 {
-	result := make([]uint64, 0, len(vectors))
-	for key := range vectors {
-		result = append(result, key)
+func usearchChangesFor(batches map[string]*usearchFieldChanges, field string) *usearchFieldChanges {
+	batch := batches[field]
+	if batch == nil {
+		batch = &usearchFieldChanges{
+			removals: make(map[uint64]struct{}), additions: make(map[uint64][]float32),
+		}
+		batches[field] = batch
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
-	return result
+	return batch
+}
+
+func (u *usearchVectorIndex) coalesceChanges(changes []VectorChange) map[string]*usearchFieldChanges {
+	batches := make(map[string]*usearchFieldChanges)
+	firstNewKey := u.manifest.NextKey
+	fieldData := make(map[string]bool)
+	hasStoredVectors := func(field string) bool {
+		if present, checked := fieldData[field]; checked {
+			return present
+		}
+		handle := u.indices[field]
+		present := handle != nil && u.api.size(handle) > 0
+		fieldData[field] = present
+		return present
+	}
+	for _, change := range changes {
+		key, known := u.manifest.IDs[string(change.ID)]
+		if change.Delete {
+			if known {
+				for field := range u.manifest.Fields {
+					if change.Field == "" || change.Field == field {
+						batch := usearchChangesFor(batches, field)
+						delete(batch.additions, key)
+						if key < firstNewKey && hasStoredVectors(field) {
+							batch.removals[key] = struct{}{}
+							batch.compact = true
+						}
+					}
+				}
+			}
+			continue
+		}
+		if !known {
+			key = u.manifest.NextKey
+			u.manifest.NextKey++
+			u.manifest.IDs[string(change.ID)] = key
+			u.reverse[key] = change.ID
+		}
+		u.manifest.Fields[change.Field] = VectorFieldSpec{
+			Name: change.Field, Dims: len(change.Vector), Similarity: change.Similarity,
+		}
+		batch := usearchChangesFor(batches, change.Field)
+		if known && key < firstNewKey && hasStoredVectors(change.Field) {
+			batch.removals[key] = struct{}{}
+		}
+		batch.additions[key] = change.Vector
+	}
+	return batches
+}
+
+func (u *usearchVectorIndex) applyFieldChanges(field string, batch *usearchFieldChanges) error {
+	handle := u.indices[field]
+	spec := u.manifest.Fields[field]
+	if handle == nil {
+		handle = u.api.create(uintptr(spec.Dims), usearchMetric(spec.Similarity),
+			uintptr(u.options.Connectivity), uintptr(u.options.ExpansionAdd), uintptr(u.options.ExpansionSearch))
+		if handle == nil {
+			return fmt.Errorf("create usearch field %q failed", field)
+		}
+		u.indices[field] = handle
+	}
+	if len(batch.removals) > 0 {
+		if err := u.nativeStatus(handle, u.api.removeBatch(handle, sortedMapKeys(batch.removals)), "remove batch"); err != nil {
+			return err
+		}
+		if batch.compact {
+			if err := u.nativeStatus(handle, u.api.compact(handle), "compact"); err != nil {
+				return err
+			}
+		}
+	}
+	if len(batch.additions) > 0 {
+		if err := u.nativeStatus(handle, u.api.reserve(handle, u.api.size(handle)+len(batch.additions)), "reserve batch"); err != nil {
+			return err
+		}
+		adder := newUSearchBatchAdder(u.api, handle, spec.Dims)
+		for _, key := range sortedMapKeys(batch.additions) {
+			if err := adder.Add(key, batch.additions[key]); err != nil {
+				return err
+			}
+		}
+		if err := adder.Flush(); err != nil {
+			return err
+		}
+	}
+	return u.persistField(field, handle)
+}
+
+func sortedMapKeys[K interface{ ~string | ~uint64 }, V any](values map[K]V) []K {
+	keys := make([]K, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func (u *usearchVectorIndex) nativeStatus(handle unsafe.Pointer, status int32, operation string) error {
@@ -538,12 +456,9 @@ func usearchNativeStatus(api usearchNativeAPI, handle unsafe.Pointer,
 	if status == 0 {
 		return nil
 	}
-	message := usearchNativeFailed
-	if api != nil {
-		message = api.errorMessage(handle)
-		if message == "" {
-			message = usearchNativeFailed
-		}
+	message := api.errorMessage(handle)
+	if message == "" {
+		message = usearchNativeFailed
 	}
 	return fmt.Errorf("usearch %s: %s", operation, message)
 }
@@ -570,18 +485,14 @@ func (u *usearchVectorIndex) Search(field string, query []float32, k int, filter
 
 func (u *usearchVectorIndex) SearchCandidates(field string, query []float32, k int,
 	allowed map[Identifier]struct{}) ([]VectorHit, error) {
-	if k <= 0 {
-		return nil, ErrVectorInvalidK
+	if err := validateVectorQuery(query, k); err != nil {
+		return nil, err
 	}
-	if len(query) == 0 {
-		return nil, ErrVectorInvalidDimension
-	}
-	for _, value := range query {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return nil, ErrVectorInvalidValue
-		}
-	}
+	return u.searchVectorCandidates(field, query, k, allowed)
+}
 
+func (u *usearchVectorIndex) searchVectorCandidates(field string, query []float32, k int,
+	allowed map[Identifier]struct{}) ([]VectorHit, error) {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
 	if u.closed {
@@ -611,35 +522,16 @@ func (u *usearchVectorIndex) SearchCandidates(field string, query []float32, k i
 		if len(allowedKeys) == 0 {
 			return []VectorHit{}, nil
 		}
+		slices.Sort(allowedKeys)
 	}
 
-	count := k
-	keys := make([]uint64, count)
-	distances := make([]float32, count)
-	var status int32
-	var resultCount int
-	if allowedKeys != nil {
-		status, resultCount = u.api.searchFiltered(handle, query, count, allowedKeys, keys, distances)
-	} else {
-		status, resultCount = u.api.search(handle, query, count, keys, distances)
-	}
-	if err := u.nativeStatus(handle, status, "search"); err != nil {
+	keys, distances, err := searchUSearch(u.api, handle, query, k, allowedKeys)
+	if err != nil {
 		return nil, err
 	}
-	if resultCount < 0 || resultCount > len(keys) || resultCount > len(distances) {
-		return nil, fmt.Errorf("usearch search returned invalid result count %d", resultCount)
-	}
-	hits := make([]VectorHit, 0, minInt(k, resultCount))
-	for i := 0; i < resultCount; i++ {
-		id, exists := u.reverse[keys[i]]
-		if !exists {
-			continue
-		}
-		if allowed != nil {
-			if _, exists = allowed[id]; !exists {
-				continue
-			}
-		}
+	hits := make([]VectorHit, 0, len(keys))
+	for i := range keys {
+		id := u.reverse[keys[i]]
 		hits = append(hits, VectorHit{
 			ID:    id,
 			Score: usearchScore(spec.Similarity, float64(distances[i])),
@@ -651,10 +543,23 @@ func (u *usearchVectorIndex) SearchCandidates(field string, query []float32, k i
 		}
 		return hits[i].Score > hits[j].Score
 	})
-	if len(hits) > k {
-		hits = hits[:k]
-	}
 	return hits, nil
+}
+
+func searchUSearch(api usearchNativeAPI, handle unsafe.Pointer, query []float32, count int,
+	allowedKeys []uint64) ([]uint64, []float32, error) {
+	keys, distances := make([]uint64, count), make([]float32, count)
+	var status int32
+	var found int
+	if allowedKeys != nil {
+		status, found = api.searchFiltered(handle, query, count, allowedKeys, keys, distances)
+	} else {
+		status, found = api.search(handle, query, count, keys, distances)
+	}
+	if err := usearchNativeStatus(api, handle, status, "search"); err != nil {
+		return nil, nil, err
+	}
+	return keys[:found], distances[:found], nil
 }
 
 func usearchScore(similarity VectorSimilarity, distance float64) float64 {
@@ -683,16 +588,30 @@ func (u *usearchVectorIndex) persistField(field string, handle unsafe.Pointer) e
 	if err := u.nativeStatus(handle, u.api.save(handle, tmpName), "save"); err != nil {
 		return err
 	}
-	return replaceUsearchFile(tmpName, usearchFieldPath(u.root, field))
+	if err := syncCollectionFile(tmpName); err != nil {
+		return err
+	}
+	return fsatomic.Replace(tmpName, usearchFieldPath(u.root, field))
 }
 
 func usearchManifestPath(root string) string {
-	return filepath.Join(root, "manifest.json")
+	return filepath.Join(root, "metadata.json")
 }
 
 func usearchFieldPath(root, field string) string {
-	digest := sha256.Sum256([]byte(field))
-	return filepath.Join(root, "field-"+hex.EncodeToString(digest[:])+".usearch")
+	var name strings.Builder
+	const hex = "0123456789abcdef"
+	for i := 0; i < len(field); i++ {
+		c := field[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' {
+			name.WriteByte(c)
+		} else {
+			name.WriteByte('%')
+			name.WriteByte(hex[c>>4])
+			name.WriteByte(hex[c&15])
+		}
+	}
+	return filepath.Join(root, "field-"+name.String()+".usearch")
 }
 
 func readUsearchManifest(root string) (usearchManifest, error) {
@@ -703,60 +622,16 @@ func readUsearchManifest(root string) (usearchManifest, error) {
 	if err != nil {
 		return usearchManifest{}, err
 	}
-	manifest := newUsearchManifest()
+	var manifest usearchManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return usearchManifest{}, fmt.Errorf("decode usearch manifest: %w", err)
 	}
 	if manifest.Version != usearchManifestVersion {
 		return usearchManifest{}, fmt.Errorf("unsupported usearch manifest version %d", manifest.Version)
 	}
-	if manifest.NextKey == 0 {
-		manifest.NextKey = 1
-	}
-	if manifest.IDs == nil {
-		manifest.IDs = make(map[string]uint64)
-	}
-	if manifest.Fields == nil {
-		manifest.Fields = make(map[string]VectorFieldSpec)
-	}
 	return manifest, nil
 }
 
 func writeUsearchManifest(root string, manifest usearchManifest) error {
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(root, ".bluge-usearch-manifest-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return replaceUsearchFile(tmpName, usearchManifestPath(root))
-}
-
-func replaceUsearchFile(source, target string) error {
-	if err := os.Rename(source, target); err == nil {
-		return nil
-	} else {
-		if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
-			return err
-		}
-	}
-	return os.Rename(source, target)
-}
-
-func minInt(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
+	return replaceCollectionJSON(usearchManifestPath(root), manifest)
 }

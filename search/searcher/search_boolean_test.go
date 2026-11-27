@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"math"
 	"testing"
 
 	"github.com/fy0/bluge/search/similarity"
@@ -244,15 +245,15 @@ func TestBooleanSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  0.8841145775462671,
+					Score:  1.945052070601788,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.8180668126634709,
+					Score:  1.799746987859636,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("4"),
-					Score:  0.27080861273520285,
+					Score:  0.5957789480174464,
 				},
 			},
 		},
@@ -261,11 +262,11 @@ func TestBooleanSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 			},
 		},
@@ -279,15 +280,15 @@ func TestBooleanSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  0.25398077703722594,
+					Score:  0.5587577094818971,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.18793301215442973,
+					Score:  0.4134526267397454,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("4"),
-					Score:  0.27080861273520285,
+					Score:  0.5957789480174464,
 				},
 			},
 		},
@@ -296,11 +297,11 @@ func TestBooleanSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.18793301215442973,
+					Score:  0.4134526267397454,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("4"),
-					Score:  0.27080861273520285,
+					Score:  0.5957789480174464,
 				},
 			},
 		},
@@ -314,7 +315,7 @@ func TestBooleanSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  3.4046497795824324,
+					Score:  7.490229515081352,
 				},
 			},
 		},
@@ -323,7 +324,7 @@ func TestBooleanSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  3.968735815208677,
+					Score:  8.731218793459091,
 				},
 			},
 		},
@@ -347,7 +348,7 @@ func TestBooleanSearch(t *testing.T) {
 				if next.Number != test.results[i].Number {
 					t.Errorf("expected result %d to have number %d got %d for test %d", i, test.results[i].Number, next.Number, testIndex)
 				}
-				if !scoresCloseEnough(next.Score, test.results[i].Score) {
+				if math.Abs(next.Score-test.results[i].Score) > 1e-12 {
 					t.Errorf("expected result %d to have score %v got  %v for test %d", i, test.results[i].Score, next.Score, testIndex)
 					t.Logf("scoring explanation: %s", next.Explanation)
 				}

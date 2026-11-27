@@ -608,7 +608,7 @@ func TestEmbeddedSearchDefersIdentifierReads(t *testing.T) {
 	}
 	reads := vectorStoredIDReadCount()
 	candidates := len(corpus.embeddedIndex(t).fields[embeddedBenchField]) * k
-	if int(reads) > len(hits)+1 { //nolint:gosec // the read counter is small
+	if int(reads) > len(hits)+1 {
 		t.Fatalf("resolved %d identifiers for %d results (%d candidates): identifiers "+
 			"were not deferred", reads, len(hits), candidates)
 	}

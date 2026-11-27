@@ -17,6 +17,7 @@ package it
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/italian"
+
 	"github.com/fy0/bluge/analysis"
 )
 

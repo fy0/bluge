@@ -17,26 +17,19 @@ package index
 import (
 	"fmt"
 	"io"
-	"math"
 	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	segment "github.com/fy0/bluge/segment"
 )
 
 type SegmentPlugin struct {
 	Type    string
 	Version uint32
-	New     func(results []segment.Document, normCalc func(string, int) float32) (segment.Segment, uint64, error)
-	// NewWithOptions is an optional extension for segment implementations that
-	// need opaque backend configuration while preserving the old plugin API.
-	NewWithOptions func(results []segment.Document, normCalc func(string, int) float32,
-		options map[string]interface{}) (segment.Segment, uint64, error)
-	Load  func(*segment.Data) (segment.Segment, error)
-	Merge func([]segment.Segment, []*roaring.Bitmap, int) segment.Merger
-	// MergeWithOptions is the merge counterpart to NewWithOptions.
-	MergeWithOptions func(segments []segment.Segment, drops []*roaring.Bitmap, bufferSize int,
-		options map[string]interface{}) segment.Merger
+	New     func([]segment.Document, func(string, int) float32, segment.BuildOptions) (segment.Segment, uint64, error)
+	Load    func(*segment.Data) (segment.Segment, error)
+	Merge   func([]segment.Segment, []*roaring.Bitmap, int, segment.BuildOptions) segment.Merger
 }
 
 func supportedSegmentTypes(supportedSegmentPlugins map[string]map[uint32]*SegmentPlugin) (rv []string) {
@@ -56,13 +49,6 @@ func supportedSegmentTypeVersions(supportedSegmentPlugins map[string]map[uint32]
 
 func loadSegmentPlugin(supportedSegmentPlugins map[string]map[uint32]*SegmentPlugin,
 	forcedSegmentType string, forcedSegmentVersion uint32) (*SegmentPlugin, error) {
-	if forcedSegmentType == "ice" {
-		return nil, fmt.Errorf("unsupported legacy segment type %q; migrate the index offline", forcedSegmentType)
-	}
-	if forcedSegmentType == "zap" {
-		return nil, fmt.Errorf("unsupported experimental segment type %q version %d; rebuild the index with zapx-bluge",
-			forcedSegmentType, forcedSegmentVersion)
-	}
 	if versions, ok := supportedSegmentPlugins[forcedSegmentType]; ok {
 		if segPlugin, ok := versions[forcedSegmentVersion]; ok {
 			return segPlugin, nil
@@ -77,29 +63,13 @@ func loadSegmentPlugin(supportedSegmentPlugins map[string]map[uint32]*SegmentPlu
 }
 
 func (s *Writer) newSegment(results []segment.Document) (*segmentWrapper, uint64, error) {
-	var seg segment.Segment
-	var count uint64
-	var err error
-	if s.segPlugin.NewWithOptions != nil {
-		seg, count, err = s.segPlugin.NewWithOptions(results, s.config.NormCalc,
-			s.config.SegmentOptions)
-	} else {
-		seg, count, err = s.segPlugin.New(results, s.config.NormCalc)
-	}
+	seg, count, err := s.segPlugin.New(results, s.config.NormCalc, s.config.SegmentOptions)
 	return &segmentWrapper{
 		Segment:      seg,
 		refCounter:   noOpRefCounter{},
 		inMemory:     true,
-		encodedBytes: mergePlanSize(count),
+		encodedBytes: int64(count),
 	}, count, err
-}
-
-// Plugins return unsigned sizes; the planner uses signed sizes throughout.
-func mergePlanSize(size uint64) int64 {
-	if size > math.MaxInt64 {
-		return math.MaxInt64
-	}
-	return int64(size)
 }
 
 type segmentWrapper struct {
@@ -110,14 +80,8 @@ type segmentWrapper struct {
 	encodedBytes int64
 }
 
-// UnderlyingSegment exposes the concrete segment to optional readers that
-// need extension sections beyond the base segment interface. The wrapper
-// still owns reference counting and must not be closed by the caller through
-// the returned value.
+// The wrapper owns the returned segment's reference count.
 func (s *segmentWrapper) UnderlyingSegment() segment.Segment {
-	if s == nil {
-		return nil
-	}
 	return s.Segment
 }
 

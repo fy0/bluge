@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blevesearch/segment"
+
 	"github.com/fy0/bluge/analysis"
 )
 

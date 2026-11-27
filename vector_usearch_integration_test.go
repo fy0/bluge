@@ -252,25 +252,11 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 		t.Fatalf("embedded backend created sidecar files: %v", sidecars)
 	}
 
-	// Text segments remain readable when the optional native artifact is absent.
 	t.Setenv(usearchLibraryPathEnv, "")
-	degradedConfig := DefaultConfig(indexPath).WithVectorBackend(
+	missingConfig := DefaultConfig(indexPath).WithVectorBackend(
 		backend.WithLibraryPath(filepath.Join(root, "missing-"+usearchLibraryName())))
-	degradedReader, err := OpenReader(degradedConfig)
-	if err != nil {
-		t.Fatalf("text reader did not degrade without the native library: %v", err)
-	}
-	if _, err := degradedReader.Search(context.Background(),
-		NewTopNSearch(1, NewMatchQuery("updated").SetField("color"))); err != nil {
-		_ = degradedReader.Close()
-		t.Fatalf("text search failed in degraded mode: %v", err)
-	}
-	if _, err := degradedReader.VectorSearch(context.Background(), "embedding", []float32{0, 1}, 1, nil); !errors.Is(err, ErrVectorUnsupported) {
-		_ = degradedReader.Close()
-		t.Fatalf("expected vector search to be unavailable without the native library, got %v", err)
-	}
-	if err := degradedReader.Close(); err != nil {
-		t.Fatal(err)
+	if _, err := OpenReader(missingConfig); !errors.Is(err, ErrVectorUnsupported) {
+		t.Fatalf("expected native library error, got %v", err)
 	}
 
 	offlineRoot := filepath.Join(root, "offline")
@@ -301,4 +287,49 @@ func TestEmbeddedUSearchVectorBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertVectorIDs(t, hits, "offline-red", "offline-green", "offline-blue")
+}
+
+func TestEmbeddedSchemaRejectsChangesAcrossBatchesAndReopen(t *testing.T) {
+	backend := NewEmbeddedUSearchVectorBackend().WithLibraryPath(embeddedTestLibrary(t))
+	config := DefaultConfig(t.TempDir()).WithVectorBackend(backend)
+	for round := 0; round < 2; round++ {
+		writer, err := OpenWriter(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if round == 0 {
+			err = writer.Insert(NewDocument("valid").AddField(
+				NewVectorField("embedding", []float32{1, 0})))
+			if err != nil {
+				_ = writer.Close()
+				t.Fatal(err)
+			}
+		}
+		err = writer.Insert(NewDocument("invalid-dims").AddField(
+			NewVectorField("embedding", []float32{1, 0, 0})))
+		if !errors.Is(err, ErrVectorInvalidDimension) {
+			_ = writer.Close()
+			t.Fatalf("round %d: expected dimension error, got %v", round, err)
+		}
+		err = writer.Insert(NewDocument("invalid-metric").AddField(
+			NewVectorFieldWithSimilarity("embedding", []float32{1, 0}, VectorL2)))
+		if !errors.Is(err, ErrVectorInvalidField) {
+			_ = writer.Close()
+			t.Fatalf("round %d: expected similarity error, got %v", round, err)
+		}
+		reader, err := writer.Reader()
+		if err != nil {
+			_ = writer.Close()
+			t.Fatal(err)
+		}
+		count, countErr := reader.Count()
+		_ = reader.Close()
+		closeErr := writer.Close()
+		if countErr != nil || closeErr != nil {
+			t.Fatal(errors.Join(countErr, closeErr))
+		}
+		if count != 1 {
+			t.Fatalf("round %d: invalid vector changed text count to %d", round, count)
+		}
+	}
 }

@@ -15,74 +15,45 @@
 package zap
 
 import (
-	"sync"
-
 	"github.com/RoaringBitmap/roaring/v2"
+	index "github.com/blevesearch/bleve_index_api"
+
 	"github.com/fy0/bluge/internal/blugeidx"
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
+type sectionConfig struct {
+	results       []*blugeidx.Document
+	chunkMode     uint32
+	fieldsSame    bool
+	fieldsMap     map[string]uint16
+	fieldsInv     []string
+	fieldsOptions map[string]index.FieldIndexingOptions
+	numDocs       uint64
+	normCalc      func(string, int) float32
+	options       blugeseg.BuildOptions
+}
+
 type section interface {
-	// process is essentially parsing of a specific field's content in a specific
-	// document. any tracking of processed data *specific to this section* should
-	// be done in opaque which will be passed to the Persist() API.
-	Process(opaque map[int]resetable, docNum uint32, f *blugeidx.Field, fieldID uint16)
-
-	// flush the processed data in the opaque to the writer.
-	Persist(opaque map[int]resetable, w *FileWriter) error
-
-	// this API is used to fetch the file offset of the field for this section.
-	// this is used during search time to parse the section, and fetch results
-	// for the specific "index" thats part of the section.
-	AddrForField(opaque map[int]resetable, fieldID int) int
-
-	// for every field in the fieldsInv (relevant to this section) merge the section
-	// contents from all the segments into a single section data for the field.
-	// as part of the merge API, write the merged data to the writer and also track
-	// the starting offset of this newly merged section data.
-	Merge(opaque map[int]resetable, segments []*SegmentBase, drops []*roaring.Bitmap, fieldsInv []string,
-		newDocNumsIn [][]uint64, w *FileWriter, closeCh chan struct{}) error
-
-	// opaque is used to track the data specific to this section. its not visible
-	// to the other sections and is only visible and freely modifiable by this specifc
-	// section.
-	InitOpaque(args map[string]interface{}) resetable
+	Process(map[int]resetable, uint32, *blugeidx.Field, uint16)
+	Persist(map[int]resetable, *CountHashWriter) error
+	AddrForField(map[int]resetable, int) uint64
+	Merge(map[int]resetable, []*SegmentBase, []*roaring.Bitmap, []string, [][]uint64, *CountHashWriter, chan struct{}) error
+	InitOpaque(sectionConfig) resetable
 }
 
 type resetable interface {
 	Reset() error
-	Set(key string, value interface{})
+	Configure(sectionConfig)
 }
-
-// -----------------------------------------------------------------------------
 
 const (
 	SectionInvertedTextIndex = iota
-	// SectionVectorIndex stores a backend-tagged native vector payload. The
-	// old name is retained as a source compatibility alias because the slot was
-	// originally reserved by the Bleve FAISS integration.
 	SectionVectorIndex
-	SectionSynonymIndex
-
-	// Add new sections above this line.
-	// NumSections automatically reflects the total number of sections
-	// and is used to track how many sections can be registered.
 	NumSections
 )
 
-const SectionFaissVectorIndex = SectionVectorIndex
-
-// -----------------------------------------------------------------------------
-
-var (
-	segmentSectionsMutex sync.Mutex
-	// writes to segmentSections within init()s ONLY within lock,
-	// reads will not require lock access
-	segmentSections = make(map[uint16]section)
-)
-
-// Method to be invoked within init()s ONLY.
-func registerSegmentSection(key uint16, val section) {
-	segmentSectionsMutex.Lock()
-	segmentSections[key] = val
-	segmentSectionsMutex.Unlock()
+var segmentSections = [...]section{
+	&invertedTextIndexSection{},
+	&vectorIndexSection{},
 }

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -11,6 +10,53 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_rejects_missing_key() {
+        let handle = bluge_usearch_index_create(2, METRIC_L2, 16, 128, 64);
+        let index = &handle_ref(handle).unwrap().index;
+        index.reserve(1).unwrap();
+        index.add(1, &[1.0f32, 0.0]).unwrap();
+        let mut output = [0.0f32; 2];
+        let mut count = 1;
+        let status = unsafe {
+            bluge_usearch_index_get(handle, 2, output.as_mut_ptr(), output.len(), &mut count)
+        };
+        assert_ne!(status, 0);
+        assert_eq!(count, 0);
+        unsafe { bluge_usearch_index_destroy(handle) };
+    }
+
+    #[test]
+    fn filtered_search_uses_sorted_allowed_keys() {
+        let handle = bluge_usearch_index_create(2, METRIC_L2, 16, 128, 64);
+        let index = &handle_ref(handle).unwrap().index;
+        index.reserve(4).unwrap();
+        for key in 1..=4 {
+            index.add(key, &[key as f32, 0.0]).unwrap();
+        }
+        let allowed = [2u64, 4];
+        let query = [1.0f32, 0.0];
+        let mut keys = [0u64; 4];
+        let mut distances = [0.0f32; 4];
+        let mut count = 0;
+        let status = unsafe {
+            bluge_usearch_index_search_filtered(
+                handle,
+                query.as_ptr(),
+                2,
+                4,
+                allowed.as_ptr(),
+                allowed.len(),
+                keys.as_mut_ptr(),
+                distances.as_mut_ptr(),
+                &mut count,
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(&keys[..count], &allowed);
+        unsafe { bluge_usearch_index_destroy(handle) };
+    }
 
     #[test]
     fn compact_preserves_keys_and_subsequent_replacements() {
@@ -60,9 +106,6 @@ mod tests {
 const METRIC_L2: u32 = 1;
 const METRIC_DOT: u32 = 2;
 const METRIC_COSINE: u32 = 3;
-// ABI 4 adds bluge_usearch_index_reserve_threads, which grows the per-index
-// search context pool so concurrent calls stop failing once they exceed
-// hardware_concurrency. Earlier exports are unchanged.
 const ABI_VERSION: u32 = 4;
 
 static HARDWARE_COMPILED: OnceLock<CString> = OnceLock::new();
@@ -115,12 +158,7 @@ fn c_path(path: *const c_char) -> Result<String, String> {
         .map_err(|_| "path is not valid UTF-8".to_owned())
 }
 
-fn vector<'a>(data: *const f32, len: usize, dimensions: usize) -> Result<&'a [f32], String> {
-    if len != dimensions {
-        return Err(format!(
-            "vector has {len} dimensions, expected {dimensions}"
-        ));
-    }
+fn vector<'a>(data: *const f32, len: usize) -> Result<&'a [f32], String> {
     if data.is_null() {
         return Err("vector data is null".to_owned());
     }
@@ -319,14 +357,8 @@ pub extern "C" fn bluge_usearch_index_reserve(handle: *mut IndexHandle, capacity
     })
 }
 
-/// Reserves member capacity and grows the per-index thread pool that bounds
-/// concurrent searches and insertions.
-///
-/// `capacity` is clamped up to the index's current reserved member capacity:
-/// USearch copies the vector lookup table into a buffer of `capacity` slots,
-/// so a smaller value would corrupt live reservations. The call must not
-/// overlap other operations on the handle; the Go adapter only invokes it on
-/// freshly opened handles or while holding every context permit.
+// USearch cannot shrink member capacity without corrupting its lookup table.
+// Callers serialize this operation against all handle access.
 #[unsafe(no_mangle)]
 pub extern "C" fn bluge_usearch_index_reserve_threads(
     handle: *mut IndexHandle,
@@ -334,9 +366,6 @@ pub extern "C" fn bluge_usearch_index_reserve_threads(
     threads: usize,
 ) -> bool {
     status(handle, |handle| {
-        if threads == 0 {
-            return Err("thread count must be greater than zero".to_owned());
-        }
         let capacity = capacity.max(handle.index.capacity());
         handle
             .index
@@ -353,7 +382,7 @@ pub extern "C" fn bluge_usearch_index_add(
     len: usize,
 ) -> i32 {
     status(handle, |handle| {
-        let data = vector(data, len, handle.index.dimensions())?;
+        let data = vector(data, len)?;
         handle
             .index
             .add(key, data)
@@ -376,17 +405,8 @@ pub unsafe extern "C" fn bluge_usearch_index_add_batch(
     dimensions: usize,
 ) -> i32 {
     status(handle, |handle| {
-        if dimensions != handle.index.dimensions() {
-            return Err(format!(
-                "batch vectors have {dimensions} dimensions, expected {}",
-                handle.index.dimensions()
-            ));
-        }
         if count == 0 {
             return Ok(());
-        }
-        if dimensions == 0 {
-            return Err("batch vector dimensions must be greater than zero".to_owned());
         }
         if keys.is_null() || vectors.is_null() {
             return Err("batch input buffer is null".to_owned());
@@ -428,12 +448,6 @@ pub unsafe extern "C" fn bluge_usearch_index_get(
     unsafe { *out_count = 0 };
     handle.clear_error();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if capacity != handle.index.dimensions() {
-            return Err(format!(
-                "vector output has {capacity} dimensions, expected {}",
-                handle.index.dimensions()
-            ));
-        }
         if capacity != 0 && output.is_null() {
             return Err("vector output buffer is null".to_owned());
         }
@@ -443,6 +457,9 @@ pub unsafe extern "C" fn bluge_usearch_index_get(
             .get(key, output)
             .map_err(|error| error.to_string())?;
         unsafe { *out_count = count };
+        if count != 1 {
+            return Err("invalid vector count".to_owned());
+        }
         Ok(())
     }));
     match result {
@@ -542,20 +559,11 @@ pub unsafe extern "C" fn bluge_usearch_index_search(
     unsafe { *out_count = 0 };
     handle.clear_error();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let query = vector(query, query_len, handle.index.dimensions())?;
-        if count == 0 {
-            return Err("search count must be greater than zero".to_owned());
-        }
+        let query = vector(query, query_len)?;
         let matches = handle
             .index
             .search(query, count)
             .map_err(|error| error.to_string())?;
-        if matches.keys.len() != matches.distances.len() {
-            return Err("native search returned mismatched result buffers".to_owned());
-        }
-        if matches.keys.len() > count {
-            return Err("native search returned too many results".to_owned());
-        }
         if !matches.keys.is_empty() && (out_keys.is_null() || out_distances.is_null()) {
             return Err("search output buffer is null".to_owned());
         }
@@ -580,13 +588,9 @@ pub unsafe extern "C" fn bluge_usearch_index_search(
     }
 }
 
-/// Searches while admitting only keys present in `allowed_keys`.
-///
 /// # Safety
-///
-/// `handle`, `query`, `allowed_keys`, and the output buffers must remain valid
-/// for the duration of this call. Output buffers must have room for `count`
-/// entries, and `allowed_keys` must have room for `allowed_count` entries.
+/// All buffers remain valid until return; output buffers hold `count` entries.
+/// `allowed_keys` contains `allowed_count` ascending, unique keys.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bluge_usearch_index_search_filtered(
     handle: *mut IndexHandle,
@@ -609,10 +613,7 @@ pub unsafe extern "C" fn bluge_usearch_index_search_filtered(
     unsafe { *out_count = 0 };
     handle.clear_error();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let query = vector(query, query_len, handle.index.dimensions())?;
-        if count == 0 {
-            return Err("search count must be greater than zero".to_owned());
-        }
+        let query = vector(query, query_len)?;
         if allowed_count == 0 {
             return Ok(());
         }
@@ -620,17 +621,10 @@ pub unsafe extern "C" fn bluge_usearch_index_search_filtered(
             return Err("allowed key buffer is null".to_owned());
         }
         let allowed_keys = unsafe { slice::from_raw_parts(allowed_keys, allowed_count) };
-        let allowed_keys = allowed_keys.iter().copied().collect::<HashSet<_>>();
         let matches = handle
             .index
-            .filtered_search(query, count, |key| allowed_keys.contains(&key))
+            .filtered_search(query, count, |key| allowed_keys.binary_search(&key).is_ok())
             .map_err(|error| error.to_string())?;
-        if matches.keys.len() != matches.distances.len() {
-            return Err("native filtered search returned mismatched result buffers".to_owned());
-        }
-        if matches.keys.len() > count {
-            return Err("native filtered search returned too many results".to_owned());
-        }
         if !matches.keys.is_empty() && (out_keys.is_null() || out_distances.is_null()) {
             return Err("filtered search output buffer is null".to_owned());
         }

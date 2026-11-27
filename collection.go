@@ -9,14 +9,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/fy0/bluge/index"
 	"github.com/fy0/bluge/index/lock"
+	"github.com/fy0/bluge/segment"
 )
 
 var (
@@ -27,15 +28,11 @@ var (
 )
 
 const (
-	collectionFormatVersion = 2
-	collectionRevisionField = "_collection_revision"
-	collectionCorpusField   = "_collection_corpus"
+	collectionFormatVersion = 3
 	collectionVectorField   = "embedding"
+	collectionRevisionField = "_collection_revision"
 )
 
-// CollectionConfig configures the experimental, independently persisted vector
-// mode. TextConfig controls text analysis and scoring; its directory is replaced
-// with Path/text. VectorStorage is "usearch" (default) or "flat" (exact search).
 type CollectionConfig struct {
 	Path           string
 	TextConfig     Config
@@ -86,9 +83,6 @@ func (c CollectionConfig) normalized() (CollectionConfig, error) {
 	return c, nil
 }
 
-// VectorSpaceSpec is immutable once registered. ID names the embedding space;
-// Model, ModelRevision and Preprocessing are optional descriptions. Field defaults
-// to "embedding" and Similarity to cosine. Callers supply compatible vectors.
 type VectorSpaceSpec struct {
 	ID            string           `json:"id"`
 	Field         string           `json:"field"`
@@ -113,7 +107,7 @@ func (s VectorSpaceSpec) validate() error {
 	if s.Field == "" {
 		return errors.New("vector space requires a field")
 	}
-	if s.Dims <= 0 {
+	if s.Dims <= 0 || uint64(s.Dims) > math.MaxUint32 {
 		return ErrVectorInvalidDimension
 	}
 	if !validVectorSimilarity(s.Similarity) {
@@ -133,7 +127,6 @@ type VectorRecord struct {
 	Vector   []float32
 }
 
-// VectorRevisionConflictError rejects an entire vector batch before publication.
 type VectorRevisionConflictError struct{ IDs []Identifier }
 
 func (e *VectorRevisionConflictError) Error() string {
@@ -141,9 +134,6 @@ func (e *VectorRevisionConflictError) Error() string {
 }
 func (e *VectorRevisionConflictError) Unwrap() error { return ErrVectorRevisionConflict }
 
-// Collection has one writer and any number of snapshot readers. All text changes
-// must go through this object so revisions and chunk IDs remain authoritative.
-// Mutations are serialized; existing readers can continue searching concurrently.
 type Collection struct {
 	mu             sync.Mutex
 	config         CollectionConfig
@@ -187,19 +177,8 @@ func OpenCollection(config CollectionConfig) (*Collection, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, err := w.Reader()
-	if err != nil {
-		_ = w.Close()
-		return nil, err
-	}
-	revisions, scanErr := collectionRevisions(context.Background(), r, manifest.CorpusID)
-	err = errors.Join(scanErr, r.Close())
-	if err != nil {
-		_ = w.Close()
-		return nil, err
-	}
 	c := &Collection{config: config, corpus: manifest.CorpusID, writer: w,
-		lock: l, spaces: spaces, revisions: revisions}
+		lock: l, spaces: spaces}
 	_, c.maintenanceErr = maintainCollection(context.Background(), config, manifest.CorpusID)
 	if errors.Is(c.maintenanceErr, ErrCollectionCorrupt) {
 		_ = w.Close()
@@ -219,10 +198,6 @@ func (c *Collection) check() error {
 	return nil
 }
 
-// UpsertDocuments assigns fresh revisions unless inputRevisions supplies one
-// nonempty embedding-input version per document. Reuse a version for metadata-only
-// changes to preserve vectors; change it whenever embedding inputs change.
-// Duplicate IDs, reserved fields and invalid revisions reject the whole batch.
 func (c *Collection) UpsertDocuments(documents []*Document, inputRevisions ...string) ([]DocumentRevision, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -258,21 +233,17 @@ func (c *Collection) UpsertDocuments(documents []*Document, inputRevisions ...st
 				return nil, err
 			}
 		}
-		copyDoc := append(Document(nil), (*doc)...)
-		copyDoc.AddField(NewStoredOnlyField(collectionRevisionField, []byte(revision)))
-		copyDoc.AddField(NewStoredOnlyField(collectionCorpusField, []byte(c.corpus)))
-		batch.Update(id, &copyDoc)
+		stored := make(Document, len(*doc)+1)
+		copy(stored, *doc)
+		stored[len(*doc)] = NewStoredOnlyField(collectionRevisionField, []byte(revision))
+		batch.Update(id, stored)
 		revisions = append(revisions, DocumentRevision{ID: id, Revision: revision})
 	}
 	if len(revisions) == 0 {
 		return revisions, nil
 	}
-	if err := c.writer.Batch(batch); err != nil {
-		c.writeErr = err
+	if err := c.publishDocuments(batch, revisions, nil); err != nil {
 		return nil, err
-	}
-	for _, r := range revisions {
-		c.revisions[r.ID] = r.Revision
 	}
 	return revisions, nil
 }
@@ -290,16 +261,16 @@ func validateCollectionDocument(doc *Document) (Identifier, error) {
 	}
 	idFields := 0
 	for _, f := range *doc {
+		if f.Name() == collectionRevisionField {
+			return "", errors.New("reserved collection revision field")
+		}
 		if f.Name() == _idField {
 			idFields++
 			if !f.Index() || !f.Store() {
 				return "", errors.New("collection _id must be indexed and stored")
 			}
 		}
-		if strings.HasPrefix(f.Name(), "_collection_") {
-			return "", fmt.Errorf("reserved field %q", f.Name())
-		}
-		if _, ok := f.(interface{ VectorValue() []float32 }); ok {
+		if _, ok := f.(segment.VectorFieldValue); ok {
 			return "", errors.New("write collection vectors with UpsertVectors")
 		}
 	}
@@ -325,13 +296,39 @@ func (c *Collection) DeleteDocuments(ids ...Identifier) error {
 		}
 		batch.Delete(id)
 	}
+	return c.publishDocuments(batch, nil, ids)
+}
+
+func (c *Collection) publishDocuments(batch *index.Batch, updates []DocumentRevision, deletes []Identifier) error {
 	if err := c.writer.Batch(batch); err != nil {
 		c.writeErr = err
 		return err
 	}
-	for _, id := range ids {
+	if c.revisions == nil {
+		return nil
+	}
+	for _, revision := range updates {
+		c.revisions[revision.ID] = revision.Revision
+	}
+	for _, id := range deletes {
 		delete(c.revisions, id)
 	}
+	return nil
+}
+
+func (c *Collection) loadRevisions() error {
+	if c.revisions != nil {
+		return nil
+	}
+	r, err := c.writer.Reader()
+	if err != nil {
+		return err
+	}
+	revisions, err := collectionRevisions(context.Background(), r)
+	if err = errors.Join(err, r.Close()); err != nil {
+		return err
+	}
+	c.revisions = revisions
 	return nil
 }
 
@@ -391,7 +388,6 @@ func sortedCollectionSpecs(spaces map[string]collectionSpace) []VectorSpaceSpec 
 	return rv
 }
 
-// Reader pins the selected spaces and a text snapshot. No names selects all spaces.
 func (c *Collection) Reader(spaceIDs ...string) (*CollectionReader, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -411,7 +407,7 @@ func (c *Collection) Reader(spaceIDs ...string) (*CollectionReader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newCollectionReader(c.config, c.corpus, r, spaces)
+	return newCollectionReader(c.config, r, spaces)
 }
 
 func (c *Collection) Close() error {

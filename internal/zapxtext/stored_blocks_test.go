@@ -16,7 +16,7 @@ import (
 
 func TestStoredBlocksRoundTrip(t *testing.T) {
 	var output bytes.Buffer
-	fileWriter := NewFileWriterEmpty(NewCountHashWriter(&output))
+	fileWriter := NewCountHashWriter(&output)
 	writer := newStoredBlockWriter(fileWriter, 130)
 
 	for docNum := 0; docNum < 130; docNum++ {
@@ -31,15 +31,10 @@ func TestStoredBlocksRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fileReader, err := NewFileReader("", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	sb := &SegmentBase{
 		mem:               output.Bytes(),
 		numDocs:           130,
 		storedIndexOffset: storedIndexOffset,
-		fileReader:        fileReader,
 	}
 	vdc := &visitDocumentCtx{}
 	for docNum := 0; docNum < 130; docNum++ {
@@ -52,8 +47,5 @@ func TestStoredBlocksRoundTrip(t *testing.T) {
 		if !bytes.Equal(meta, expectedMeta) || !bytes.Equal(data, expectedData) {
 			t.Fatalf("doc %d mismatch: meta=%v data=%q", docNum, meta, data)
 		}
-	}
-	if expected := uint64(output.Len()); sb.getEdgeListOffset() != expected {
-		t.Fatalf("expected edge list offset %d, got %d", expected, sb.getEdgeListOffset())
 	}
 }

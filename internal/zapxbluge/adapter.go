@@ -11,10 +11,10 @@ package zapxbluge
 import (
 	"fmt"
 	"io"
-	"math"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
+
 	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/internal/blugeidx"
@@ -30,7 +30,8 @@ type blugeIndexDocumentExporter interface {
 	ToBlugeIndexDocument() (*blugeidx.Document, error)
 }
 
-func New(results []blugeseg.Document, normCalc func(string, int) float32) (blugeseg.Segment, uint64, error) {
+func New(results []blugeseg.Document, normCalc func(string, int) float32,
+	options blugeseg.BuildOptions) (blugeseg.Segment, uint64, error) {
 	zapDocs := make([]*blugeidx.Document, len(results))
 	for i, doc := range results {
 		var err error
@@ -43,29 +44,7 @@ func New(results []blugeseg.Document, normCalc func(string, int) float32) (bluge
 			return nil, 0, fmt.Errorf("zapx-bluge: document %d (%T): %w", i, doc, err)
 		}
 	}
-
-	seg, bytesWritten, err := zapxtext.NewWithNormCalc(zapDocs, normCalc)
-	if err != nil {
-		return nil, 0, err
-	}
-	return &segmentAdapter{inner: seg}, bytesWritten, nil
-}
-
-func NewWithOptions(results []blugeseg.Document, normCalc func(string, int) float32,
-	options map[string]interface{}) (blugeseg.Segment, uint64, error) {
-	zapDocs := make([]*blugeidx.Document, len(results))
-	for i, doc := range results {
-		var err error
-		if exporter, ok := doc.(blugeIndexDocumentExporter); ok {
-			zapDocs[i], err = exporter.ToBlugeIndexDocument()
-		} else {
-			zapDocs[i], err = blugeidx.FromSegmentDocument(doc)
-		}
-		if err != nil {
-			return nil, 0, fmt.Errorf("zapx-bluge: document %d (%T): %w", i, doc, err)
-		}
-	}
-	seg, bytesWritten, err := zapxtext.NewWithConfig(zapDocs, normCalc, options)
+	seg, bytesWritten, err := zapxtext.New(zapDocs, normCalc, options)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -87,23 +66,8 @@ func Load(data *blugeseg.Data) (blugeseg.Segment, error) {
 	return &segmentAdapter{inner: seg}, nil
 }
 
-func Merge(segments []blugeseg.Segment, drops []*roaring.Bitmap, mergeBufferSize int) blugeseg.Merger {
-	zapSegments := make([]scorchseg.Segment, len(segments))
-	for i, segment := range segments {
-		if adapter, ok := segment.(*segmentAdapter); ok {
-			zapSegments[i] = adapter.inner
-		}
-	}
-
-	return &merger{
-		segments:   zapSegments,
-		drops:      drops,
-		bufferSize: mergeBufferSize,
-	}
-}
-
 type segmentAdapter struct {
-	inner scorchseg.Segment
+	inner *zapxtext.SegmentBase
 }
 
 func (s *segmentAdapter) Dictionary(field string) (blugeseg.Dictionary, error) {
@@ -155,13 +119,7 @@ func (s *segmentAdapter) Fields() []string {
 }
 
 func (s *segmentAdapter) CollectionStats(field string) (blugeseg.CollectionStats, error) {
-	statsProvider, ok := s.inner.(interface {
-		FieldStats(string) (uint64, uint64, bool)
-	})
-	if !ok {
-		return nil, fmt.Errorf("segment type %T does not expose field statistics", s.inner)
-	}
-	documentCount, sumTotalTermFrequency, ok := statsProvider.FieldStats(field)
+	documentCount, sumTotalTermFrequency, ok := s.inner.FieldStats(field)
 	if !ok {
 		return &collectionStats{}, nil
 	}
@@ -182,17 +140,11 @@ func (s *segmentAdapter) Size() int {
 }
 
 func (s *segmentAdapter) DocumentValueReader(fields []string) (blugeseg.DocumentValueReader, error) {
-	visitable, _ := s.inner.(scorchseg.DocValueVisitable)
-	return &documentValueReaderAdapter{inner: visitable, fields: fields}, nil
+	return &documentValueReaderAdapter{inner: s.inner, fields: fields}, nil
 }
 
 func (s *segmentAdapter) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
-	if writerTo, ok := s.inner.(interface {
-		WriteTo(io.Writer) (int64, error)
-	}); ok {
-		return writerTo.WriteTo(w)
-	}
-	return 0, fmt.Errorf("segment type %T cannot be written", s.inner)
+	return s.inner.WriteTo(w)
 }
 
 func (s *segmentAdapter) Type() string {
@@ -203,13 +155,8 @@ func (s *segmentAdapter) Version() uint32 {
 	return Version
 }
 
-func (s *segmentAdapter) VectorPayload(field string) (zapxtext.VectorPayload, error) {
-	if payloader, ok := s.inner.(interface {
-		VectorPayload(string) (zapxtext.VectorPayload, error)
-	}); ok {
-		return payloader.VectorPayload(field)
-	}
-	return zapxtext.VectorPayload{}, zapxtext.ErrVectorPayloadNotFound
+func (s *segmentAdapter) VectorPayload(field string) (blugeseg.VectorPayload, error) {
+	return s.inner.VectorPayload(field)
 }
 
 type collectionStats struct {
@@ -239,7 +186,7 @@ func (c *collectionStats) Merge(other blugeseg.CollectionStats) {
 	c.totalDocCount += other.TotalDocumentCount()
 	c.docCount += other.DocumentCount()
 	c.sumTotalTermFreq += other.SumTotalTermFrequency()
-	if extended, ok := other.(interface{ UniqueTermCount() uint64 }); ok {
+	if extended, ok := other.(blugeseg.UniqueTermStats); ok {
 		c.uniqueTermCount += extended.UniqueTermCount()
 	}
 }
@@ -319,7 +266,7 @@ func (p *postingsListAdapter) Iterator(includeFreq, includeNorm, includeLocation
 		innerPrealloc = itr.inner
 	}
 	inner := p.inner.Iterator(includeFreq, includeNorm, includeLocations, innerPrealloc)
-	return &postingsIteratorAdapter{inner: inner, count: p.inner.Count()}, nil
+	return &postingsIteratorAdapter{inner: inner.(*zapxtext.PostingsIterator), count: p.inner.Count()}, nil
 }
 
 func (p *postingsListAdapter) Size() int {
@@ -331,7 +278,7 @@ func (p *postingsListAdapter) Count() uint64 {
 }
 
 type postingsIteratorAdapter struct {
-	inner   scorchseg.PostingsIterator
+	inner   *zapxtext.PostingsIterator
 	current postingAdapter
 	count   uint64
 }
@@ -341,7 +288,7 @@ func (p *postingsIteratorAdapter) Next() (blugeseg.Posting, error) {
 	if err != nil || posting == nil {
 		return nil, err
 	}
-	p.current.inner = posting
+	p.current.inner = posting.(*zapxtext.Posting)
 	p.current.hasNumber = false
 	return &p.current, nil
 }
@@ -351,7 +298,7 @@ func (p *postingsIteratorAdapter) Advance(docNum uint64) (blugeseg.Posting, erro
 	if err != nil || posting == nil {
 		return nil, err
 	}
-	p.current.inner = posting
+	p.current.inner = posting.(*zapxtext.Posting)
 	p.current.hasNumber = false
 	return &p.current, nil
 }
@@ -369,17 +316,12 @@ func (p *postingsIteratorAdapter) Count() uint64 {
 }
 
 func (p *postingsIteratorAdapter) HasImpacts() bool {
-	inner, ok := p.inner.(blugeseg.ImpactPostingsIterator)
-	return ok && inner.HasImpacts()
+	return p.inner.HasImpacts()
 }
 
 func (p *postingsIteratorAdapter) AdvanceShallow(docNum uint64) (
 	uint64, []blugeseg.Impact, bool, error) {
-	inner, ok := p.inner.(blugeseg.ImpactPostingsIterator)
-	if !ok {
-		return 0, nil, false, nil
-	}
-	return inner.AdvanceShallow(docNum)
+	return p.inner.AdvanceShallow(docNum)
 }
 
 func (p *postingsIteratorAdapter) Close() error {
@@ -387,31 +329,19 @@ func (p *postingsIteratorAdapter) Close() error {
 }
 
 func (p *postingsIteratorAdapter) ActualBitmap() *roaring.Bitmap {
-	optimizable, ok := p.inner.(scorchseg.OptimizablePostingsIterator)
-	if !ok {
-		return nil
-	}
-	return optimizable.ActualBitmap()
+	return p.inner.ActualBitmap()
 }
 
 func (p *postingsIteratorAdapter) DocNum1Hit() (uint64, bool) {
-	optimizable, ok := p.inner.(scorchseg.OptimizablePostingsIterator)
-	if !ok {
-		return 0, false
-	}
-	return optimizable.DocNum1Hit()
+	return p.inner.DocNum1Hit()
 }
 
 func (p *postingsIteratorAdapter) ReplaceActual(actual *roaring.Bitmap) {
-	optimizable, ok := p.inner.(scorchseg.OptimizablePostingsIterator)
-	if !ok {
-		return
-	}
-	optimizable.ReplaceActual(actual)
+	p.inner.ReplaceActual(actual)
 }
 
 type postingAdapter struct {
-	inner     scorchseg.Posting
+	inner     *zapxtext.Posting
 	number    uint64
 	hasNumber bool
 }
@@ -433,17 +363,11 @@ func (p *postingAdapter) Frequency() int {
 }
 
 func (p *postingAdapter) Norm() float64 {
-	if normBits, ok := p.inner.(interface{ NormUint64() uint64 }); ok {
-		return float64(math.Float32frombits(uint32(normBits.NormUint64())))
-	}
 	return p.inner.Norm()
 }
 
 func (p *postingAdapter) NormUint64() uint64 {
-	if normBits, ok := p.inner.(interface{ NormUint64() uint64 }); ok {
-		return normBits.NormUint64()
-	}
-	return uint64(math.Float32bits(float32(p.inner.Norm())))
+	return p.inner.NormUint64()
 }
 
 func (p *postingAdapter) Locations() []blugeseg.Location {
@@ -487,16 +411,13 @@ func (l locationAdapter) Size() int {
 }
 
 type documentValueReaderAdapter struct {
-	inner  scorchseg.DocValueVisitable
+	inner  *zapxtext.SegmentBase
 	fields []string
 	state  scorchseg.DocVisitState
 }
 
 func (d *documentValueReaderAdapter) VisitDocumentValues(number uint64,
 	visitor blugeseg.DocumentValueVisitor) error {
-	if d.inner == nil {
-		return nil
-	}
 	state, err := d.inner.VisitDocValues(number, d.fields, func(field string, term []byte) {
 		visitor(field, term)
 	}, d.state)
@@ -505,21 +426,16 @@ func (d *documentValueReaderAdapter) VisitDocumentValues(number uint64,
 }
 
 type merger struct {
-	segments    []scorchseg.Segment
+	segments    []*zapxtext.SegmentBase
 	drops       []*roaring.Bitmap
 	documentMap [][]uint64
-	options     map[string]interface{}
+	options     blugeseg.BuildOptions
 	bufferSize  int
 }
 
 func (m *merger) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
-	for i, segment := range m.segments {
-		if segment == nil {
-			return 0, fmt.Errorf("cannot merge non-zapx segment at index %d", i)
-		}
-	}
-	docNums, bytesWritten, err := zapxtext.MergeToWriterUsingBufferSize(m.segments, m.drops, w,
-		closeCh, nil, m.options, m.bufferSize)
+	docNums, bytesWritten, err := zapxtext.MergeToWriter(m.segments, m.drops, w,
+		closeCh, m.options, m.bufferSize)
 	if err != nil {
 		return 0, err
 	}
@@ -527,13 +443,11 @@ func (m *merger) WriteTo(w io.Writer, closeCh chan struct{}) (int64, error) {
 	return int64(bytesWritten), nil
 }
 
-func MergeWithOptions(segments []blugeseg.Segment, drops []*roaring.Bitmap,
-	mergeBufferSize int, options map[string]interface{}) blugeseg.Merger {
-	zapSegments := make([]scorchseg.Segment, len(segments))
+func Merge(segments []blugeseg.Segment, drops []*roaring.Bitmap,
+	mergeBufferSize int, options blugeseg.BuildOptions) blugeseg.Merger {
+	zapSegments := make([]*zapxtext.SegmentBase, len(segments))
 	for i, segment := range segments {
-		if adapter, ok := segment.(*segmentAdapter); ok {
-			zapSegments[i] = adapter.inner
-		}
+		zapSegments[i] = segment.(*segmentAdapter).inner
 	}
 	return &merger{
 		segments:   zapSegments,

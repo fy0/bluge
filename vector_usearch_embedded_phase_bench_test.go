@@ -66,9 +66,9 @@ func benchNativeSearch(b *testing.B, segments []embeddedUSearchSegment, query []
 	distances := make([]float32, k)
 	var allowed []uint64
 	if filtered {
-		allowed = make([]uint64, 0, k)
-		for i := 0; i < k; i++ {
-			allowed = append(allowed, uint64(i+1))
+		allowed = make([]uint64, k)
+		for i := range uint64(len(allowed)) {
+			allowed[i] = i + 1
 		}
 	}
 	b.ReportAllocs()
@@ -208,7 +208,7 @@ func mergedCandidates(segments, k int) []embeddedVectorCandidate {
 	state := uint64(0x243f6a8885a308d3)
 	for i := range ordered {
 		state = state*6364136223846793005 + 1442695040888963407
-		ordered[i] = float64(int64(state>>11)) / float64(int64(1)<<52)
+		ordered[i] = float64(state>>11) / (1 << 52)
 	}
 	slices.SortFunc(ordered, func(a, b float64) int { return cmp.Compare(b, a) })
 	if total > k {
@@ -220,11 +220,11 @@ func mergedCandidates(segments, k int) []embeddedVectorCandidate {
 		}
 	}
 	runs := make([][]embeddedVectorCandidate, segments)
-	for i, score := range ordered {
-		segment := i % segments
+	for i := range uint64(len(ordered)) {
+		segment := i % uint64(len(runs))
 		runs[segment] = append(runs[segment], embeddedVectorCandidate{
-			globalDoc: uint64(i),
-			score:     score,
+			globalDoc: i,
+			score:     ordered[i],
 			id:        Identifier(fmt.Sprintf("doc-%06d", i)),
 			idSet:     true,
 		})

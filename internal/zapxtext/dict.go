@@ -136,10 +136,6 @@ func (d *Dictionary) AutomatonIterator(a segment.Automaton,
 	return emptyDictionaryIterator
 }
 
-func (d *Dictionary) incrementBytesRead(val uint64) {
-	d.bytesRead += val
-}
-
 func (d *Dictionary) BytesRead() uint64 {
 	return d.bytesRead
 }
@@ -177,7 +173,7 @@ func (i *DictionaryIterator) Next() (*index.DictEntry, error) {
 	}
 	i.entry.Term = string(term)
 	if !i.omitCount {
-		i.err = i.tmp.read(postingsOffset, i.d)
+		_, i.err = i.d.postingsListFromOffset(postingsOffset, nil, &i.tmp)
 		if i.err != nil {
 			return nil, i.err
 		}

@@ -15,198 +15,50 @@
 package zap
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
-	"fmt"
+	"errors"
 	"math"
-	"os"
 	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	index "github.com/blevesearch/bleve_index_api"
 	seg "github.com/blevesearch/scorch_segment_api/v2"
+
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
 var DefaultFileMergerBufferSize = 1024 * 1024
 
 const docDropped = math.MaxUint64 // sentinel docNum to represent a deleted doc
 
-// Merge takes a slice of segments and bit masks describing which
-// documents may be dropped, and creates a new segment containing the
-// remaining data.  This new segment is built at the specified path.
-func (z *ZapPlugin) Merge(segments []seg.Segment, drops []*roaring.Bitmap, path string,
-	closeCh chan struct{}, s seg.StatsReporter) (
-	[][]uint64, uint64, error) {
-	return z.merge(segments, drops, path, closeCh, s, nil)
-}
-
-func (z *ZapPlugin) MergeUsing(segments []seg.Segment, drops []*roaring.Bitmap, path string,
-	closeCh chan struct{}, s seg.StatsReporter, config map[string]interface{}) (
-	[][]uint64, uint64, error) {
-	return z.merge(segments, drops, path, closeCh, s, config)
-}
-
-func (*ZapPlugin) merge(segments []seg.Segment, drops []*roaring.Bitmap, path string,
-	closeCh chan struct{}, s seg.StatsReporter, config map[string]interface{}) (
-	[][]uint64, uint64, error) {
-	segmentBases := make([]*SegmentBase, len(segments))
-	for segmenti, segment := range segments {
-		switch segmentx := segment.(type) {
-		case *Segment:
-			segmentBases[segmenti] = &segmentx.SegmentBase
-		case *SegmentBase:
-			segmentBases[segmenti] = segmentx
-		default:
-			panic(fmt.Sprintf("oops, unexpected segment type: %T", segment))
-		}
-	}
-	return mergeSegmentBases(segmentBases, drops, path, DefaultChunkMode, closeCh, s, config)
-}
-
-func mergeSegmentBases(segmentBases []*SegmentBase, drops []*roaring.Bitmap, path string,
-	chunkMode uint32, closeCh chan struct{}, s seg.StatsReporter, config map[string]interface{}) (
-	[][]uint64, uint64, error) {
-	flag := os.O_RDWR | os.O_CREATE
-
-	f, err := os.OpenFile(path, flag, 0600)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(path)
-	}
-
-	// buffer the output
-	br := bufio.NewWriterSize(f, DefaultFileMergerBufferSize)
-
-	// wrap it for counting (tracking offsets)
-	cr := NewCountHashWriterWithStatsReporter(br, s)
-	w, err := NewFileWriter(cr, []byte(path))
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-
-	newDocNums, numDocs, storedIndexOffset, _, _, sectionsIndexOffset, err :=
-		mergeToWriter(segmentBases, drops, chunkMode, w, closeCh, config)
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-
-	err = persistFooter(numDocs, storedIndexOffset, sectionsIndexOffset, chunkMode, cr.Sum32(), w, w.id)
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-
-	err = br.Flush()
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-
-	err = f.Sync()
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-
-	err = f.Close()
-	if err != nil {
-		cleanup()
-		return nil, 0, err
-	}
-
-	return newDocNums, uint64(cr.Count()), nil
-}
-
-// Remove fields that have been completely deleted from fieldsInv
-func filterFields(fieldsInv []string, fieldInfo map[string]*index.UpdateFieldInfo) []string {
-	idx := 0
-	for _, field := range fieldsInv {
-		if val, ok := fieldInfo[field]; ok && val.Deleted {
-			continue
-		}
-		fieldsInv[idx] = field
-		idx++
-	}
-	return fieldsInv[:idx]
-}
-
-// Update field options using updateFieldInfo to override the options
-// selected during mergeFields, if needed. This includes removing field
-// options for deleted fields and updating options for fields with changes
-// that have not yet been propagated because a new segment has not been created.
-func finalizeFieldOptions(fieldOptions map[string]index.FieldIndexingOptions,
-	updatedFields map[string]*index.UpdateFieldInfo) map[string]index.FieldIndexingOptions {
-	for field, opts := range fieldOptions {
-		if info, ok := updatedFields[field]; ok {
-			// if field is deleted, remove its options
-			if info.Deleted {
-				delete(fieldOptions, field)
-				continue
-			}
-			// otherwise, update options based on info
-			if info.Index {
-				// ensure indexing is disabled
-				opts &^= index.IndexField
-			}
-			if info.Store {
-				// ensure storing is disabled
-				opts &^= index.StoreField
-			}
-			if info.DocValues {
-				// ensure doc values is disabled
-				opts &^= index.DocValues
-			}
-			fieldOptions[field] = opts
-		}
-	}
-	return fieldOptions
-}
-
 func mergeToWriter(segments []*SegmentBase, drops []*roaring.Bitmap,
-	chunkMode uint32, w *FileWriter, closeCh chan struct{}, config map[string]interface{}) (
+	chunkMode uint32, w *CountHashWriter, closeCh chan struct{}, options blugeseg.BuildOptions) (
 	newDocNums [][]uint64, numDocs, storedIndexOffset uint64,
 	fieldsInv []string, fieldsMap map[string]uint16, sectionsIndexOffset uint64,
 	err error) {
-
 	var fieldsSame bool
 	var fieldsOptions map[string]index.FieldIndexingOptions
 	fieldsSame, fieldsInv, fieldsOptions = mergeFields(segments)
-	updatedFields := mergeUpdatedFields(segments)
-	fieldsInv = filterFields(fieldsInv, updatedFields)
 	fieldsMap = mapFields(fieldsInv)
-	if len(updatedFields) > 0 {
-		// finalize field options based on updated field info
-		fieldsOptions = finalizeFieldOptions(fieldsOptions, updatedFields)
-		// fieldsSame cannot be true if fields were deleted
-		fieldsSame = false
-	}
 
 	numDocs = computeNewDocCount(segments, drops)
+	if numDocs > math.MaxUint32 {
+		return nil, 0, 0, nil, nil, 0, errors.New("too many segment documents")
+	}
 
 	if isClosed(closeCh) {
 		return nil, 0, 0, nil, nil, 0, seg.ErrClosed
 	}
 
-	// the merge opaque is especially important when it comes to tracking the file
-	// offset a field of a particular section is at. This will be used to write the
-	// offsets in the fields section index of the file (the final merged file).
 	mergeOpaque := map[int]resetable{}
-	args := map[string]interface{}{
-		"chunkMode":     chunkMode,
-		"fieldsSame":    fieldsSame,
-		"fieldsMap":     fieldsMap,
-		"numDocs":       numDocs,
-		"fieldsOptions": fieldsOptions,
-	}
-	if config != nil {
-		args["config"] = config
+	args := sectionConfig{
+		chunkMode:     chunkMode,
+		fieldsSame:    fieldsSame,
+		fieldsMap:     fieldsMap,
+		numDocs:       numDocs,
+		fieldsOptions: fieldsOptions,
+		options:       options,
 	}
 
 	if numDocs > 0 {
@@ -216,9 +68,8 @@ func mergeToWriter(segments []*SegmentBase, drops []*roaring.Bitmap,
 			return nil, 0, 0, nil, nil, 0, err
 		}
 
-		// at this point, ask each section implementation to merge itself
 		for i, x := range segmentSections {
-			mergeOpaque[int(i)] = x.InitOpaque(args)
+			mergeOpaque[i] = x.InitOpaque(args)
 			err = x.Merge(mergeOpaque, segments, drops, fieldsInv, newDocNums, w, closeCh)
 			if err != nil {
 				return nil, 0, 0, nil, nil, 0, err
@@ -226,8 +77,6 @@ func mergeToWriter(segments []*SegmentBase, drops []*roaring.Bitmap,
 		}
 	}
 
-	// we can persist the fields section index now, this will point
-	// to the various indexes (each in different section) available for a field.
 	var stats []fieldStats
 	if inverted, ok := mergeOpaque[SectionInvertedTextIndex].(*invertedIndexOpaque); ok {
 		stats = inverted.fieldStats
@@ -240,8 +89,6 @@ func mergeToWriter(segments []*SegmentBase, drops []*roaring.Bitmap,
 	return newDocNums, numDocs, storedIndexOffset, fieldsInv, fieldsMap, sectionsIndexOffset, nil
 }
 
-// mapFields takes the fieldsInv list and returns a map of fieldName
-// to fieldID+1
 func mapFields(fields []string) map[string]uint16 {
 	rv := make(map[string]uint16, len(fields))
 	for i, fieldName := range fields {
@@ -250,8 +97,6 @@ func mapFields(fields []string) map[string]uint16 {
 	return rv
 }
 
-// computeNewDocCount determines how many documents will be in the newly
-// merged segment when obsoleted docs are dropped
 func computeNewDocCount(segments []*SegmentBase, drops []*roaring.Bitmap) uint64 {
 	var newDocCount uint64
 	for segI, segment := range segments {
@@ -263,7 +108,7 @@ func computeNewDocCount(segments []*SegmentBase, drops []*roaring.Bitmap) uint64
 	return newDocCount
 }
 
-func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
+func mergeTermFreqNormLocsByCopying(postItr *PostingsIterator,
 	newDocNums []uint64, newRoaring *roaring.Bitmap,
 	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, impactEncoder *impactCoder,
 	totalTermFrequency *uint64) (
@@ -272,9 +117,6 @@ func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 		postItr.nextBytes()
 	for err == nil && len(nextFreqNormBytes) > 0 {
 		hitNewDocNum := newDocNums[nextDocNum]
-		if hitNewDocNum == docDropped {
-			return 0, 0, 0, fmt.Errorf("see hit with dropped doc num")
-		}
 
 		newRoaring.Add(uint32(hitNewDocNum))
 		if totalTermFrequency != nil {
@@ -305,343 +147,136 @@ func mergeTermFreqNormLocsByCopying(term []byte, postItr *PostingsIterator,
 	return lastDocNum, lastFreq, lastNorm, err
 }
 
-func mergeTermFreqNormLocs(fieldsMap map[string]uint16, term []byte, postItr *PostingsIterator,
+func mergeTermFreqNormLocs(fieldsMap map[string]uint16, postItr *PostingsIterator,
 	newDocNums []uint64, newRoaring *roaring.Bitmap,
-	tfEncoder *chunkedIntCoder, locEncoder *chunkedIntCoder, impactEncoder *impactCoder, bufLoc []uint64,
-	totalTermFrequency *uint64) (
-	lastDocNum uint64, lastFreq uint64, lastNorm uint64, bufLocOut []uint64, err error) {
+	tfEncoder, locEncoder *chunkedIntCoder, impactEncoder *impactCoder,
+	bufLoc []interimLoc, totalTermFrequency *uint64) (
+	lastDocNum, lastFreq, lastNorm uint64, bufLocOut []interimLoc, err error) {
 	next, err := postItr.Next()
 	for next != nil && err == nil {
-		hitNewDocNum := newDocNums[next.Number()]
-		if hitNewDocNum == docDropped {
-			return 0, 0, 0, nil, fmt.Errorf("see hit with dropped docNum")
-		}
-
-		newRoaring.Add(uint32(hitNewDocNum))
-
-		nextFreq := next.Frequency()
+		docNum := newDocNums[next.Number()]
+		freq := next.Frequency()
+		norm := next.(*Posting).NormUint64()
+		newRoaring.Add(uint32(docNum))
 		if totalTermFrequency != nil {
-			*totalTermFrequency += nextFreq
+			*totalTermFrequency += freq
 		}
-		var nextNorm uint64
-		if pi, ok := next.(*Posting); ok {
-			nextNorm = pi.NormUint64()
-		} else {
-			return 0, 0, 0, nil, fmt.Errorf("unexpected posting type %T", next)
+		bufLoc = bufLoc[:0]
+		for _, loc := range next.Locations() {
+			bufLoc = append(bufLoc, interimLoc{
+				fieldID: fieldsMap[loc.Field()] - 1, pos: loc.Pos(),
+				start: loc.Start(), end: loc.End(), arrayposs: loc.ArrayPositions(),
+			})
 		}
-
-		locs := next.Locations()
-
-		if nextFreq > 0 {
-			err = tfEncoder.Add(hitNewDocNum,
-				encodeFreqHasLocs(nextFreq, len(locs) > 0), nextNorm)
-		} else {
-			err = tfEncoder.Add(hitNewDocNum,
-				encodeFreqHasLocs(nextFreq, len(locs) > 0))
-		}
-		if err != nil {
+		if err := encodePostingFrequency(tfEncoder, docNum, freq, norm, len(bufLoc) > 0); err != nil {
 			return 0, 0, 0, nil, err
 		}
-		impactEncoder.Add(hitNewDocNum, nextFreq, nextNorm)
-
-		if len(locs) > 0 {
-			numBytesLocs := 0
-			for _, loc := range locs {
-				ap := loc.ArrayPositions()
-				numBytesLocs += totalUvarintBytes(uint64(fieldsMap[loc.Field()]-1),
-					loc.Pos(), loc.Start(), loc.End(), uint64(len(ap)), ap)
-			}
-
-			err = locEncoder.Add(hitNewDocNum, uint64(numBytesLocs))
-			if err != nil {
-				return 0, 0, 0, nil, err
-			}
-
-			for _, loc := range locs {
-				ap := loc.ArrayPositions()
-				if cap(bufLoc) < 5+len(ap) {
-					bufLoc = make([]uint64, 0, 5+len(ap))
-				}
-				args := bufLoc[0:5]
-				args[0] = uint64(fieldsMap[loc.Field()] - 1)
-				args[1] = loc.Pos()
-				args[2] = loc.Start()
-				args[3] = loc.End()
-				args[4] = uint64(len(ap))
-				args = append(args, ap...)
-				err = locEncoder.Add(hitNewDocNum, args...)
-				if err != nil {
-					return 0, 0, 0, nil, err
-				}
-			}
+		if err := encodePostingLocations(locEncoder, docNum, bufLoc); err != nil {
+			return 0, 0, 0, nil, err
 		}
-
-		lastDocNum = hitNewDocNum
-		lastFreq = nextFreq
-		lastNorm = nextNorm
-
+		impactEncoder.Add(docNum, freq, norm)
+		lastDocNum, lastFreq, lastNorm = docNum, freq, norm
 		next, err = postItr.Next()
 	}
-
 	return lastDocNum, lastFreq, lastNorm, bufLoc, err
-}
-
-func writePostings(postings *roaring.Bitmap, tfEncoder, locEncoder *chunkedIntCoder,
-	impactEncoder *impactCoder,
-	use1HitEncoding func(uint64) (bool, uint64, uint64),
-	w *FileWriter, bufMaxVarintLen64 []byte) (
-	offset uint64, err error) {
-	if postings == nil {
-		return 0, nil
-	}
-
-	termCardinality := postings.GetCardinality()
-	if termCardinality <= 0 {
-		return 0, nil
-	}
-
-	if use1HitEncoding != nil {
-		encodeAs1Hit, docNum1Hit, normBits1Hit := use1HitEncoding(termCardinality)
-		if encodeAs1Hit {
-			return FSTValEncode1Hit(docNum1Hit, normBits1Hit), nil
-		}
-	}
-
-	var tfOffset uint64
-	tfOffset, _, err = tfEncoder.writeAt(w)
-	if err != nil {
-		return 0, err
-	}
-
-	impactOffset, err := impactEncoder.writeAt(w)
-	if err != nil {
-		return 0, err
-	}
-
-	var locOffset uint64
-	locOffset, _, err = locEncoder.writeAt(w)
-	if err != nil {
-		return 0, err
-	}
-
-	postingsOffset := uint64(w.Count())
-
-	n := binary.PutUvarint(bufMaxVarintLen64, tfOffset)
-	_, err = w.Write(bufMaxVarintLen64[:n])
-	if err != nil {
-		return 0, err
-	}
-
-	n = binary.PutUvarint(bufMaxVarintLen64, locOffset)
-	_, err = w.Write(bufMaxVarintLen64[:n])
-	if err != nil {
-		return 0, err
-	}
-
-	n = binary.PutUvarint(bufMaxVarintLen64, impactOffset)
-	_, err = w.Write(bufMaxVarintLen64[:n])
-	if err != nil {
-		return 0, err
-	}
-
-	_, err = writeRoaringWithLen(postings, w, bufMaxVarintLen64)
-	if err != nil {
-		return 0, err
-	}
-
-	return postingsOffset, nil
 }
 
 type varintEncoder func(uint64) (int, error)
 
-func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
-	fieldsMap map[string]uint16, fieldsInv []string,
-	fieldsOptions map[string]index.FieldIndexingOptions,
-	fieldsSame bool, newSegDocCount uint64,
-	w *FileWriter, closeCh chan struct{}) (uint64, [][]uint64, error) {
-	var rv [][]uint64 // The remapped or newDocNums for each segment.
-
-	var newDocNum uint64
-
-	var curr int
-	var data []byte
-	var metaBuf bytes.Buffer
-	varBuf := make([]byte, binary.MaxVarintLen64)
-	metaEncode := func(val uint64) (int, error) {
-		wb := binary.PutUvarint(varBuf, val)
-		return metaBuf.Write(varBuf[:wb])
-	}
-
-	vals := make([][][]byte, len(fieldsInv))
-	blockWriter := newStoredBlockWriter(w, newSegDocCount)
-
-	vdc := visitDocumentCtxPool.Get().(*visitDocumentCtx)
-	defer visitDocumentCtxPool.Put(vdc)
-
-	// for each segment
-	for segI, segment := range segments {
-		// check for the closure in meantime
-		if isClosed(closeCh) {
-			return 0, nil, seg.ErrClosed
-		}
-
-		segNewDocNums := make([]uint64, segment.numDocs)
-
-		dropsI := drops[segI]
-
-		// With identical field mappings and no deletions, reuse each decoded
-		// document record directly and only recompress at the new block boundary.
-		if fieldsSame && (dropsI == nil || dropsI.GetCardinality() == 0) {
-			for docNum := uint64(0); docNum < segment.numDocs; docNum++ {
-				meta, storedData, err := segment.getDocStoredMetaAndData(vdc, docNum)
-				if err != nil {
-					return 0, nil, err
-				}
-				if err = blockWriter.Add(meta, storedData); err != nil {
-					return 0, nil, err
-				}
-				segNewDocNums[docNum] = newDocNum
-				newDocNum++
-			}
-			rv = append(rv, segNewDocNums)
-
-			continue
-		}
-
-		// for each doc num
-		for docNum := uint64(0); docNum < segment.numDocs; docNum++ {
-			// TODO: roaring's API limits docNums to 32-bits?
-			if dropsI != nil && dropsI.Contains(uint32(docNum)) {
-				segNewDocNums[docNum] = docDropped
-				continue
-			}
-
-			segNewDocNums[docNum] = newDocNum
-
-			curr = 0
-			metaBuf.Reset()
-			data = data[:0]
-
-			// collect all the data
-			for i := 0; i < len(fieldsInv); i++ {
-				vals[i] = vals[i][:0]
-			}
-			err := segment.visitStoredFields(vdc, docNum, func(field string, _ byte, value []byte, _ []uint64) bool {
-				fieldID := int(fieldsMap[field]) - 1
-				if fieldID < 0 {
-					// no entry for field in fieldsMap
-					return false
-				}
-				// early exit if the store is not wanted for this field
-				if !fieldsOptions[field].IsStored() {
-					return true
-				}
-				vals[fieldID] = append(vals[fieldID], value)
-
-				return true
-			})
-			if err != nil {
-				return 0, nil, err
-			}
-
-			// Walk every stored field, including _id, in field order.
-			for fieldID := 0; fieldID < len(fieldsInv); fieldID++ {
-				// early exit if the store is not wanted for this field
-				if !fieldsOptions[fieldsInv[fieldID]].IsStored() {
-					continue
-				}
-				// early exit if no stored values for this field
-				if len(vals[fieldID]) == 0 {
-					continue
-				}
-				storedFieldValues := vals[fieldID]
-
-				var err2 error
-				curr, data, err2 = persistStoredFieldValues(fieldID,
-					storedFieldValues, curr, metaEncode, data)
-				if err2 != nil {
-					return 0, nil, err2
-				}
-			}
-
-			metaBytes := metaBuf.Bytes()
-
-			if err = blockWriter.Add(metaBytes, data); err != nil {
-				return 0, nil, err
-			}
-
-			newDocNum++
-		}
-
-		rv = append(rv, segNewDocNums)
-	}
-
-	storedIndexOffset, err := blockWriter.Close()
-	if err != nil {
-		return 0, nil, err
-	}
-
-	// calculate new edge list if applicable
-	var newEdgeList map[uint64]uint64
-
-	for segI, segment := range segments {
-		// check for the closure in meantime
-		if isClosed(closeCh) {
-			return 0, nil, seg.ErrClosed
-		}
-		// get the edgeList for this segment
-		edgeList := segment.edgeList()
-		// if no edgeList, nothing to do
-		if edgeList == nil {
-			continue
-		}
-		newSegDocNums := rv[segI]
-		edgeList.iterate(func(oldChild uint64, oldParent uint64) bool {
-			newParent := newSegDocNums[oldParent]
-			newChild := newSegDocNums[oldChild]
-			if newParent != docDropped &&
-				newChild != docDropped {
-				if newEdgeList == nil {
-					newEdgeList = make(map[uint64]uint64)
-				}
-				newEdgeList[newChild] = newParent
-			}
-			return true
-		})
-	}
-
-	// write out the new edge list
-	// first write out the number of entries
-	// which is also the number of valid subDocs
-	// in the merged segment
-	buf := make([]byte, binary.MaxVarintLen64)
-	n := binary.PutUvarint(buf, uint64(len(newEdgeList)))
-	_, err = w.Write(buf[:n])
-	if err != nil {
-		return 0, nil, err
-	}
-	// write the child -> parent edge list
-	// child and parent are both flattened doc ids
-	for child, parent := range newEdgeList {
-		n = binary.PutUvarint(buf, child)
-		_, err = w.Write(buf[:n])
-		if err != nil {
-			return 0, nil, err
-		}
-		n = binary.PutUvarint(buf, parent)
-		_, err = w.Write(buf[:n])
-		if err != nil {
-			return 0, nil, err
-		}
-	}
-
-	return storedIndexOffset, rv, nil
+type storedFieldsMerger struct {
+	fields     map[string]uint16
+	options    map[string]index.FieldIndexingOptions
+	sameFields bool
+	values     [][][]byte
+	meta       bytes.Buffer
+	data       []byte
+	varint     [binary.MaxVarintLen64]byte
+	context    *visitDocumentCtx
+	writer     *storedBlockWriter
+	nextDoc    uint64
 }
 
-// mergeFields builds a unified list of fields used across all the
-// input segments, and computes whether the fields are the same across
-// segments (which depends on fields to be sorted in the same way
-// across segments)
+func mergeStoredAndRemap(segments []*SegmentBase, drops []*roaring.Bitmap,
+	fields map[string]uint16, names []string, options map[string]index.FieldIndexingOptions,
+	sameFields bool, numDocs uint64, w *CountHashWriter, closeCh chan struct{}) (uint64, [][]uint64, error) {
+	m := storedFieldsMerger{
+		fields: fields, options: options, sameFields: sameFields,
+		values:  make([][][]byte, len(names)),
+		context: visitDocumentCtxPool.Get().(*visitDocumentCtx),
+		writer:  newStoredBlockWriter(w, numDocs),
+	}
+	defer visitDocumentCtxPool.Put(m.context)
+	mappings := make([][]uint64, len(segments))
+	for i, segment := range segments {
+		if isClosed(closeCh) {
+			return 0, nil, seg.ErrClosed
+		}
+		mapping, err := m.mergeSegment(segment, drops[i])
+		if err != nil {
+			return 0, nil, err
+		}
+		mappings[i] = mapping
+	}
+	offset, err := m.writer.Close()
+	return offset, mappings, err
+}
+
+func (m *storedFieldsMerger) mergeSegment(segment *SegmentBase, drops *roaring.Bitmap) ([]uint64, error) {
+	mapping := make([]uint64, segment.numDocs)
+	for docNum := range mapping {
+		if drops != nil && drops.Contains(uint32(docNum)) {
+			mapping[docNum] = docDropped
+			continue
+		}
+		if err := m.writeDocument(segment, uint64(docNum)); err != nil {
+			return nil, err
+		}
+		mapping[docNum] = m.nextDoc
+		m.nextDoc++
+	}
+	return mapping, nil
+}
+
+func (m *storedFieldsMerger) writeDocument(segment *SegmentBase, docNum uint64) error {
+	if m.sameFields {
+		meta, data, err := segment.getDocStoredMetaAndData(m.context, docNum)
+		if err != nil {
+			return err
+		}
+		return m.writer.Add(meta, data)
+	}
+	for id := range m.values {
+		m.values[id] = m.values[id][:0]
+	}
+	if err := segment.visitStoredFields(m.context, docNum, m.collectField); err != nil {
+		return err
+	}
+	m.meta.Reset()
+	m.data = m.data[:0]
+	var offset int
+	for fieldID, values := range m.values {
+		var err error
+		offset, m.data, err = persistStoredFieldValues(fieldID, values, offset, m.encodeMeta, m.data)
+		if err != nil {
+			return err
+		}
+	}
+	return m.writer.Add(m.meta.Bytes(), m.data)
+}
+
+func (m *storedFieldsMerger) collectField(field string, _ byte, value []byte, _ []uint64) bool {
+	if m.options[field].IsStored() {
+		id := m.fields[field] - 1
+		m.values[id] = append(m.values[id], value)
+	}
+	return true
+}
+
+func (m *storedFieldsMerger) encodeMeta(value uint64) (int, error) {
+	n := binary.PutUvarint(m.varint[:], value)
+	return m.meta.Write(m.varint[:n])
+}
+
 func mergeFields(segments []*SegmentBase) (bool, []string, map[string]index.FieldIndexingOptions) {
 	fieldsSame := true
 
@@ -658,17 +293,11 @@ func mergeFields(segments []*SegmentBase) (bool, []string, map[string]index.Fiel
 			fieldsExist[field] = struct{}{}
 
 			if prev, ok := fieldOptions[field]; ok {
-				// Merge options conservatively: once a field option is disabled (bit cleared)
-				// in any segment, it remains disabled. This ensures deterministic behavior
-				// when options can only transition from true -> false.
 				fieldOptions[field] = prev & segment.fieldsOptions[field]
-				// check if any bits were cleared
 				if fieldOptions[field] != prev {
-					// Some bits were cleared (option changed from true -> false)
 					fieldsSame = false
 				}
 			} else {
-				// first occurrence of the field
 				fieldOptions[field] = segment.fieldsOptions[field]
 			}
 			if len(segment0Fields) != len(fields) || segment0Fields[fieldi] != field {
@@ -678,7 +307,6 @@ func mergeFields(segments []*SegmentBase) (bool, []string, map[string]index.Fiel
 	}
 
 	rv := make([]string, 0, len(fieldsExist))
-	// ensure _id stays first
 	rv = append(rv, "_id")
 	for k := range fieldsExist {
 		if k != "_id" {
@@ -689,36 +317,6 @@ func mergeFields(segments []*SegmentBase) (bool, []string, map[string]index.Fiel
 	sort.Strings(rv[1:]) // leave _id as first
 
 	return fieldsSame, rv, fieldOptions
-}
-
-// Combine updateFieldInfo from all segments
-func mergeUpdatedFields(segments []*SegmentBase) map[string]*index.UpdateFieldInfo {
-	var fieldInfo map[string]*index.UpdateFieldInfo
-
-	for _, segment := range segments {
-		for field, info := range segment.updatedFields {
-			if fieldInfo == nil {
-				fieldInfo = make(map[string]*index.UpdateFieldInfo)
-			}
-			// if field not present, add it
-			if _, ok := fieldInfo[field]; !ok {
-				fieldInfo[field] = &index.UpdateFieldInfo{
-					// mark whether field is deleted in any segment
-					Deleted:   info.Deleted,
-					Index:     info.Index,
-					Store:     info.Store,
-					DocValues: info.DocValues,
-				}
-			} else {
-				fieldInfo[field].Deleted = fieldInfo[field].Deleted || info.Deleted
-				fieldInfo[field].Index = fieldInfo[field].Index || info.Index
-				fieldInfo[field].Store = fieldInfo[field].Store || info.Store
-				fieldInfo[field].DocValues = fieldInfo[field].DocValues || info.DocValues
-			}
-		}
-
-	}
-	return fieldInfo
 }
 
 func isClosed(closeCh chan struct{}) bool {

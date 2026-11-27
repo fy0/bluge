@@ -1,10 +1,9 @@
-# Separate Vector Storage Experiment
+# Collection Vector Storage
 
-This branch adds an experimental `Collection` API for one BM25 corpus with
-independent vector spaces. A vector space is identified by a stable ID such as
-`e5-base-v1` and has immutable dimension, metric, and field metadata. Model,
-model revision, and preprocessing descriptions are optional. Model migration,
-traffic switching, readiness decisions, and rollback belong to the application.
+`Collection` provides one BM25 corpus with independent vector spaces. A vector
+space has a stable ID such as `e5-base-v1` and immutable dimension, metric, and
+field metadata. Model, model revision, and preprocessing descriptions are optional.
+The application selects models and decides when to switch traffic between spaces.
 
 ```go
 config := bluge.DefaultCollectionConfig("./kb")
@@ -24,26 +23,39 @@ hits, _ := reader.SearchVectorRequest(ctx, "model-a-v1",
     bluge.NewVectorSearchRequest("embedding", query).SetK(10))
 ```
 
-The text index is stored under `text/`. Each vector space is stored below
-`vectors/space-<id>/`. A committed generation contains:
+The text index is stored under `text/`. The collection-level `collection.json`
+stores only the format version, corpus identity, and storage backend.
+Each vector space has a `spec.json` under
+`vectors/space-<id>/`, containing its specification and an ordered generation list.
 
-* `index-<generation>.usearch` or `index-<generation>.flat`, containing the
-  native HNSW or exact vector data;
-* `metadata-<generation>.json`, containing the space specification and the
-  `chunk_id -> document revision` map;
-* `commit-<generation>.json`, containing SHA-256 checksums for the two files.
+Each generation consists of two files. Generation numbers use 20 decimal digits:
 
-Files are written to a temporary directory and published by rename. The native
-file, JSON mapping and commit certificate are written first; atomically replacing
-the checksummed generation catalog in `spec.json` is the publication point.
-Readers select the newest generation in that catalog. By default, text updates
-create a fresh revision, so an older embedding is excluded until the caller
-writes a vector with the new revision. Alternatively, pass one nonempty embedding
-input version per document: `collection.UpsertDocuments(documents, versions...)`.
-Keeping that version preserves vectors when only unrelated metadata changes;
-the caller must change it when embedding inputs change. The library does not
-infer embedding inputs from document fields. `PendingVectors` reports missing or
-stale embeddings; model invocation and retry queues remain outside Bluge.
+* `index-<generation>` contains the native HNSW or exact vector data.
+* `metadata-<generation>.json` contains the space specification, vector revisions,
+  index file size, and native key mapping when applicable.
+
+The index and metadata are written and synced before an atomic replacement of
+`spec.json`, the sole vector commit point. Readers select the newest generation
+listed in that file. JSON publication uses a temporary file, `Sync`, and atomic
+replacement. Opening a space checks the format version, corpus identity, strictly
+increasing generation list, and referenced file presence.
+
+Each document stores its revision in the internal `_collection_revision` field.
+The revision and text commit atomically in one text batch; callers cannot supply
+that reserved field. Document writes and deletes do not acquire `generations.lock`.
+Readers capture a text snapshot and pinned vector generations. Vector searches,
+`PendingVectors`, and `VectorStatus` load and cache revisions from that reader's
+text snapshot on first use. Opening a reader and running text searches do not scan
+document revisions.
+
+By default, text updates create a fresh revision, so an older embedding is
+excluded until the caller writes a vector with the new revision. Alternatively,
+pass one nonempty embedding input version per document:
+`collection.UpsertDocuments(documents, versions...)`. Keeping that version
+preserves vectors when only unrelated metadata changes; change it when embedding
+inputs change. `UpsertVectors` rejects stale revisions before publishing a
+generation. `PendingVectors` reports missing or stale embeddings; the application
+runs models and manages retry queues.
 
 `collection.Reader("model-a-v1")` and
 `bluge.OpenCollectionReader(config, "model-a-v1")` load catalogs and pin generations
@@ -53,22 +65,9 @@ unfiltered path unless a business filter is supplied. Revision exclusions still
 intersect with business filters, including prepared filters.
 
 Set `CollectionConfig.VectorStorage` to `"flat"` for a cgo-free exact-search
-baseline. The default `"usearch"` mode requires the existing USearch native
-library through `LibraryPath` or `BLUGE_USEARCH_LIBRARY_PATH`.
-
-This branch is unreleased. Collection accepts only its current format; earlier
-experimental formats must be rebuilt. The existing `Writer`, `Reader`, sidecar,
-and embedded-vector APIs remain available.
-
-Rebuild the native adapter from this branch before running update workloads.
-USearch 2.26.0 compaction permutes graph slots but leaves stale key lookups and
-free-slot positions in the live handle. The adapter now serializes and reloads
-after compaction before subsequent mutations. Without this fix, the Linux
-1,000-row smoke workload reopened with 990 native rows after ten replacements,
-and key-to-vector identity can be wrong even when the count looks correct.
-The ABI and float32 format are unchanged. The round trip consumes a temporary
-in-memory native serialization and is included in update timing. Existing corrupt
-generations are reported, not repaired or silently rolled back.
+backend. The default `"usearch"` mode loads the native library through
+`LibraryPath` or `BLUGE_USEARCH_LIBRARY_PATH` and requires `ABI_VERSION == 4`.
+The current Collection disk format version is 3.
 
 ## Generation Maintenance
 
@@ -81,12 +80,10 @@ process termination also releases them. No PID timeout or in-process reference
 count determines whether a generation is safe to delete.
 
 `generations.lock` is a permanent coordinator inode. Discovery, reader lease
-acquisition, commit publication, and retirement use this lock. Maintenance also
-requires the existing collection writer lock, so it cannot delete an active
-writer's staging data. Readers must be able to create/open lease files for writing.
-All participating processes must use this protocol; old experimental binaries
-that do not acquire leases must be stopped before enabling maintenance. Use local
-filesystems with working kernel locks and atomic rename (tested on NTFS and ext4).
+acquisition, spec publication, and retirement use this lock. Maintenance also
+requires the collection writer lock, so it cannot delete active staging data.
+Readers must be able to create/open lease files for writing. Use local
+filesystems with working kernel locks and atomic rename.
 
 ```go
 result, err := collection.Maintain(ctx)
@@ -96,31 +93,30 @@ result, err = collection.Maintain(ctx, "model-a-v1")
 result, err = bluge.MaintainCollection(ctx, config)
 // UpsertVectors returning nil means committed. Cleanup errors are separate:
 maintenanceErr := collection.LastMaintenanceError()
-// Explicit payload checksum and metadata verification (all spaces by default):
+// Metadata and file-size verification (all spaces by default):
 err = bluge.VerifyCollection(ctx, config, "model-a-v1")
 ```
 
-Maintenance first validates selected catalogs, commit identities, and payload
-file presence. A malformed catalog or commit, or a missing referenced file,
-causes an error before reclamation starts. It does not select an older commit
-to conceal corruption. Full payload hashes and vector metadata are checked by
-`VerifyCollection` and when loading a generation for reading or writing; native
-structural checks happen when opening the vector index. Maintenance alone is
-not an integrity audit and can reclaim obsolete payloads without hashing them.
-Once safe, obsolete generations are durably removed from the catalog, then their
-commit certificates are renamed to `.retired-commit-...json` before deleting their
-payloads. Interrupted retirement, abandoned
-`.pending-*` directories, and uncommitted index/metadata files are reclaimed on
-reopen or the next maintenance pass. Maintenance is idempotent. Unknown files are
-preserved. The writer lock excludes active staging writes during this sweep.
+Maintenance validates the selected specifications, generation ordering, and
+referenced file presence before reclamation. A missing `spec.json` in a directory
+containing generation files is corruption; maintenance preserves those files.
+Obsolete unpinned generations are
+removed from `spec.json` atomically, then their files are deleted. Abandoned
+`.pending-*` directories and uncommitted index/metadata files are reclaimed on
+reopen or the next maintenance pass. Maintenance is idempotent and preserves
+unknown files.
 
-An automatic maintenance error never changes an already successful vector commit
-into a failed batch. `LastMaintenanceError` exposes it; an explicit `Maintain`
-returns it together with partial progress. Maintenance reads small catalogs and
-commit records rather than all vector payloads. Explicit `VerifyCollection`
-still costs O(total selected retained bytes) and holds the coordinator during
-verification, blocking publication and new reader creation for that pass.
-Existing readers can keep querying.
+`VerifyCollection` checks retained generation metadata, corpus and space identity,
+native key mappings, and recorded index sizes. It reads JSON metadata and file
+stats; native index dimensions and row counts are checked when opening the index.
+`VectorStatus` and `PendingVectors` use document and generation revisions without loading
+vector payloads. Verification holds the coordinator while reading selected
+metadata, blocking publication and new reader creation; existing readers can
+keep querying.
+
+An automatic maintenance error leaves an already published vector generation
+committed. `LastMaintenanceError` exposes it; an explicit `Maintain` returns the
+error with partial progress.
 
 Windows atomic renames retry transient sharing/access conflicts for at most
 127 ms before returning the underlying error with both paths. This accommodates
@@ -183,14 +179,6 @@ The dataset is synthetic, not model-generated or real business data. It fixes
 input vectors, queries and write order; native HNSW graph internals and randomized
 Collection revision tokens are not promised bit-identical across runs.
 
-The manifest, space specification, commit certificates, and vector metadata use
-one current format version. A checksummed catalog is required; there is no
-filename-based fallback or automatic format migration. Catalog checksums detect
-accidental changes to model specs or generation lists. A catalog-referenced
-commit file that disappears is corruption, not an invitation to choose an older
-generation. A certificate not yet listed in the catalog is uncommitted and can
-be reclaimed, even if all three of its files were completely written.
-
 Collection temporary measurements also include final generation filenames that
 are not yet catalog-committed. On Windows the sampler opens catalogs with delete
 sharing so observation does not prevent the atomic replacement it is measuring.
@@ -205,9 +193,9 @@ node docs/summarize-collection-benchmark.mjs tmp/storage-experiment \
 ```
 
 The archive includes raw reports, individual query timings and recalls, execution
-logs, source/library hashes, derived totals, and verified final generation lists.
-The derived retain-all total sums the measured current payload and mapping sizes
-of every build/update generation; it is not a separate no-GC timing experiment.
+logs, derived totals, and final generation lists. The derived retain-all total
+sums the measured current payload and mapping sizes of every build/update
+generation; it is not a separate no-GC timing experiment.
 Additional completed run roots can be supplied after the archive path; later
 roots replace earlier cases by name, and all source logs and provenance are kept.
 The validator refuses partial cases or inconsistent workload/library settings.

@@ -17,45 +17,29 @@ package zap
 import (
 	"hash/crc32"
 	"io"
-
-	segment "github.com/blevesearch/scorch_segment_api/v2"
 )
 
-// CountHashWriter is a wrapper around a Writer which counts the number of
-// bytes which have been written and computes a crc32 hash
 type CountHashWriter struct {
 	w   io.Writer
 	crc uint32
-	n   int
-	s   segment.StatsReporter
+	n   uint64
 }
 
-// NewCountHashWriter returns a CountHashWriter which wraps the provided Writer
 func NewCountHashWriter(w io.Writer) *CountHashWriter {
 	return &CountHashWriter{w: w}
 }
 
-func NewCountHashWriterWithStatsReporter(w io.Writer, s segment.StatsReporter) *CountHashWriter {
-	return &CountHashWriter{w: w, s: s}
-}
-
-// Write writes the provided bytes to the wrapped writer and counts the bytes
 func (c *CountHashWriter) Write(b []byte) (int, error) {
 	n, err := c.w.Write(b)
 	c.crc = crc32.Update(c.crc, crc32.IEEETable, b[:n])
-	c.n += n
-	if c.s != nil {
-		c.s.ReportBytesWritten(uint64(n))
-	}
+	c.n += uint64(n)
 	return n, err
 }
 
-// Count returns the number of bytes written
-func (c *CountHashWriter) Count() int {
+func (c *CountHashWriter) Count() uint64 {
 	return c.n
 }
 
-// Sum32 returns the CRC-32 hash of the content written to this writer
 func (c *CountHashWriter) Sum32() uint32 {
 	return c.crc
 }

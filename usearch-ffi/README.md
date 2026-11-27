@@ -19,20 +19,15 @@ the search algorithm. This adapter depends on that crate and adds the stable
 
 The Rust layer handles ownership and error conversion outside the search hot
 loop. Vector data and result buffers cross the boundary without per-element
-translation. For filtered queries, Go passes candidate keys as one array and
-Rust builds the `HashSet` consumed by USearch's predicate; native code never
-calls back into Go.
+translation. Filtered queries pass ascending, unique keys from Go. Rust's
+predicate uses binary search directly on that slice without a heap allocation.
 
-ABI 3 also accepts row-major vector additions and key removals in batches. The
-Go adapter bounds each addition call to roughly 4 MiB of `float32` values and
-at most 4096 rows; USearch still owns each HNSW insertion, but the process no
-longer pays one Go-to-native transition per vector.
+Row-major additions and key removals cross the ABI in batches. Each addition
+call carries at most 4096 rows and roughly 4 MiB of float32 values.
 
-ABI 4 adds `bluge_usearch_index_reserve_threads`, which grows the per-index
-search context pool beyond the `hardware_concurrency` default so concurrent
-searches on one handle run in parallel instead of serializing. The Go adapter
-caps in-flight calls at the negotiated pool size and keeps ABI 3 libraries
-working with their default pool.
+Bluge requires ABI 4 and resolves every symbol at load time. Each index reserves
+64 native search contexts. A semaphore bounds concurrent calls to that count;
+operations that change native storage acquire every permit.
 
 USearch 2.26.0 compaction changes graph slot positions without refreshing the
 live key lookup and free-slot queue. The adapter therefore reloads its native
@@ -116,6 +111,5 @@ The native adapter and its dependencies retain independent compatibility
 identifiers inside `manifest.json`. `Cargo.toml` versions the adapter,
 `Cargo.lock` pins the exact USearch dependency compiled into an artifact, and
 `bluge_usearch_abi_version` identifies the C contract. The current release uses
-adapter 0.1.0, USearch 2.26.0, and ABI 4. Bluge accepts ABI 3 and 4 libraries
-and rejects anything else before opening an index, regardless of the filenames
-or release tag.
+adapter 0.1.0, USearch 2.26.0, and ABI 4. Any other ABI version is rejected
+before opening an index.

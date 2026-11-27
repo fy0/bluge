@@ -54,9 +54,9 @@ func (f *VectorField) Size() int {
 	return sizeOfString + len(f.name) + sizeOfSlice + len(f.vector)*4
 }
 
-// VectorValue returns a copy of the embedding associated with the field.
+// The returned slice remains owned by the field.
 func (f *VectorField) VectorValue() []float32 {
-	return append([]float32(nil), f.vector...)
+	return f.vector
 }
 
 // VectorSimilarity returns the score function associated with the field.

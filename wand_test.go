@@ -182,7 +182,6 @@ func TestBM25RawTopNExactAcrossSegmentsAndDeletions(t *testing.T) {
 
 	modes := []search.Similarity{
 		similarity.NewBM25Similarity(),
-		similarity.NewLegacyBM25Similarity(),
 		similarity.NewBleveBM25Similarity(),
 	}
 	for modeNumber, mode := range modes {

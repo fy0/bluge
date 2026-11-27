@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/fy0/bluge/internal/fsatomic"
 )
 
 func TestCollectionPublishTransientSharingConflict(t *testing.T) {
@@ -27,7 +29,7 @@ func TestCollectionPublishTransientSharingConflict(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		done <- reader.Close()
 	}()
-	err = replaceCollectionFile(source, target)
+	err = fsatomic.Replace(source, target)
 	if closeErr := <-done; closeErr != nil {
 		t.Fatal(closeErr)
 	}

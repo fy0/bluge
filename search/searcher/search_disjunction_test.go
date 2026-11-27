@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"math"
 	"testing"
 
 	"github.com/fy0/bluge/search/similarity"
@@ -67,11 +68,11 @@ func TestDisjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 			},
 		},
@@ -81,15 +82,15 @@ func TestDisjunctionSearch(t *testing.T) {
 			results: []*search.DocumentMatch{
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("1"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("3"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 				{
 					Number: baseTestIndexReaderDirect.docNumByID("4"),
-					Score:  0.6301338005090412,
+					Score:  1.386294361119891,
 				},
 			},
 		},
@@ -113,7 +114,7 @@ func TestDisjunctionSearch(t *testing.T) {
 				if next.Number != test.results[i].Number {
 					t.Errorf("expected result %d to have number %d got %d for test %d", i, test.results[i].Number, next.Number, testIndex)
 				}
-				if !scoresCloseEnough(next.Score, test.results[i].Score) {
+				if math.Abs(next.Score-test.results[i].Score) > 1e-12 {
 					t.Errorf("expected result %d to have score %v got  %v for test %d", i, test.results[i].Score, next.Score, testIndex)
 					t.Logf("scoring explanation: %s", next.Explanation)
 				}

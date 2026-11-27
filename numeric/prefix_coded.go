@@ -33,9 +33,9 @@ func NewPrefixCodedInt64Prealloc(in int64, shift uint, prealloc []byte) (
 		return nil, prealloc, fmt.Errorf("cannot shift %d, must be between 0 and 63", shift)
 	}
 
-	nChars := ((63 - shift) / 7) + 1
+	nChars := ((63 - int(shift)) / 7) + 1
 
-	size := int(nChars + 1)
+	size := nChars + 1
 	if len(prealloc) >= size {
 		rv = PrefixCoded(prealloc[0:size])
 		preallocRest = prealloc[size:]
@@ -45,14 +45,14 @@ func NewPrefixCodedInt64Prealloc(in int64, shift uint, prealloc []byte) (
 
 	rv[0] = ShiftStartInt64 + byte(shift)
 
-	sortableBits := int64(uint64(in) ^ 0x8000000000000000)
-	sortableBits = int64(uint64(sortableBits) >> shift)
+	sortableBits := uint64(in) ^ 0x8000000000000000
+	sortableBits >>= shift
 	for nChars > 0 {
 		// Store 7 bits per byte for compatibility
 		// with UTF-8 encoding of terms
 		rv[nChars] = byte(sortableBits & 0x7f)
 		nChars--
-		sortableBits = int64(uint64(sortableBits) >> 7)
+		sortableBits >>= 7
 	}
 
 	return rv, preallocRest, nil
@@ -83,12 +83,12 @@ func (p PrefixCoded) Int64() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	var sortableBits int64
+	var sortableBits uint64
 	for _, inbyte := range p[1:] {
 		sortableBits <<= 7
-		sortableBits |= int64(inbyte)
+		sortableBits |= uint64(inbyte)
 	}
-	return int64(uint64(sortableBits<<shift) ^ 0x8000000000000000), nil
+	return int64((sortableBits << shift) ^ 0x8000000000000000), nil
 }
 
 func ValidPrefixCodedTerm(p string) (valid bool, shift int) {

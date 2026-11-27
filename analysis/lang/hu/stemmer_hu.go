@@ -17,6 +17,7 @@ package hu
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/hungarian"
+
 	"github.com/fy0/bluge/analysis"
 )
 

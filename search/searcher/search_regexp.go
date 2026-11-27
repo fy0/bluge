@@ -18,6 +18,7 @@ import (
 	"regexp/syntax"
 
 	"github.com/blevesearch/vellum/regexp"
+
 	"github.com/fy0/bluge/search"
 )
 

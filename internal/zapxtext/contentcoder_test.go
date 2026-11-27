@@ -12,13 +12,12 @@ import (
 	"bytes"
 	"testing"
 
-	index "github.com/blevesearch/bleve_index_api"
 	"github.com/golang/snappy"
 )
 
 func TestChunkedContentCoderDeltaMetadata(t *testing.T) {
 	var output bytes.Buffer
-	coder := newChunkedContentCoder(1024, 1023, &output, false, false)
+	coder := newChunkedContentCoder(1023, &output)
 	values := map[uint64][]byte{
 		0:    []byte("zero"),
 		7:    []byte("seven"),
@@ -37,11 +36,7 @@ func TestChunkedContentCoderDeltaMetadata(t *testing.T) {
 	}
 
 	segment := &SegmentBase{
-		mem:        output.Bytes(),
-		fileReader: &FileReader{},
-		fieldsOptions: map[string]index.FieldIndexingOptions{
-			"field": index.DocValues,
-		},
+		mem: output.Bytes(),
 	}
 	reader, err := segment.loadFieldDocValueReader("field", 0, uint64(output.Len()))
 	if err != nil {

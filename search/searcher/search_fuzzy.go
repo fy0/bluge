@@ -22,6 +22,7 @@ import (
 
 	"github.com/blevesearch/vellum"
 	"github.com/blevesearch/vellum/levenshtein"
+
 	"github.com/fy0/bluge/search"
 )
 
@@ -30,13 +31,13 @@ var levAutomatonBuilders map[int]*levenshtein.LevenshteinAutomatonBuilder
 
 func init() {
 	levAutomatonBuilders = map[int]*levenshtein.LevenshteinAutomatonBuilder{}
-	supportedFuzziness := []int{1, 2}
+	supportedFuzziness := []uint8{1, 2}
 	for _, fuzziness := range supportedFuzziness {
-		lb, err := levenshtein.NewLevenshteinAutomatonBuilder(uint8(fuzziness), true)
+		lb, err := levenshtein.NewLevenshteinAutomatonBuilder(fuzziness, true)
 		if err != nil {
 			panic(fmt.Errorf("levenshtein automaton ed1 builder err: %v", err))
 		}
-		levAutomatonBuilders[fuzziness] = lb
+		levAutomatonBuilders[int(fuzziness)] = lb
 	}
 }
 

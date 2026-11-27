@@ -17,6 +17,7 @@ package ro
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/romanian"
+
 	"github.com/fy0/bluge/analysis"
 )
 

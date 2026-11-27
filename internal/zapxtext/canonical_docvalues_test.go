@@ -16,6 +16,7 @@ import (
 	"github.com/fy0/bluge/analysis"
 	"github.com/fy0/bluge/internal/blugeidx"
 	"github.com/fy0/bluge/numeric"
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
 func TestCanonicalNumericDocValues(t *testing.T) {
@@ -42,11 +43,11 @@ func TestCanonicalNumericDocValues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	segment, _, err := New([]*blugeidx.Document{doc})
+	segment, _, err := New([]*blugeidx.Document{doc}, nil, blugeseg.BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sb := segment.(*SegmentBase)
+	sb := segment
 	counts := map[string]int{}
 	_, err = sb.VisitDocValues(0, []string{"price", "raw"}, func(field string, _ []byte) {
 		counts[field]++

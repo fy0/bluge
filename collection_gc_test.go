@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fy0/bluge/index/lock"
+	"github.com/fy0/bluge/internal/fsatomic"
 )
 
 func gcCollection(t *testing.T, storage string) (*Collection, []VectorSpaceSpec, []DocumentRevision) {
@@ -67,7 +68,7 @@ func gcGenerations(t *testing.T, c *Collection, specs []VectorSpaceSpec, want ..
 		}
 		var got []uint64
 		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), "commit-") {
+			if strings.HasPrefix(e.Name(), "metadata-") {
 				n, _, err := collectionFileGeneration(e.Name())
 				if err != nil {
 					t.Fatal(err)
@@ -251,221 +252,157 @@ func TestCollectionCrossProcessPins(t *testing.T) {
 }
 
 func TestCollectionMaintenanceRecovery(t *testing.T) {
-	for _, phase := range []string{"staging", "index", "metadata", "commit-unpublished", "catalog-retired", "retired", "partly-deleted"} {
-		t.Run(phase, func(t *testing.T) {
-			c, specs, revs := gcCollection(t, "flat")
-			r, err := c.Reader()
-			if err != nil {
-				t.Fatal(err)
-			}
-			gcPublish(t, c, specs, revs)
-			gcPublish(t, c, specs, revs)
-			if err := r.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.Close(); err != nil {
-				t.Fatal(err)
-			}
-			dir := collectionSpacePath(c.config.Path, specs[0].ID)
-			oldIndex, oldMeta, oldCommit := collectionGenerationFiles(dir, "flat", 1)
-			newIndex, newMeta, newCommit := collectionGenerationFiles(dir, "flat", 4)
-			copyFile := func(from, to string) {
-				b, err := os.ReadFile(from)
-				if err != nil {
-					t.Fatal(err)
-				}
-				// #nosec G703 -- Both paths are generated under this test's temporary collection directory.
-				if err := os.WriteFile(to, b, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			pending := filepath.Join(dir, ".pending-interrupted")
-			if err := os.Mkdir(pending, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			copyFile(oldIndex, filepath.Join(pending, "index.flat"))
-			switch phase {
-			case "index":
-				copyFile(oldIndex, newIndex)
-			case "metadata":
-				copyFile(oldIndex, newIndex)
-				copyFile(oldMeta, newMeta)
-			case "commit-unpublished":
-				copyFile(oldIndex, newIndex)
-				var metadata collectionVectorMetadata
-				if err := readCollectionJSON(oldMeta, &metadata); err != nil {
-					t.Fatal(err)
-				}
-				metadata.Generation = 4
-				if err := writeCollectionJSON(newMeta, metadata); err != nil {
-					t.Fatal(err)
-				}
-				indexHash, err := collectionFileHash(newIndex)
-				if err != nil {
-					t.Fatal(err)
-				}
-				metaHash, err := collectionFileHash(newMeta)
-				if err != nil {
-					t.Fatal(err)
-				}
-				commit := collectionCommit{Version: collectionFormatVersion, CorpusID: c.corpus, SpaceID: specs[0].ID, Generation: 4, IndexSHA256: indexHash, MetadataSHA256: metaHash}
-				if err := writeCollectionJSON(newCommit, commit); err != nil {
-					t.Fatal(err)
-				}
-				reader, err := OpenCollectionReader(c.config)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if reader.spaces[specs[0].ID].Generation != 3 {
-					t.Fatal("reader selected an unpublished commit")
-				}
-				if err := reader.Close(); err != nil {
-					t.Fatal(err)
-				}
-			case "catalog-retired":
-				gcRetireFirstGeneration(t, c.config, specs[0].ID)
-			case "retired", "partly-deleted":
-				gcRetireFirstGeneration(t, c.config, specs[0].ID)
-				if err := publishCollectionFile(oldCommit, filepath.Join(dir, ".retired-"+filepath.Base(oldCommit))); err != nil {
-					t.Fatal(err)
-				}
-				if phase == "partly-deleted" {
-					if err := os.Remove(oldIndex); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			reopened, err := OpenCollection(c.config)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer reopened.Close()
-			if reopened.LastMaintenanceError() != nil {
-				t.Fatal(reopened.LastMaintenanceError())
-			}
-			for i := 0; i < 2; i++ {
-				if _, err := reopened.Maintain(context.Background()); err != nil {
-					t.Fatal(err)
-				}
-			}
-			gcGenerations(t, reopened, specs, 3)
-			for _, path := range []string{pending, newIndex, newMeta, newCommit, oldIndex, oldMeta, oldCommit} {
-				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("residual %s: %v", path, err)
-				}
-			}
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, entry := range entries {
-				if strings.HasPrefix(entry.Name(), ".pending-") || strings.HasPrefix(entry.Name(), ".retired-") {
-					t.Fatal("temporary file survived recovery", entry.Name())
-				}
-			}
-		})
+	c, specs, revs := gcCollection(t, "flat")
+	old, err := c.Reader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcPublish(t, c, specs, revs)
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dir := collectionSpacePath(c.config.Path, specs[0].ID)
+	pending := filepath.Join(dir, ".pending-interrupted")
+	if err := os.Mkdir(pending, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	indexPath, metadataPath := collectionGenerationFiles(dir, 3)
+	for _, path := range []string{indexPath, metadataPath, filepath.Join(pending, "payload")} {
+		if err := os.WriteFile(path, []byte("unpublished"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reader, err := OpenCollectionReader(c.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcQuery(t, reader, specs)
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenCollection(c.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	gcGenerations(t, reopened, specs, 2)
+	for _, path := range []string{pending, indexPath, metadataPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unreferenced payload remains: %s: %v", path, err)
+		}
+	}
+	if _, err := reopened.Maintain(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 
+func TestCollectionMissingSpecPreservesGenerationFiles(t *testing.T) {
+	c, specs, _ := gcCollection(t, "flat")
+	dir := collectionSpacePath(c.config.Path, specs[0].ID)
+	if err := os.Remove(filepath.Join(dir, "spec.json")); err != nil {
+		t.Fatal(err)
+	}
+	indexPath, metadataPath := collectionGenerationFiles(dir, 1)
+	paths := []string{indexPath, metadataPath, filepath.Join(dir, ".pending-preserve")}
+	if err := os.WriteFile(paths[2], []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Maintain(context.Background()); !errors.Is(err, ErrCollectionCorrupt) {
+		t.Fatalf("maintenance accepted missing spec: %v", err)
+	}
+	if err := VerifyCollection(context.Background(), c.config); !errors.Is(err, ErrCollectionCorrupt) {
+		t.Fatalf("verification accepted missing spec: %v", err)
+	}
+	if reader, err := OpenCollectionReader(c.config); !errors.Is(err, ErrCollectionCorrupt) {
+		if reader != nil {
+			_ = reader.Close()
+		}
+		t.Fatalf("reader accepted missing spec: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := OpenCollection(c.config); !errors.Is(err, ErrCollectionCorrupt) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("writer accepted missing spec: %v", err)
+	}
+	if _, err := MaintainCollection(context.Background(), c.config); !errors.Is(err, ErrCollectionCorrupt) {
+		t.Fatalf("offline maintenance accepted missing spec: %v", err)
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("corrupt space lost file: %s: %v", path, err)
+		}
+	}
+}
+
+func TestCollectionMaintenanceFailureDoesNotFailCommit(t *testing.T) {
+	c, specs, revs := gcCollection(t, "flat")
+	spaceID := specs[0].ID
+	leasePath := collectionLeasePath(collectionSpacePath(c.config.Path, spaceID), 1)
+	if err := os.Mkdir(leasePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gcPublish(t, c, specs[:1], revs)
+	if c.LastMaintenanceError() == nil {
+		t.Fatal("maintenance failure was not recorded")
+	}
+	r, err := OpenCollectionReader(c.config, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcQuery(t, r, specs[:1])
+	status, err := r.VectorStatus(context.Background(), spaceID)
+	if err != nil || status.Generation != 2 || status.ValidVectors != 2 {
+		t.Fatalf("committed generation: %+v, %v", status, err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(leasePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Maintain(context.Background(), spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if c.LastMaintenanceError() != nil {
+		t.Fatal(c.LastMaintenanceError())
+	}
+	gcGenerations(t, c, specs[:1], 2)
+}
+
 func TestCollectionVerificationAndStructuralCorruption(t *testing.T) {
-	for _, file := range []string{"index", "metadata", "commit", "spec", "missing-index", "missing-commit", "catalog", "missing-catalog"} {
-		t.Run(file, func(t *testing.T) {
-			c, specs, revs := gcCollection(t, "flat")
-			r, err := c.Reader()
-			if err != nil {
-				t.Fatal(err)
-			}
-			gcPublish(t, c, specs, revs)
-			gcPublish(t, c, specs, revs)
-			_ = r.Close()
+	for _, target := range []string{"index", "metadata", "missing-index", "unordered-generations"} {
+		t.Run(target, func(t *testing.T) {
+			c, specs, _ := gcCollection(t, "flat")
 			dir := collectionSpacePath(c.config.Path, specs[0].ID)
-			idx, meta, commit := collectionGenerationFiles(dir, "flat", 3)
-			path := map[string]string{"index": idx, "metadata": meta, "commit": commit, "spec": filepath.Join(dir, "spec.json"), "missing-index": idx, "missing-commit": commit, "catalog": filepath.Join(dir, "spec.json"), "missing-catalog": filepath.Join(dir, "spec.json")}[file]
-			switch file {
-			case "missing-index", "missing-commit":
-				err = os.Remove(path)
-			case "catalog", "missing-catalog":
-				var space collectionSpace
-				if err := readCollectionJSON(path, &space); err != nil {
-					t.Fatal(err)
-				}
-				if file == "catalog" {
-					space.Generations = space.Generations[:1]
-				} else {
-					space.Generations = nil
-				}
-				err = replaceCollectionJSON(path, space) // Deliberately preserve the old checksum.
-			default:
-				err = os.WriteFile(path, []byte("corrupt"), 0o600)
+			indexPath, metadataPath := collectionGenerationFiles(dir, 1)
+			var err error
+			switch target {
+			case "index":
+				err = os.WriteFile(indexPath, []byte("truncated"), 0o600)
+			case "metadata":
+				err = os.WriteFile(metadataPath, []byte("invalid JSON"), 0o600)
+			case "missing-index":
+				err = os.Remove(indexPath)
+			case "unordered-generations":
+				space := c.spaces[specs[0].ID]
+				space.Generations = []uint64{1, 1}
+				err = writeCollectionSpace(dir, &space)
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := VerifyCollection(context.Background(), c.config); !errors.Is(err, ErrCollectionCorrupt) {
-				t.Fatalf("expected corruption: %v", err)
-			}
-			_, _, oldest := collectionGenerationFiles(dir, "flat", 1)
-			if _, err := os.Stat(oldest); err != nil {
-				t.Fatal("verification modified data", err)
-			}
-			if file == "index" || file == "metadata" {
-				// Maintenance does not hash payloads; loading a vector generation does.
-				if _, err := c.Maintain(context.Background()); err != nil {
-					t.Fatal(err)
-				}
-				reader, err := OpenCollectionReader(c.config, specs[0].ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer reader.Close()
-				if _, err := reader.SearchVectorRequest(context.Background(), specs[0].ID,
-					NewVectorSearchRequest("embedding", []float32{1, 0})); !errors.Is(err, ErrCollectionCorrupt) {
-					t.Fatalf("lazy load accepted corruption: %v", err)
-				}
-				if err := VerifyCollection(context.Background(), c.config); !errors.Is(err, ErrCollectionCorrupt) {
-					t.Fatalf("cleanup concealed current corruption: %v", err)
-				}
-				return
-			}
-			if _, err := c.Maintain(context.Background()); !errors.Is(err, ErrCollectionCorrupt) {
-				t.Fatalf("maintenance accepted structural corruption: %v", err)
-			}
-			if _, err := os.Stat(oldest); err != nil {
-				t.Fatal("cleanup deleted old commit on structural corruption", err)
-			}
-			_ = c.Close()
-			if opened, err := OpenCollection(c.config); !errors.Is(err, ErrCollectionCorrupt) {
-				if opened != nil {
-					_ = opened.Close()
-				}
-				t.Fatalf("reopen: %v", err)
+				t.Fatalf("verification accepted corruption: %v", err)
 			}
 		})
 	}
-}
-
-func TestCollectionCommitSuccessDespiteMaintenanceFailure(t *testing.T) {
-	c, specs, revs := gcCollection(t, "flat")
-	dir := collectionSpacePath(c.config.Path, specs[0].ID)
-	_, _, commit := collectionGenerationFiles(dir, "flat", 1)
-	blocker := filepath.Join(dir, ".retired-"+filepath.Base(commit))
-	if err := os.Mkdir(blocker, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.UpsertVectors(specs[0].ID, []VectorRecord{{ID: revs[0].ID, Revision: revs[0].Revision, Vector: []float32{1, 0}}}); err != nil {
-		t.Fatalf("committed batch returned failure: %v", err)
-	}
-	if c.LastMaintenanceError() == nil {
-		t.Fatal("maintenance error not observable")
-	}
-	gcGenerations(t, c, specs[:1], 1, 2)
-	if err := os.Remove(blocker); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.Maintain(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	gcGenerations(t, c, specs[:1], 2)
 }
 
 func TestCollectionLaterSpaceStructuralCorruptionPreventsAllRetirement(t *testing.T) {
@@ -481,8 +418,8 @@ func TestCollectionLaterSpaceStructuralCorruptionPreventsAllRetirement(t *testin
 	if err := reader.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, _, commit := collectionGenerationFiles(collectionSpacePath(c.config.Path, specs[1].ID), "flat", 4)
-	if err := os.WriteFile(commit, []byte("corrupt"), 0o600); err != nil {
+	indexPath, _ := collectionGenerationFiles(collectionSpacePath(c.config.Path, specs[1].ID), 4)
+	if err := os.Remove(indexPath); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -657,6 +594,9 @@ func TestCollectionInterruptedProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer c.Close()
+		if err := c.loadRevisions(); err != nil {
+			t.Fatal(err)
+		}
 		fmt.Println("READY")
 		if !bufio.NewScanner(os.Stdin).Scan() {
 			t.Fatal("missing publish command")
@@ -677,11 +617,8 @@ func TestCollectionInterruptedProcess(t *testing.T) {
 	}
 	defer gate.Close()
 	dir := collectionSpacePath(root, "model-a")
-	idx, _, commit := collectionGenerationFiles(dir, "flat", 1)
+	idx, _ := collectionGenerationFiles(dir, 1)
 	gcRetireFirstGeneration(t, cfg, "model-a")
-	if err := publishCollectionFile(commit, filepath.Join(dir, ".retired-"+filepath.Base(commit))); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.Remove(idx); err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +745,7 @@ func TestCollectionKilledPublicationAndCleanup(t *testing.T) {
 				if _, err := fmt.Fprintln(in, "publish"); err != nil {
 					t.Fatal(err)
 				}
-				_, metadata, _ := collectionGenerationFiles(collectionSpacePath(c.config.Path, specs[0].ID), "flat", 2)
+				_, metadata := collectionGenerationFiles(collectionSpacePath(c.config.Path, specs[0].ID), 2)
 				for {
 					if _, err := os.Stat(metadata); err == nil {
 						break
@@ -820,7 +757,7 @@ func TestCollectionKilledPublicationAndCleanup(t *testing.T) {
 				}
 			}
 			// Active publication and cleanup must both exclude another maintainer.
-			if _, err := MaintainCollection(ctx, c.config); !collectionLockBusy(err) {
+			if _, err := MaintainCollection(ctx, c.config); !fsatomic.LockBusy(err) {
 				t.Fatalf("writer protection: %v", err)
 			}
 			if err := cmd.Process.Kill(); err != nil {

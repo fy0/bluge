@@ -17,6 +17,7 @@ package no
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/norwegian"
+
 	"github.com/fy0/bluge/analysis"
 )
 

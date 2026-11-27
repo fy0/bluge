@@ -15,16 +15,18 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 
 	"github.com/blevesearch/mmap-go"
+
 	"github.com/fy0/bluge/index/lock"
+	"github.com/fy0/bluge/internal/fsatomic"
 	segment "github.com/fy0/bluge/segment"
 )
 
@@ -87,7 +89,7 @@ func (d *FileSystemDirectory) Setup(readOnly bool) error {
 }
 
 func (d *FileSystemDirectory) List(kind string) ([]uint64, error) {
-	dirEntries, err := ioutil.ReadDir(d.path)
+	dirEntries, err := os.ReadDir(d.path)
 	if err != nil {
 		return nil, err
 	}
@@ -114,35 +116,21 @@ func (d *FileSystemDirectory) List(kind string) ([]uint64, error) {
 
 func (d *FileSystemDirectory) Persist(kind string, id uint64, w WriterTo, closeCh chan struct{}) error {
 	path := filepath.Join(d.path, d.fileName(kind, id))
-	f, err := d.openExclusive(path, os.O_CREATE|os.O_RDWR, d.newFilePerm)
+	f, err := os.CreateTemp(d.path, ".pending-*")
 	if err != nil {
 		return err
 	}
-
-	cleanup := func() {
-		_ = f.Close()
-		_ = os.Remove(path)
+	defer os.Remove(f.Name())
+	if err := f.Chmod(d.newFilePerm); err != nil {
+		return errors.Join(err, f.Close())
 	}
-
-	_, err = w.WriteTo(f.File(), closeCh)
-	if err != nil {
-		cleanup()
+	if _, err := w.WriteTo(f, closeCh); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
 		return err
 	}
-
-	err = f.File().Sync()
-	if err != nil {
-		cleanup()
-		return err
-	}
-
-	err = f.Close()
-	if err != nil {
-		cleanup()
-		return err
-	}
-
-	return nil
+	return fsatomic.Replace(f.Name(), path)
 }
 
 func LoadMMapAlways(f lock.LockedFile) (*segment.Data, io.Closer, error) {
@@ -203,7 +191,7 @@ func (d *FileSystemDirectory) Lock() error {
 	if err != nil {
 		return fmt.Errorf("error truncating pid file: %w", err)
 	}
-	_, err = d.pid.File().Write([]byte(fmt.Sprintf("%d\n", os.Getpid())))
+	_, err = fmt.Fprintf(d.pid.File(), "%d\n", os.Getpid())
 	if err != nil {
 		return fmt.Errorf("error writing pid: %w", err)
 	}
@@ -229,33 +217,26 @@ func (d *FileSystemDirectory) Unlock() error {
 }
 
 func (d *FileSystemDirectory) Stats() (numFilesOnDisk, numBytesUsedDisk uint64) {
-	fileInfos, err := ioutil.ReadDir(d.path)
-	if err == nil {
-		for _, fileInfo := range fileInfos {
-			if !fileInfo.IsDir() {
-				numFilesOnDisk++
-				numBytesUsedDisk += uint64(fileInfo.Size())
-			}
+	entries, err := os.ReadDir(d.path)
+	if err != nil {
+		return 0, 0
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		numFilesOnDisk++
+		numBytesUsedDisk += uint64(info.Size())
 	}
 	return numFilesOnDisk, numBytesUsedDisk
 }
 
 func (d *FileSystemDirectory) Sync() error {
-	dir, err := os.Open(d.path)
-	if err != nil {
-		return fmt.Errorf("error opening directory for sync: %w", err)
-	}
-	err = dir.Sync()
-	if err != nil {
-		_ = dir.Close()
-		return fmt.Errorf("error syncing directory: %w", err)
-	}
-	err = dir.Close()
-	if err != nil {
-		return fmt.Errorf("error closing directing after sync: %w", err)
-	}
-	return nil
+	return fsatomic.SyncDir(d.path)
 }
 
 func (d *FileSystemDirectory) fileName(kind string, id uint64) string {

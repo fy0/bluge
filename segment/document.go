@@ -21,6 +21,21 @@ type Document interface {
 
 type VisitField func(Field)
 
+type VectorSimilarity string
+
+type VectorFieldValue interface {
+	VectorValue() []float32
+}
+
+type VectorField interface {
+	VectorFieldValue
+	VectorSimilarity() VectorSimilarity
+}
+
+type CanonicalDocValuesField interface {
+	CanonicalDocValues() bool
+}
+
 type Field interface {
 	Name() string
 	Length() int

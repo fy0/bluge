@@ -82,22 +82,22 @@ type storageBenchQuery struct {
 }
 
 type storageBenchReport struct {
-	RetainedGenerations                                                 int `json:"retained_generations,omitempty"`
-	NativeABI                                                           uint32
-	Config                                                              storageBenchConfig `json:"config"`
-	Started                                                             string             `json:"started_utc"`
-	Go, OS, Arch, CPU, LibrarySHA256, SourceCommit, MergeState, Dataset string
-	CPUs, GOMAXPROCS                                                    int
-	Hardware                                                            USearchHardwareInfo
-	Command                                                             []string
-	Steps                                                               []storageBenchStep `json:"steps"`
-	InitialQuery, FinalQuery                                            storageBenchQuery
-	InitialBytes, FinalBytes                                            storageBenchBytes
-	BuildMS, UpdatesMS                                                  float64
-	PinProbe                                                            []storageBenchStep `json:"pin_probe,omitempty"`
-	PinQueryMS                                                          float64            `json:"pinned_lazy_query_ms,omitempty"`
-	PinReleaseMS                                                        float64            `json:"pin_release_maintenance_ms,omitempty"`
-	ReleasedBytes                                                       storageBenchBytes  `json:"released_bytes"`
+	RetainedGenerations                                  int `json:"retained_generations,omitempty"`
+	NativeABI                                            uint32
+	Config                                               storageBenchConfig `json:"config"`
+	Started                                              string             `json:"started_utc"`
+	Go, OS, Arch, CPU, SourceCommit, MergeState, Dataset string
+	CPUs, GOMAXPROCS                                     int
+	Hardware                                             USearchHardwareInfo
+	Command                                              []string
+	Steps                                                []storageBenchStep `json:"steps"`
+	InitialQuery, FinalQuery                             storageBenchQuery
+	InitialBytes, FinalBytes                             storageBenchBytes
+	BuildMS, UpdatesMS                                   float64
+	PinProbe                                             []storageBenchStep `json:"pin_probe,omitempty"`
+	PinQueryMS                                           float64            `json:"pinned_lazy_query_ms,omitempty"`
+	PinReleaseMS                                         float64            `json:"pin_release_maintenance_ms,omitempty"`
+	ReleasedBytes                                        storageBenchBytes  `json:"released_bytes"`
 }
 
 // TestCollectionStorageBenchmark is deliberately opt-in, not a microbenchmark.
@@ -162,7 +162,6 @@ func storageBenchID(id int) Identifier   { return Identifier(fmt.Sprintf("chunk-
 // A fixed integer PRNG makes input independent of Go's math/rand version and
 // native graph randomness. Queries are separate samples, never indexed vectors.
 func storageBenchVector(c storageBenchConfig, id, revision, model int, query bool) []float32 {
-	// #nosec G115 -- Benchmark ordinals seed modular uint64 arithmetic; wrapping is intentional.
 	state := c.Seed ^ (uint64(id+1) * 0x9e3779b97f4a7c15) ^ (uint64(revision+1) * 0xbf58476d1ce4e5b9) ^ (uint64(model+1) * 0x94d049bb133111eb)
 	if query {
 		state ^= 0xd6e8feb86659fd93
@@ -212,24 +211,16 @@ func storageBenchRun(t *testing.T, cfg storageBenchConfig) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, err := collectionFileHash(cfg.Library)
-	if err != nil {
-		t.Fatal(err)
-	}
 	commit, _ := exec.Command("git", "rev-parse", "HEAD").Output()
 	cpu := os.Getenv("PROCESSOR_IDENTIFIER")
 	if cpu == "" {
 		cpu = "see environment.txt"
 	}
 	report := storageBenchReport{Config: cfg, Started: time.Now().UTC().Format(time.RFC3339), Go: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH,
-		CPU: cpu, CPUs: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0), Hardware: info, LibrarySHA256: hash,
+		CPU: cpu, CPUs: runtime.NumCPU(), GOMAXPROCS: runtime.GOMAXPROCS(0), Hardware: info,
 		SourceCommit: strings.TrimSpace(string(commit)), Command: os.Args, MergeState: "background merges disabled; durable batches; no forced merge",
 		Dataset: "synthetic clustered dense float32 vectors and synthetic text; seed 20260918; cosine; K=10; fixed-seed random 1 percent updates per round; query samples independent of corpus; fresh process, OS cache not evicted"}
-	api, err := loadUSearchAPI(cfg.Library)
-	if err != nil {
-		t.Fatal(err)
-	}
-	report.NativeABI = api.(*puregoUSearchAPI).abiVersion
+	report.NativeABI = usearchABIVersion
 	if cfg.Backend == "collection" {
 		report.RetainedGenerations = 1
 	}
@@ -346,6 +337,9 @@ func storageBenchRun(t *testing.T, cfg storageBenchConfig) {
 	storageBenchSplitEmbedded(&report.FinalBytes, report.FinalQuery)
 	if cfg.Backend == "collection" {
 		open()
+		if err := collection.loadRevisions(); err != nil {
+			t.Fatal(err)
+		}
 		pinned, err := OpenCollectionReader(collection.config)
 		if err != nil {
 			t.Fatal(err)
@@ -391,11 +385,9 @@ func storageBenchRun(t *testing.T, cfg storageBenchConfig) {
 func storageBenchUpdateIDs(c storageBenchConfig, round int) []int {
 	ids := make([]int, 0, c.Documents/100)
 	seen := make(map[int]bool, cap(ids))
-	// #nosec G115 -- Round ordinals seed modular uint64 arithmetic; wrapping is intentional.
 	state := c.Seed ^ (uint64(round) * 0x9e3779b97f4a7c15)
 	for len(ids) < cap(ids) {
 		state = state*6364136223846793005 + 1442695040888963407
-		// #nosec G115 -- Documents is the validated positive benchmark corpus size.
 		id := int((state >> 32) % uint64(c.Documents))
 		if !seen[id] {
 			seen[id] = true
@@ -519,7 +511,6 @@ func storageBenchQueryWorker(t *testing.T, path string) {
 				for _, id := range p.DocIDs {
 					docs += uvarint(uint64(id))
 				}
-				// #nosec G115 -- docs sums positive varint widths for this in-memory slice.
 				result.EmbeddedMapping += 20 + 1 + uvarint(uint64(p.Dimensions)) + uvarint(uint64(len(p.DocIDs))) +
 					uvarint(uint64(len(p.Backend))) + int64(len(p.Backend)) + uvarint(uint64(len(p.Similarity))) + int64(len(p.Similarity)) +
 					uvarint(uint64(docs)) + docs + uvarint(uint64(len(p.Data)))
@@ -623,8 +614,8 @@ func storageBenchDisk(t *testing.T, c storageBenchConfig) storageBenchBytes {
 			}
 			for _, n := range space.Generations {
 				latest[dir] = max(latest[dir], n)
-				idx, meta, commit := collectionGenerationFiles(dir, "usearch", n)
-				committed[idx], committed[meta], committed[commit] = true, true, true
+				idx, meta := collectionGenerationFiles(dir, n)
+				committed[idx], committed[meta] = true, true
 			}
 		}
 	}
@@ -655,15 +646,11 @@ func storageBenchDisk(t *testing.T, c storageBenchConfig) storageBenchBytes {
 			}
 		case c.Backend == "sidecar" && strings.HasSuffix(name, ".usearch"):
 			b.CurrentVector += n
-		case c.Backend == "sidecar" && name == "manifest.json":
+		case c.Backend == "sidecar" && name == "metadata.json":
 			b.CurrentMetadata += n
-		case c.Backend == "collection" && (strings.HasPrefix(name, "index-") || strings.HasPrefix(name, "metadata-") || strings.HasPrefix(name, "commit-")):
+		case c.Backend == "collection" && (strings.HasPrefix(name, "index-") || strings.HasPrefix(name, "metadata-")):
 			if !committed[path] {
 				b.Temporary += n
-				break
-			}
-			if strings.HasPrefix(name, "commit-") {
-				b.Control += n
 				break
 			}
 			gen, _, err := collectionFileGeneration(name)
@@ -737,7 +724,7 @@ func (m *storageBenchMonitor) sample() {
 		if strings.Contains(path, ".pending-") || strings.HasPrefix(e.Name(), ".bluge-") {
 			temporary += info.Size()
 		} else if strings.HasPrefix(filepath.Base(filepath.Dir(path)), "space-") &&
-			(strings.HasPrefix(e.Name(), "index-") || strings.HasPrefix(e.Name(), "metadata-") || strings.HasPrefix(e.Name(), "commit-")) {
+			(strings.HasPrefix(e.Name(), "index-") || strings.HasPrefix(e.Name(), "metadata-")) {
 			// Final filenames can exist before the catalog publication point.
 			// Count those files as temporary too, not just .pending directories.
 			generation, recognized, err := collectionFileGeneration(e.Name())

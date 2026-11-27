@@ -52,10 +52,11 @@ func TestDirectPersistReusesInMemorySegment(t *testing.T) {
 	cfg = cfg.WithSegmentPlugin(&SegmentPlugin{
 		Type:    plugin.Type,
 		Version: plugin.Version,
-		New: func(results []segment.Document, normCalc func(string, int) float32) (segment.Segment, uint64, error) {
+		New: func(results []segment.Document, normCalc func(string, int) float32,
+			opts segment.BuildOptions) (segment.Segment, uint64, error) {
 			var err error
 			var count uint64
-			created, count, err = plugin.New(results, normCalc)
+			created, count, err = plugin.New(results, normCalc, opts)
 			return created, count, err
 		},
 		Load:  plugin.Load,
@@ -286,7 +287,7 @@ func TestLoadSnapshotClosesSegmentsAfterPartialFailure(t *testing.T) {
 		NewFakeField("_id", "1", true, false, true),
 		NewFakeField("body", "partial load", false, false, true),
 	}
-	seg, _, err := plugin.New([]segment.Document{doc}, cfg.NormCalc)
+	seg, _, err := plugin.New([]segment.Document{doc}, cfg.NormCalc, cfg.SegmentOptions)
 	if err != nil {
 		t.Fatal(err)
 	}

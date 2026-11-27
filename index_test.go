@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -41,7 +40,7 @@ type Fatalfable interface {
 }
 
 func createTmpIndexPath(f Fatalfable) string {
-	tmpIndexPath, err := ioutil.TempDir("", "bluge-testidx")
+	tmpIndexPath, err := os.MkdirTemp("", "bluge-testidx")
 	if err != nil {
 		f.Fatalf("error creating temp dir: %v", err)
 	}
@@ -824,7 +823,7 @@ func TestBug408(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	numToTest := 10
+	const numToTest = 10
 	matchUserID := "match"
 	noMatchUserID := "no_match"
 	matchingDocIds := make(map[string]struct{})

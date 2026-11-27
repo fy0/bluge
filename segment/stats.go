@@ -21,6 +21,10 @@ type CollectionStats interface {
 	Merge(CollectionStats)
 }
 
+type UniqueTermStats interface {
+	UniqueTermCount() uint64
+}
+
 type TermStats interface {
 	DocumentFrequency() uint64
 }

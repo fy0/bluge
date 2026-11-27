@@ -18,106 +18,46 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"reflect"
+	"unsafe"
 
 	"github.com/golang/snappy"
 )
 
-var reflectStaticSizeMetaData int
-
-func init() {
-	var md MetaData
-	reflectStaticSizeMetaData = int(reflect.TypeOf(md).Size())
-}
+const reflectStaticSizeMetaData = int(unsafe.Sizeof(MetaData{}))
 
 type chunkedContentCoder struct {
-	bytesWritten uint64 // moved to top to correct alignment issues on ARM, 386 and 32-bit MIPS.
-
 	final     []byte
-	chunkSize uint64
 	currChunk uint64
 	chunkLens []uint64
 
 	compressed []byte // temp buf for snappy compression
 
-	w                io.Writer
-	progressiveWrite bool
-	skipCompression  bool
+	w io.Writer
 
 	chunkMeta    []MetaData
 	chunkMetaBuf bytes.Buffer
 	chunkBuf     bytes.Buffer
 }
 
-// MetaData represents the data information inside a
-// chunk.
 type MetaData struct {
 	DocNum      uint64 // docNum of the data inside the chunk
 	DocDvOffset uint64 // offset of data inside the chunk for the given docid
 }
 
-// newChunkedContentCoder returns a new chunk content coder which
-// packs data into chunks based on the provided chunkSize
-func newChunkedContentCoder(chunkSize uint64, maxDocNum uint64,
-	w io.Writer, progressiveWrite bool, skipCompression bool,
-) *chunkedContentCoder {
-	total := maxDocNum/chunkSize + 1
-	rv := &chunkedContentCoder{
-		chunkSize:        chunkSize,
-		chunkLens:        make([]uint64, total),
-		chunkMeta:        make([]MetaData, 0, total),
-		w:                w,
-		progressiveWrite: progressiveWrite,
-		skipCompression:  skipCompression,
-	}
-
-	return rv
-}
-
-// Reset lets you reuse this chunked content coder. Buffers are reset
-// and re used. You cannot change the chunk size.
-func (c *chunkedContentCoder) Reset() {
-	c.currChunk = 0
-	c.bytesWritten = 0
-	c.final = c.final[:0]
-	c.chunkBuf.Reset()
-	c.chunkMetaBuf.Reset()
-	for i := range c.chunkLens {
-		c.chunkLens[i] = 0
-	}
-	c.chunkMeta = c.chunkMeta[:0]
-}
-
-func (c *chunkedContentCoder) SetChunkSize(chunkSize uint64, maxDocNum uint64) {
-	total := int(maxDocNum/chunkSize + 1)
-	c.chunkSize = chunkSize
-	if cap(c.chunkLens) < total {
-		c.chunkLens = make([]uint64, total)
-	} else {
-		c.chunkLens = c.chunkLens[:total]
-	}
-	if cap(c.chunkMeta) < total {
-		c.chunkMeta = make([]MetaData, 0, total)
+func newChunkedContentCoder(maxDocNum uint64, w io.Writer) *chunkedContentCoder {
+	total := maxDocNum/docValueChunkSize + 1
+	return &chunkedContentCoder{
+		chunkLens: make([]uint64, total),
+		chunkMeta: make([]MetaData, 0, total),
+		w:         w,
 	}
 }
 
-// Close indicates you are done calling Add() this allows
-// the final chunk to be encoded.
 func (c *chunkedContentCoder) Close() error {
 	return c.flushContents()
 }
 
-func (c *chunkedContentCoder) incrementBytesWritten(val uint64) {
-	c.bytesWritten += val
-}
-
-func (c *chunkedContentCoder) getBytesWritten() uint64 {
-	return c.bytesWritten
-}
-
 func (c *chunkedContentCoder) writeChunkMeta() ([]byte, error) {
-
-	// flush the contents, with meta information at first
 	buf := make([]byte, binary.MaxVarintLen64)
 	var metaData []byte
 	n := binary.PutUvarint(buf, uint64(len(c.chunkMeta)))
@@ -126,10 +66,9 @@ func (c *chunkedContentCoder) writeChunkMeta() ([]byte, error) {
 		return nil, err
 	}
 
-	// write out the metaData slice
 	var previousDocNum, previousOffset uint64
 	for _, meta := range c.chunkMeta {
-		_, err := writeUvarints(&c.chunkMetaBuf,
+		err := writeUvarints(&c.chunkMetaBuf,
 			meta.DocNum-previousDocNum, meta.DocDvOffset-previousOffset)
 		if err != nil {
 			return nil, err
@@ -138,7 +77,6 @@ func (c *chunkedContentCoder) writeChunkMeta() ([]byte, error) {
 		previousOffset = meta.DocDvOffset
 	}
 
-	// write the metadata to final data
 	metaData = c.chunkMetaBuf.Bytes()
 	c.final = append(c.final, metaData...)
 
@@ -146,93 +84,45 @@ func (c *chunkedContentCoder) writeChunkMeta() ([]byte, error) {
 }
 
 func (c *chunkedContentCoder) flushContents() error {
-	var metaData []byte
-	var err error
-	// Meta data is only needed if we have more than 1 doc in the chunk,
-	// otherwise we can just write the doc value directly
-	if c.chunkSize != 1 {
-		metaData, err = c.writeChunkMeta()
-		if err != nil {
-			return err
-		}
+	metaData, err := c.writeChunkMeta()
+	if err != nil {
+		return err
 	}
-
-	// write the compressed data to the final data
-	if c.skipCompression {
-		c.compressed = c.chunkBuf.Bytes()
-	} else {
-		c.compressed = snappy.Encode(c.compressed[:cap(c.compressed)], c.chunkBuf.Bytes())
-	}
-
-	// process the compressed data using the callback
-	if fw, ok := c.w.(*FileWriter); ok && fw != nil {
-		c.compressed = fw.process(c.compressed)
-	}
-
-	c.incrementBytesWritten(uint64(len(c.compressed)))
+	c.compressed = snappy.Encode(c.compressed[:cap(c.compressed)], c.chunkBuf.Bytes())
 	c.final = append(c.final, c.compressed...)
-
-	c.chunkLens[c.currChunk] = uint64(len(c.compressed) + len(metaData))
-
-	if c.progressiveWrite {
-		_, err := c.w.Write(c.final)
-		if err != nil {
-			return err
-		}
-		c.final = c.final[:0]
-	}
-
-	return nil
+	c.chunkLens[c.currChunk] = uint64(len(c.compressed)) + uint64(len(metaData))
+	_, err = c.w.Write(c.final)
+	c.final = c.final[:0]
+	return err
 }
 
-// Add encodes the provided byte slice into the correct chunk for the provided
-// doc num.  You MUST call Add() with increasing docNums.
 func (c *chunkedContentCoder) Add(docNum uint64, vals []byte) error {
-	chunk := docNum / c.chunkSize
+	chunk := docNum / docValueChunkSize
 	if chunk != c.currChunk {
-		// flush out the previous chunk details
 		err := c.flushContents()
 		if err != nil {
 			return err
 		}
-		// clearing the chunk specific meta for next chunk
 		c.chunkBuf.Reset()
 		c.chunkMetaBuf.Reset()
 		c.chunkMeta = c.chunkMeta[:0]
 		c.currChunk = chunk
 	}
 
-	// get the starting offset for this doc
-	dvOffset := c.chunkBuf.Len()
-	dvSize, err := c.chunkBuf.Write(vals)
+	_, err := c.chunkBuf.Write(vals)
 	if err != nil {
 		return err
 	}
 
 	c.chunkMeta = append(c.chunkMeta, MetaData{
 		DocNum:      docNum,
-		DocDvOffset: uint64(dvOffset + dvSize),
+		DocDvOffset: uint64(c.chunkBuf.Len()),
 	})
 	return nil
 }
 
-// Write commits all the encoded chunked contents to the provided writer.
-//
-// | ..... data ..... | chunk offsets (varints)
-// | position of chunk offsets (uint64) | number of offsets (uint64) |
 func (c *chunkedContentCoder) Write() (int, error) {
 	var tw int
-
-	if c.final != nil {
-		// write out the data section first
-		nw, err := c.w.Write(c.final)
-		tw += nw
-		if err != nil {
-			return tw, err
-		}
-	}
-
-	chunkOffsetsStart := uint64(tw)
 
 	if cap(c.final) < binary.MaxVarintLen64 {
 		c.final = make([]byte, binary.MaxVarintLen64)
@@ -240,7 +130,6 @@ func (c *chunkedContentCoder) Write() (int, error) {
 		c.final = c.final[0:binary.MaxVarintLen64]
 	}
 	chunkOffsets := modifyLengthsToEndOffsets(c.chunkLens)
-	// write out the chunk offsets
 	for _, chunkOffset := range chunkOffsets {
 		n := binary.PutUvarint(c.final, chunkOffset)
 		nw, err := c.w.Write(c.final[:n])
@@ -250,10 +139,9 @@ func (c *chunkedContentCoder) Write() (int, error) {
 		}
 	}
 
-	chunkOffsetsLen := uint64(tw) - chunkOffsetsStart
+	chunkOffsetsLen := uint64(tw)
 
 	c.final = c.final[0:8]
-	// write out the length of chunk offsets
 	binary.BigEndian.PutUint64(c.final, chunkOffsetsLen)
 	nw, err := c.w.Write(c.final)
 	tw += nw
@@ -261,7 +149,6 @@ func (c *chunkedContentCoder) Write() (int, error) {
 		return tw, err
 	}
 
-	// write out the number of chunks
 	binary.BigEndian.PutUint64(c.final, uint64(len(c.chunkLens)))
 	nw, err = c.w.Write(c.final)
 	tw += nw
@@ -274,8 +161,6 @@ func (c *chunkedContentCoder) Write() (int, error) {
 	return tw, nil
 }
 
-// ReadDocValueBoundary elicits the start, end offsets from a
-// metaData header slice
 func ReadDocValueBoundary(chunk int, metaHeaders []MetaData) (uint64, uint64) {
 	var start uint64
 	if chunk > 0 {

@@ -106,6 +106,11 @@ func (b *TermField) Value() []byte {
 	return b.value
 }
 
+func (b *TermField) CanonicalDocValues() bool {
+	_, numeric := b.analyzer.(*numericAnalyzer)
+	return numeric
+}
+
 func (b *TermField) NumPlainTextBytes() int {
 	return b.numPlainTextBytes
 }
@@ -322,6 +327,7 @@ var geoPrecisionStep uint = 9
 
 func NewGeoPointField(name string, lon, lat float64) *TermField {
 	mHash := geo.MortonHash(lon, lat)
+	// Morton codes preserve all 64 bits through the signed numeric codec.
 	prefixCoded := numeric.MustNewPrefixCodedInt64(int64(mHash), 0)
 	return &TermField{
 		FieldOptions:      defaultNumericIndexingOptions,
@@ -341,7 +347,9 @@ func DecodeGeoLonLat(value []byte) (lon, lat float64, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	return geo.MortonUnhashLon(uint64(i64)), geo.MortonUnhashLat(uint64(i64)), nil
+	// Decode the unsigned Morton bit pattern stored by the numeric codec.
+	mHash := uint64(i64)
+	return geo.MortonUnhashLon(mHash), geo.MortonUnhashLat(mHash), nil
 }
 
 const defaultCompositeIndexingOptions = Index

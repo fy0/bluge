@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	segment "github.com/fy0/bluge/segment"
 )
 
@@ -31,156 +32,143 @@ const (
 	maxPersistedInMemoryBytes    = 8 * 1024 * 1024
 )
 
+type persisterState struct {
+	epoch     uint64
+	watchers  epochWatchers
+	callbacks []func(error)
+	syncs     []chan error
+	retry     backgroundRetry
+}
+
+func (p *persisterState) resolveSyncs(err error) {
+	for _, done := range p.syncs {
+		if err != nil {
+			done <- err
+		} else {
+			close(done)
+		}
+	}
+	p.syncs = nil
+}
+
 func (s *Writer) persisterLoop(merges chan *segmentMerge, persists chan *persistIntroduction,
 	introducerNotifier, persisterNotifier watcherChan, lastPersistedEpoch uint64) {
 	defer s.asyncTasks.Done()
-
-	var persistWatchers epochWatchers
-	var lastMergedEpoch uint64
-	var ew *epochWatcher
-
-	var unpersistedCallbacks []func(error)
-	var persistSyncs []chan error
-	retry := newBackgroundRetry(s.config)
-	defer retry.stop()
-
-	// tell the introducer we're waiting for changes after the initial epoch
+	state := persisterState{epoch: lastPersistedEpoch, retry: newBackgroundRetry(s.config)}
+	defer state.retry.stop()
 	introducerEpochWatcher, err := introducerNotifier.NotifyUsAfter(0, s.closeCh)
 	if err != nil {
 		return
 	}
-
-OUTER:
+	var lastMergedEpoch uint64
 	for {
 		atomic.AddUint64(&s.stats.TotPersistLoopBeg, 1)
 		atomic.AddUint64(&s.stats.TotPersistLoopWait, 1)
-		notifyCh, retryCh := retry.notifications(introducerEpochWatcher.notifyCh)
-
+		notifyCh, retryCh := state.retry.notifications(introducerEpochWatcher.notifyCh)
 		select {
 		case <-s.closeCh:
-			break OUTER
+			return
 		case <-retryCh:
-			retry.stop()
+			state.retry.stop()
 		case done := <-s.persistSyncs:
-			if retry.err != nil {
-				done <- retry.err
-				continue OUTER
+			if state.retry.err != nil {
+				done <- state.retry.err
+				continue
 			}
-			// Acknowledge below only after the local persisted epoch reaches root.
-			persistSyncs = append(persistSyncs, done)
-		case ew = <-persisterNotifier:
-			persistWatchers.Add(ew)
+			// Acknowledge only after the persisted epoch reaches root.
+			state.syncs = append(state.syncs, done)
+		case ew := <-persisterNotifier:
+			state.watchers.Add(ew)
 			lastMergedEpoch = ew.epoch
-			persistWatchers.NotifySatisfiedWatchers(lastPersistedEpoch)
+			state.watchers.NotifySatisfiedWatchers(state.epoch)
 		case <-notifyCh:
-			// woken up, next loop should pick up work
 			atomic.AddUint64(&s.stats.TotPersistLoopWaitNotified, 1)
-
-			lastMergedEpoch, persistWatchers = s.pausePersisterForMergerCatchUp(persisterNotifier, lastPersistedEpoch,
-				lastMergedEpoch, persistWatchers)
-
-			var ourSnapshot *Snapshot
-			var ourPersisted []chan error
-			var ourPersistedCallbacks []func(error)
-
-			// check to see if there is a new snapshot to persist
-			s.rootLock.Lock()
-			if s.root != nil && s.root.epoch > lastPersistedEpoch {
-				ourSnapshot = s.root
-				ourSnapshot.addRef()
-				ourPersisted = s.rootPersisted
-				s.rootPersisted = nil
-				ourPersistedCallbacks = s.persistedCallbacks
-				s.persistedCallbacks = nil
-				atomic.StoreUint64(&s.stats.persistSnapshotSize, uint64(ourSnapshot.Size()))
-				atomic.StoreUint64(&s.stats.persistEpoch, ourSnapshot.epoch)
+			lastMergedEpoch, state.watchers = s.pausePersisterForMergerCatchUp(persisterNotifier,
+				state.epoch, lastMergedEpoch, state.watchers)
+			more, persistErr := s.persistPendingSnapshot(merges, persists, &state)
+			if errors.Is(persistErr, segment.ErrClosed) {
+				return
 			}
-			s.rootLock.Unlock()
-
-			if ourSnapshot != nil {
-				startTime := time.Now()
-
-				err = s.persistSnapshot(merges, persists, ourSnapshot)
-				for _, ch := range ourPersisted {
-					if err != nil {
-						ch <- err
-					}
-					close(ch)
-				}
-				if err != nil {
-					atomic.StoreUint64(&s.stats.persistEpoch, 0)
-					if errors.Is(err, segment.ErrClosed) {
-						// index has been closed
-						_ = ourSnapshot.Close()
-						break OUTER
-					}
-
-					// save this current snapshot's persistedCallbacks, to invoke during
-					// the retry attempt
-					unpersistedCallbacks = append(unpersistedCallbacks, ourPersistedCallbacks...)
-
-					_ = ourSnapshot.Close()
-					atomic.AddUint64(&s.stats.TotPersistLoopErr, 1)
-					s.fireAsyncError(retry.fail("got err persisting snapshot", err))
-					for _, done := range persistSyncs {
-						done <- retry.err
-					}
-					persistSyncs = nil
-					continue OUTER
-				}
-				retry.reset()
-
-				if unpersistedCallbacks != nil {
-					// in the event of this being a retry attempt for persisting a snapshot
-					// that had earlier failed, prepend the persistedCallbacks associated
-					// with earlier segment(s) to the latest persistedCallbacks
-					ourPersistedCallbacks = append(unpersistedCallbacks, ourPersistedCallbacks...)
-					unpersistedCallbacks = nil
-				}
-
-				for i := range ourPersistedCallbacks {
-					ourPersistedCallbacks[i](err)
-				}
-
-				atomic.StoreUint64(&s.stats.LastPersistedEpoch, ourSnapshot.epoch)
-
-				lastPersistedEpoch = ourSnapshot.epoch
-				for _, ew := range persistWatchers {
-					close(ew.notifyCh)
-				}
-
-				persistWatchers = nil
-				_ = ourSnapshot.Close()
-
-				s.fireEvent(EventKindPersisterProgress, time.Since(startTime))
-
-				if s.currentEpoch() != lastPersistedEpoch {
-					atomic.AddUint64(&s.stats.TotPersistLoopProgress, 1)
-					continue OUTER
-				}
+			if persistErr != nil || more {
+				continue
 			}
-
-			// tell the introducer we're waiting for changes after lastPersistedEpoch
-			introducerEpochWatcher, err = introducerNotifier.NotifyUsAfter(lastPersistedEpoch, s.closeCh)
+			introducerEpochWatcher, err = introducerNotifier.NotifyUsAfter(state.epoch, s.closeCh)
 			if err != nil {
-				break OUTER
+				return
 			}
-
-			err = s.deletionPolicy.Cleanup(s.directory) // might as well cleanup while waiting
-			if err != nil {
+			if err = s.deletionPolicy.Cleanup(s.directory); err != nil {
 				s.config.AsyncError(err)
 			}
 		}
-
-		if s.currentEpoch() == lastPersistedEpoch {
-			for _, done := range persistSyncs {
-				close(done)
-			}
-			persistSyncs = nil
+		if s.currentEpoch() == state.epoch {
+			state.resolveSyncs(nil)
 		}
-
 		atomic.AddUint64(&s.stats.TotPersistLoopEnd, 1)
 	}
+}
+
+func (s *Writer) takePendingSnapshot(epoch uint64) (*Snapshot, []chan error, []func(error)) {
+	s.rootLock.Lock()
+	defer s.rootLock.Unlock()
+	if s.root == nil || s.root.epoch <= epoch {
+		return nil, nil, nil
+	}
+	snapshot := s.root
+	snapshot.addRef()
+	persisted, callbacks := s.rootPersisted, s.persistedCallbacks
+	s.rootPersisted, s.persistedCallbacks = nil, nil
+	atomic.StoreUint64(&s.stats.persistSnapshotSize, uint64(snapshot.Size()))
+	atomic.StoreUint64(&s.stats.persistEpoch, snapshot.epoch)
+	return snapshot, persisted, callbacks
+}
+
+func (s *Writer) persistPendingSnapshot(merges chan *segmentMerge, persists chan *persistIntroduction,
+	state *persisterState) (bool, error) {
+	snapshot, persisted, callbacks := s.takePendingSnapshot(state.epoch)
+	if snapshot == nil {
+		return false, nil
+	}
+	startTime := time.Now()
+	err := s.persistSnapshot(merges, persists, snapshot)
+	for _, ch := range persisted {
+		if err != nil {
+			ch <- err
+		}
+		close(ch)
+	}
+	if err != nil {
+		_ = snapshot.Close()
+		atomic.StoreUint64(&s.stats.persistEpoch, 0)
+		if errors.Is(err, segment.ErrClosed) {
+			return false, err
+		}
+		state.callbacks = append(state.callbacks, callbacks...)
+		atomic.AddUint64(&s.stats.TotPersistLoopErr, 1)
+		s.fireAsyncError(state.retry.fail("persist snapshot", err))
+		state.resolveSyncs(state.retry.err)
+		return false, err
+	}
+	state.retry.reset()
+	if state.callbacks != nil {
+		callbacks = append(state.callbacks, callbacks...)
+		state.callbacks = nil
+	}
+	for _, callback := range callbacks {
+		callback(nil)
+	}
+	state.epoch = snapshot.epoch
+	atomic.StoreUint64(&s.stats.LastPersistedEpoch, state.epoch)
+	for _, watcher := range state.watchers {
+		close(watcher.notifyCh)
+	}
+	state.watchers = nil
+	_ = snapshot.Close()
+	s.fireEvent(EventKindPersisterProgress, time.Since(startTime))
+	more := s.currentEpoch() != state.epoch
+	if more {
+		atomic.AddUint64(&s.stats.TotPersistLoopProgress, 1)
+	}
+	return more, nil
 }
 
 func (s *Writer) pausePersisterForMergerCatchUp(persisterNotifier watcherChan,
@@ -188,13 +176,16 @@ func (s *Writer) pausePersisterForMergerCatchUp(persisterNotifier watcherChan,
 	// First, let the watchers proceed if they lag behind
 	persistWatchers.NotifySatisfiedWatchers(lastPersistedEpoch)
 
-	// Check the merger lag by counting the segment files on disk,
-	numFilesOnDisk, _ := s.directory.Stats()
+	fileCount := func() int {
+		n, _ := s.directory.Stats()
+		return int(n)
+	}
+	numFilesOnDisk := fileCount()
 
 	// On finding fewer files on disk, persister takes a short pause
 	// for sufficient in-memory segments to pile up for the next
 	// memory merge cum persist loop.
-	if numFilesOnDisk < uint64(s.config.PersisterNapUnderNumFiles) &&
+	if numFilesOnDisk < s.config.PersisterNapUnderNumFiles &&
 		s.config.PersisterNapTimeMSec > 0 && s.numEventsBlocking() == 0 {
 		select {
 		case <-s.closeCh:
@@ -214,12 +205,12 @@ func (s *Writer) pausePersisterForMergerCatchUp(persisterNotifier watcherChan,
 	// Finding too many files on disk could be due to two reasons.
 	// 1. Too many older snapshots awaiting the clean up.
 	// 2. The merger could be lagging behind on merging the disk files.
-	if numFilesOnDisk > uint64(s.config.PersisterNapUnderNumFiles) {
+	if numFilesOnDisk > s.config.PersisterNapUnderNumFiles {
 		err := s.deletionPolicy.Cleanup(s.directory)
 		if err != nil {
 			s.config.AsyncError(err)
 		}
-		numFilesOnDisk, _ = s.directory.Stats()
+		numFilesOnDisk = fileCount()
 	}
 
 	// Persister pause until the merger catches up to reduce the segment
@@ -227,7 +218,7 @@ func (s *Writer) pausePersisterForMergerCatchUp(persisterNotifier watcherChan,
 	// But if there is memory pressure, then skip this sleep maneuvers.
 OUTER:
 	for s.config.PersisterNapUnderNumFiles > 0 &&
-		numFilesOnDisk >= uint64(s.config.PersisterNapUnderNumFiles) &&
+		numFilesOnDisk >= s.config.PersisterNapUnderNumFiles &&
 		lastMergedEpoch < lastPersistedEpoch {
 		atomic.AddUint64(&s.stats.TotPersisterSlowMergerPause, 1)
 
@@ -244,7 +235,7 @@ OUTER:
 		// let the watchers proceed if they lag behind
 		persistWatchers.NotifySatisfiedWatchers(lastPersistedEpoch)
 
-		numFilesOnDisk, _ = s.directory.Stats()
+		numFilesOnDisk = fileCount()
 	}
 
 	return lastMergedEpoch, persistWatchers
@@ -357,11 +348,11 @@ func (s *Writer) persistSnapshotDirect(persists chan *persistIntroduction, snaps
 	// first ensure that each segment in this snapshot has been persisted
 	newSegments := make(map[uint64]*segmentWrapper)
 	var persistedInMemorySegments int
-	var persistedInMemoryBytes uint64
+	var persistedInMemoryBytes int
 	for _, segmentSnapshot := range snapshot.segment {
 		if segmentSnapshot.segment.Persisted() && segmentSnapshot.segment.inMemory {
 			persistedInMemorySegments++
-			persistedInMemoryBytes += uint64(segmentSnapshot.segment.Size())
+			persistedInMemoryBytes += segmentSnapshot.segment.Size()
 		}
 		if !segmentSnapshot.segment.Persisted() {
 			err = s.directory.Persist(ItemKindSegment, segmentSnapshot.id, segmentSnapshot.segment.Segment, s.closeCh)
@@ -375,7 +366,7 @@ func (s *Writer) persistSnapshotDirect(persists chan *persistIntroduction, snaps
 	if len(newSegments) > 0 {
 		persistedSegments := make(map[uint64]*segmentWrapper, len(newSegments))
 		for segmentID, newSegment := range newSegments {
-			segmentSize := uint64(newSegment.Size())
+			segmentSize := newSegment.Size()
 			if persistedInMemorySegments < maxPersistedInMemorySegments &&
 				persistedInMemoryBytes+segmentSize <= maxPersistedInMemoryBytes {
 				persistedSegments[segmentID] = newSegment.persistedView()

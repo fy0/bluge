@@ -28,7 +28,7 @@ import (
 type Writer struct {
 	config Config
 	chill  *index.Writer
-	vector VectorIndex
+	vector vectorCoordinator
 
 	batchSlots     chan struct{}
 	closeCh        chan struct{}
@@ -58,20 +58,20 @@ func OpenWriter(config Config) (*Writer, error) {
 	}
 
 	var err error
-	if !usesSegmentVectorBackend(config) {
-		rv.vector, err = openVectorIndex(config)
-	}
+	rv.vector, err = openVectorCoordinator(config)
 	if err != nil {
 		return nil, err
 	}
 	rv.chill, err = index.OpenWriter(config.indexConfigForWriting())
 	if err != nil {
-		if rv.vector != nil {
-			_ = rv.vector.Close()
-		}
+		_ = rv.vector.close()
 		return nil, fmt.Errorf("error opening index: %w", err)
 	}
-
+	if err := rv.vector.initialize(rv.chill); err != nil {
+		_ = rv.chill.Close()
+		_ = rv.vector.close()
+		return nil, err
+	}
 	return rv, nil
 }
 
@@ -145,16 +145,8 @@ func (w *Writer) Batch(batch *index.Batch) error {
 	return w.batch(batch)
 }
 
-// BatchFunc acquires a batch slot before calling build, so waiting callers can
-// defer allocating documents and their payloads. Configure WithMaxConcurrentBatches
-// to bound simultaneous builders and writes. The callback fills the supplied
-// empty batch; it must not submit writes to this Writer itself.
-//
-// Cancellation while waiting skips build. Cancellation or a build error before
-// submission discards the batch. Once submission starts, ordinary Batch semantics
-// apply: cancellation cannot roll back a write. A running build must cooperate
-// with ctx itself. Close wakes waiters but cannot interrupt a running builder.
-// Capturing already-built documents defeats deferred allocation.
+// build runs after admission and must not submit writes to this writer.
+// Cancellation stops admission; submitted batches finish independently of ctx.
 func (w *Writer) BatchFunc(ctx context.Context, build func(*index.Batch) error) error {
 	if ctx == nil || build == nil {
 		return fmt.Errorf("batch context and builder must be provided")
@@ -190,70 +182,20 @@ func (w *Writer) batch(batch *index.Batch) error {
 			}()
 		}
 	}
-	segmentVectors := usesSegmentVectorBackend(w.config)
-	if w.vector == nil && !segmentVectors {
-		hasVectors, err := batchContainsVectors(batch)
-		if err != nil {
-			return err
-		}
-		if hasVectors {
-			return ErrVectorUnsupported
-		}
-		return w.chill.Batch(batch)
-	}
-
-	changes, hasVectors, err := vectorChangesForBatch(batch)
-	if err != nil {
-		return err
-	}
-	if segmentVectors {
-		if validator, ok := w.config.VectorBackend.(VectorChangeValidator); ok {
-			if err := validator.ValidateVectorChanges(changes); err != nil {
-				return err
-			}
-		}
-	} else if err := validateVectorChanges(w.vector, changes, hasVectors); err != nil {
-		return err
-	}
-
-	if err := w.chill.Batch(batch); err != nil {
-		return err
-	}
-	if segmentVectors {
-		return nil
-	}
-	return applyVectorChanges(w.vector, changes, hasVectors)
+	return w.vector.batch(batch, func() error { return w.chill.Batch(batch) })
 }
 
 func (w *Writer) Close() error {
 	// The index's close signal is sent only after active mutations have drained.
 	// Wake admission waiters immediately, then reuse that existing drain lifecycle.
 	w.closeOnce.Do(func() { close(w.closeCh) })
-	return errors.Join(w.chill.Close(), closeVectorIndex(w.vector))
+	return errors.Join(w.chill.Close(), w.vector.close())
 }
 
 func (w *Writer) Reader() (*Reader, error) {
-	r, err := w.chill.Reader()
+	r, vector, err := w.vector.reader(w.chill)
 	if err != nil {
-		return nil, fmt.Errorf("error getting nreal time reader: %w", err)
-	}
-	var vector VectorIndex
-	if usesSegmentVectorBackend(w.config) {
-		vector, err = openVectorIndexForSnapshot(w.config, r)
-		if err != nil {
-			_ = r.Close()
-			return nil, err
-		}
-	} else if w.vector != nil {
-		if snapshotter, ok := w.vector.(VectorSnapshotter); ok {
-			vector = snapshotter.SnapshotVectorIndex()
-		} else {
-			vector, err = openVectorIndexForSnapshot(w.config, r)
-			if err != nil {
-				_ = r.Close()
-				return nil, err
-			}
-		}
+		return nil, err
 	}
 	return &Reader{
 		config: w.config,

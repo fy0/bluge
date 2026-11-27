@@ -246,26 +246,10 @@ func (s *TopNSearch) AllMatches(i search.Reader, config Config) (search.Searcher
 	})
 }
 
-// memNeededForSearch is a helper function that returns an estimate of RAM
-// needed to execute a search request.
-func memNeededForSearch(
-	searcher search.Searcher,
-	coll search.Collector) uint64 {
+func memNeededForSearch(searcher search.Searcher, coll search.Collector) uint64 {
 	numDocMatches := coll.BackingSize() + searcher.DocumentMatchPoolSize()
-
-	estimate := 0
-
-	// overhead, size in bytes from collector
-	estimate += coll.Size()
-
-	// pre-allocing DocumentMatchPool
-	estimate += searchContextEmptySize + numDocMatches*documentMatchEmptySize
-
-	// searcher overhead
-	estimate += searcher.Size()
-
-	// overhead from results, lowestMatchOutsideResults
-	estimate += (numDocMatches + 1) * documentMatchEmptySize
-
+	estimate := coll.Size() + searcher.Size() + searchContextEmptySize +
+		(2*numDocMatches+1)*documentMatchEmptySize
+	// Size and pool counts are non-negative.
 	return uint64(estimate)
 }

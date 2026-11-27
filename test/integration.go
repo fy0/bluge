@@ -23,6 +23,8 @@ import (
 	"github.com/fy0/bluge"
 )
 
+const integrationIDField = "_id"
+
 type match struct {
 	Number           uint64
 	Score            float64
@@ -38,7 +40,7 @@ func newIDMatches(ids ...string) []*match {
 	for _, id := range ids {
 		result = append(result, &match{
 			Fields: map[string][][]byte{
-				"_id": {[]byte(id)},
+				integrationIDField: {[]byte(id)},
 			}})
 	}
 	return result

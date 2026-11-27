@@ -17,6 +17,7 @@ package es
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/spanish"
+
 	"github.com/fy0/bluge/analysis"
 )
 

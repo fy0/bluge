@@ -21,11 +21,10 @@ import (
 	"math"
 	"os"
 
-	"github.com/RoaringBitmap/roaring/v2"
 	index "github.com/blevesearch/bleve_index_api"
 )
 
-const Version uint32 = 2
+const Version uint32 = 3
 
 const Type string = "zapx-bluge"
 
@@ -35,7 +34,6 @@ func (sb *SegmentBase) Persist(path string) error {
 	return PersistSegmentBase(sb, path)
 }
 
-// WriteTo is an implementation of io.WriterTo interface.
 func (sb *SegmentBase) WriteTo(w io.Writer) (int64, error) {
 	if w == nil {
 		return 0, fmt.Errorf("invalid writer found")
@@ -45,22 +43,8 @@ func (sb *SegmentBase) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
-// PersistSegmentBase persists SegmentBase in the zap file format.
 func PersistSegmentBase(sb *SegmentBase, path string) error {
-	// since in-memory data is not processed by any writer callback,
-	// check with the latest writer to see if data needs to be processed
-	writer, err := NewFileWriter(nil, []byte(path))
-	if err != nil {
-		return err
-	}
-	if writer.id != sb.fileReader.id {
-		// rewrite the segment base with the latest writer callback;
-		// the rewrite will persist the segment to the given path (upon
-		// success), so we should return early to avoid overwriting again.
-		return rewriteSegmentBase(sb, path)
-	}
-
-	flag := os.O_RDWR | os.O_CREATE
+	flag := os.O_RDWR | os.O_CREATE | os.O_TRUNC
 
 	f, err := os.OpenFile(path, flag, 0600)
 	if err != nil {
@@ -93,19 +77,6 @@ func PersistSegmentBase(sb *SegmentBase, path string) error {
 	return err
 }
 
-// rewrites the segment base with the latest writer callback by leveraging
-// the merge path
-func rewriteSegmentBase(sb *SegmentBase, path string) error {
-	closeCh := make(chan struct{})
-	defer close(closeCh)
-	_, _, err := mergeSegmentBases([]*SegmentBase{sb}, []*roaring.Bitmap{nil},
-		path, DefaultChunkMode, closeCh, nil, nil)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 type bufWriter struct {
 	w *bufio.Writer
 	n int
@@ -126,7 +97,7 @@ func persistSegmentBaseToWriter(sb *SegmentBase, w io.Writer) (int, error) {
 	}
 
 	err = persistFooter(sb.numDocs, sb.storedIndexOffset, sb.sectionsIndexOffset,
-		sb.chunkMode, sb.memCRC, br, sb.fileReader.id)
+		sb.chunkMode, sb.memCRC, br)
 	if err != nil {
 		return 0, err
 	}
@@ -144,17 +115,14 @@ func persistStoredFieldValues(fieldID int,
 	curr int, metaEncode varintEncoder, data []byte) (
 	int, []byte, error) {
 	for i := 0; i < len(storedFieldValues); i++ {
-		// encode field
 		_, err := metaEncode(uint64(fieldID))
 		if err != nil {
 			return 0, nil, err
 		}
-		// encode start offset
 		_, err = metaEncode(uint64(curr))
 		if err != nil {
 			return 0, nil, err
 		}
-		// end len
 		_, err = metaEncode(uint64(len(storedFieldValues[i])))
 		if err != nil {
 			return 0, nil, err
@@ -167,8 +135,7 @@ func persistStoredFieldValues(fieldID int,
 }
 
 func InitSegmentBase(mem []byte, memCRC uint32, chunkMode uint32, numDocs uint64,
-	storedIndexOffset uint64, sectionsIndexOffset uint64,
-	config map[string]interface{}) (*SegmentBase, error) {
+	storedIndexOffset uint64, sectionsIndexOffset uint64) (*SegmentBase, error) {
 	sb := &SegmentBase{
 		mem:                 mem,
 		memCRC:              memCRC,
@@ -178,43 +145,20 @@ func InitSegmentBase(mem []byte, memCRC uint32, chunkMode uint32, numDocs uint64
 		storedIndexOffset:   storedIndexOffset,
 		sectionsIndexOffset: sectionsIndexOffset,
 		fieldDvReaders:      make([][]*docValueReader, len(segmentSections)),
-		updatedFields:       make(map[string]*index.UpdateFieldInfo),
 		invIndexCache:       newInvertedIndexCache(),
-		vecIndexCache:       newVectorIndexCache(),
-		synIndexCache:       newSynonymIndexCache(),
-		nstIndexCache:       newNestedIndexCache(),
-		// following fields gets populated by loadFields
-		fieldsMap:     make(map[string]uint16),
-		fieldsOptions: make(map[string]index.FieldIndexingOptions),
-		fieldsInv:     make([]string, 0),
-		fieldStats:    make([]fieldStats, 0),
-		config:        config,
+		fieldsMap:           make(map[string]uint16),
+		fieldsOptions:       make(map[string]index.FieldIndexingOptions),
+		fieldsInv:           make([]string, 0),
+		fieldStats:          make([]fieldStats, 0),
 	}
 	sb.updateSize()
 
-	// initialize the file reader with an empty callback
-	// since the data is not yet persisted, the data has also
-	// not been processed by any writer callback
-	fileReader, err := NewFileReader("", nil)
-	if err != nil {
-		return nil, err
-	}
-	sb.fileReader = fileReader
-
-	// load the data/section starting offsets for each field
-	// by via the sectionsIndexOffset as starting point.
-	err = sb.loadFields()
+	err := sb.loadFields()
 	if err != nil {
 		return nil, err
 	}
 
 	err = sb.loadDvReaders()
-	if err != nil {
-		return nil, err
-	}
-
-	// initialize any of the caches if needed
-	err = sb.nstIndexCache.initialize(sb.numDocs, sb.getEdgeListOffset(), sb.mem)
 	if err != nil {
 		return nil, err
 	}

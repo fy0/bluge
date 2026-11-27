@@ -15,7 +15,6 @@
 package index
 
 import (
-	"io/ioutil"
 	"math"
 	"os"
 	"reflect"
@@ -28,7 +27,7 @@ import (
 )
 
 func CreateConfig(name string) (config Config, cleanup func() error) {
-	path, err := ioutil.TempDir("", "bluge-index-test"+name)
+	path, err := os.MkdirTemp("", "bluge-index-test"+name)
 	if err != nil {
 		panic(err)
 	}
@@ -722,11 +721,12 @@ func TestIndexInsertWithStore(t *testing.T) {
 	var storedFieldCount int
 	err = indexReader.VisitStoredFields(docNum1, func(field string, value []byte) bool {
 		storedFieldCount++
-		if field == "name" {
+		switch field {
+		case "name":
 			if string(value) != "test" {
 				t.Errorf("expected name to be 'test', got '%s'", string(value))
 			}
-		} else if field == "_id" {
+		case "_id":
 			if string(value) != "1" {
 				t.Errorf("expected _id to be 1, got '%s'", string(value))
 			}

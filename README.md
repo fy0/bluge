@@ -336,13 +336,13 @@ embedding inputs change. `PendingVectors` lists missing or stale embeddings.
 Model execution, migration, traffic switching, and rollback stay with the
 application.
 
-Vector generations are published atomically. Automatic maintenance reclaims
-obsolete generations while preserving those held by readers, including across
-processes. `Maintain` performs explicit cleanup and `VerifyCollection` checks
-payload checksums and metadata. Current Collection files require checksummed
-catalogs; earlier experimental formats must be rebuilt. USearch update workloads
-require the native adapter built from this branch, which includes the
-compaction/key-mapping fix. See the
+A vector generation commits by atomically replacing `spec.json` after its
+`index-<gen>` and `metadata-<gen>.json` files have been synced. Maintenance
+reclaims obsolete generations while preserving those held by readers, including
+across processes. `VerifyCollection` checks metadata and file sizes. Document
+revisions are stored atomically with text; vector operations load revision
+snapshots lazily. The current Collection format is version 3 and the native
+adapter requires ABI 4. See the
 [Collection usage and storage guide](docs/separate-vector-storage-experiment.md).
 
 ### BM25 Scoring Modes
@@ -351,27 +351,18 @@ compaction/key-mapping fix. See the
 score, including the `(k1 + 1)` numerator factor. It uses the number of
 documents containing a field when calculating that field's average length.
 
-Two explicit compatibility modes are also available:
+For Bleve-style BM25:
 
 ```go
 import "github.com/fy0/bluge/search/similarity"
 
 config := bluge.DefaultConfig(path)
-
-// Preserve scores produced by earlier versions of this Bluge fork.
-config.DefaultSimilarity = similarity.NewLegacyBM25Similarity()
-
-// Approximate Bleve v2.5.7 BM25 ranking for migration or comparison.
 config.DefaultSimilarity = similarity.NewBleveBM25Similarity()
 ```
 
-The Bleve mode reproduces its square-root term frequency, query
-normalization, global document-count statistics, and per-segment dictionary
-cardinality used as the average-length numerator. Its compatibility contract
-is result ordering for Term, Match AND/OR, Phrase, and Boolean text queries;
-raw scores are not portable between engines. All three built-in modes share
-the same on-disk norm encoding, so switching among them does not require
-rebuilding a `zapx-bluge v2` index.
+The Bleve mode uses square-root term frequency, query normalization, global
+document-count statistics, and per-segment dictionary cardinality for the
+average-length numerator. Both modes use the same norm encoding.
 
 ## Features
 

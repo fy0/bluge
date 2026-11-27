@@ -17,6 +17,7 @@ package ru
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/russian"
+
 	"github.com/fy0/bluge/analysis"
 )
 

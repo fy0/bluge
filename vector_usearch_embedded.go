@@ -1,5 +1,3 @@
-//go:build (windows || linux || darwin) && (amd64 || arm64)
-
 package bluge
 
 import (
@@ -19,9 +17,6 @@ import (
 	segment "github.com/fy0/bluge/segment"
 )
 
-// EmbeddedUSearchVectorBackend stores one serialized USearch index in every
-// zapx segment. It is deliberately separate from USearchVectorBackend, whose
-// global sidecar remains useful as a performance baseline.
 type EmbeddedUSearchVectorBackend struct {
 	libraryPath string
 	options     USearchVectorOptions
@@ -33,12 +28,7 @@ func NewEmbeddedUSearchVectorBackend() *EmbeddedUSearchVectorBackend {
 
 func (b *EmbeddedUSearchVectorBackend) Name() string { return vectorBackendUSearchName }
 
-func (b *EmbeddedUSearchVectorBackend) SegmentVectorBackend() {}
-
 func (b *EmbeddedUSearchVectorBackend) WithLibraryPath(path string) *EmbeddedUSearchVectorBackend {
-	if b == nil {
-		return nil
-	}
 	copy := *b
 	copy.libraryPath = path
 	return &copy
@@ -48,81 +38,44 @@ func (b *EmbeddedUSearchVectorBackend) Open(Config) (VectorIndex, error) {
 	return nil, errors.New("embedded usearch backend is opened from an index snapshot")
 }
 
-func (b *EmbeddedUSearchVectorBackend) ValidateVectorChanges(changes []VectorChange) error {
-	for _, change := range changes {
-		if !change.Delete {
-			if err := validateVectorChange(change); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func (b *EmbeddedUSearchVectorBackend) BuildVectorPayload(field string,
-	records []zapxtext.VectorRecord) (zapxtext.VectorPayload, error) {
-	if len(records) == 0 {
-		return zapxtext.VectorPayload{}, fmt.Errorf("field %q has no vectors", field)
-	}
-	options, err := b.options.normalized()
-	if err != nil {
-		return zapxtext.VectorPayload{}, err
-	}
+	records []segment.VectorRecord) (segment.VectorPayload, error) {
+	options := b.options
 	api, err := loadUSearchAPI(b.libraryPath)
 	if err != nil {
-		return zapxtext.VectorPayload{}, err
+		return segment.VectorPayload{}, err
 	}
 	dimensions := len(records[0].Values)
 	similarity := VectorSimilarity(records[0].Similarity)
-	if similarity == "" {
-		similarity = VectorCosine
-	}
-	if dimensions == 0 {
-		return zapxtext.VectorPayload{}, ErrVectorInvalidDimension
-	}
-	encodedDimensions, err := checkedVectorUint32(dimensions, "embedded vector dimensions")
-	if err != nil {
-		return zapxtext.VectorPayload{}, err
-	}
-	for _, record := range records {
-		if len(record.Values) != dimensions || VectorSimilarity(record.Similarity) != similarity {
-			return zapxtext.VectorPayload{}, fmt.Errorf("field %q has inconsistent vector shape", field)
-		}
-		for _, value := range record.Values {
-			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-				return zapxtext.VectorPayload{}, ErrVectorInvalidValue
-			}
-		}
-	}
 	handle := api.create(uintptr(dimensions), usearchMetric(similarity),
 		uintptr(options.Connectivity), uintptr(options.ExpansionAdd), uintptr(options.ExpansionSearch))
 	if handle == nil {
-		return zapxtext.VectorPayload{}, fmt.Errorf("create embedded usearch field %q failed", field)
+		return segment.VectorPayload{}, fmt.Errorf("create embedded usearch field %q failed", field)
 	}
 	defer api.destroy(handle)
 	if status := api.reserve(handle, len(records)); status != 0 {
-		return zapxtext.VectorPayload{}, usearchNativeStatus(api, handle, status, "reserve")
+		return segment.VectorPayload{}, usearchNativeStatus(api, handle, status, "reserve")
 	}
 	adder := newUSearchBatchAdder(api, handle, dimensions)
-	for key, record := range records {
-		if err := adder.Add(uint64(key+1), record.Values); err != nil {
-			return zapxtext.VectorPayload{}, err
+	for key := range uint64(len(records)) {
+		if err := adder.Add(key+1, records[key].Values); err != nil {
+			return segment.VectorPayload{}, err
 		}
 	}
 	if err := adder.Flush(); err != nil {
-		return zapxtext.VectorPayload{}, err
+		return segment.VectorPayload{}, err
 	}
 	data, err := serializeUSearchIndex(api, handle)
 	if err != nil {
-		return zapxtext.VectorPayload{}, fmt.Errorf("serialize embedded usearch field %q: %w", field, err)
+		return segment.VectorPayload{}, fmt.Errorf("serialize embedded usearch field %q: %w", field, err)
 	}
 	docIDs := make([]uint32, len(records))
 	for i, record := range records {
 		docIDs[i] = record.DocNum
 	}
-	return zapxtext.VectorPayload{
+	return segment.VectorPayload{
 		Backend:    b.Name(),
-		Dimensions: encodedDimensions,
+		Dimensions: uint32(dimensions),
 		Similarity: string(similarity),
 		DocIDs:     docIDs,
 		Data:       data,
@@ -130,98 +83,85 @@ func (b *EmbeddedUSearchVectorBackend) BuildVectorPayload(field string,
 }
 
 func (b *EmbeddedUSearchVectorBackend) MergeVectorPayload(field string,
-	inputs []zapxtext.VectorMergeInput) (zapxtext.VectorPayload, error) {
-	if len(inputs) == 0 {
-		return zapxtext.VectorPayload{}, fmt.Errorf("field %q has no merge inputs", field)
-	}
-	options, err := b.options.normalized()
-	if err != nil {
-		return zapxtext.VectorPayload{}, err
-	}
+	inputs []segment.VectorMergeInput) (segment.VectorPayload, error) {
+	options := b.options
 	api, err := loadUSearchAPI(b.libraryPath)
 	if err != nil {
-		return zapxtext.VectorPayload{}, err
+		return segment.VectorPayload{}, err
 	}
 	first := inputs[0].Payload
 	dimensions := int(first.Dimensions)
 	similarity := VectorSimilarity(first.Similarity)
-	if dimensions <= 0 || similarity == "" {
-		return zapxtext.VectorPayload{}, fmt.Errorf("field %q has invalid merge metadata", field)
-	}
 	var live int
 	for _, input := range inputs {
-		if int(input.Payload.Dimensions) != dimensions || input.Payload.Similarity != first.Similarity {
-			return zapxtext.VectorPayload{}, fmt.Errorf("field %q has incompatible merge inputs", field)
-		}
 		for _, docID := range input.Payload.DocIDs {
-			if int(docID) < len(input.NewDocNums) && input.NewDocNums[docID] != math.MaxUint64 {
+			if input.NewDocNums[docID] != math.MaxUint64 {
 				live++
 			}
 		}
 	}
 	if live == 0 {
-		return zapxtext.VectorPayload{}, nil
+		return segment.VectorPayload{}, nil
 	}
 	target := api.create(uintptr(dimensions), usearchMetric(similarity),
 		uintptr(options.Connectivity), uintptr(options.ExpansionAdd), uintptr(options.ExpansionSearch))
 	if target == nil {
-		return zapxtext.VectorPayload{}, fmt.Errorf("create merged embedded usearch field %q failed", field)
+		return segment.VectorPayload{}, fmt.Errorf("create merged embedded usearch field %q failed", field)
 	}
 	defer api.destroy(target)
 	if status := api.reserve(target, live); status != 0 {
-		return zapxtext.VectorPayload{}, usearchNativeStatus(api, target, status, "reserve merge")
+		return segment.VectorPayload{}, usearchNativeStatus(api, target, status, "reserve merge")
 	}
 	docIDs := make([]uint32, 0, live)
 	key := uint64(1)
 	adder := newUSearchBatchAdder(api, target, dimensions)
-	for inputID, input := range inputs {
-		source := api.openBuffer(input.Payload.Data)
-		if source == nil {
-			return zapxtext.VectorPayload{}, fmt.Errorf("open vector payload %d for field %q failed", inputID, field)
+	for _, input := range inputs {
+		mapped, err := mergeUSearchInput(api, adder, input, dimensions, &key)
+		if err != nil {
+			return segment.VectorPayload{}, err
 		}
-		for sourceKey, docID := range input.Payload.DocIDs {
-			if int(docID) >= len(input.NewDocNums) {
-				api.destroy(source)
-				return zapxtext.VectorPayload{}, fmt.Errorf("field %q has invalid source doc mapping", field)
-			}
-			newDocID := input.NewDocNums[docID]
-			if newDocID == math.MaxUint64 {
-				continue
-			}
-			if newDocID > math.MaxUint32 {
-				api.destroy(source)
-				return zapxtext.VectorPayload{}, fmt.Errorf(
-					"field %q has out-of-range merged document number %d", field, newDocID)
-			}
-			vector := make([]float32, dimensions)
-			if status := api.get(source, uint64(sourceKey+1), vector); status != 0 {
-				nativeErr := usearchNativeStatus(api, source, status, "get merge")
-				api.destroy(source)
-				return zapxtext.VectorPayload{}, nativeErr
-			}
-			if err := adder.Add(key, vector); err != nil {
-				api.destroy(source)
-				return zapxtext.VectorPayload{}, err
-			}
-			key++
-			docIDs = append(docIDs, uint32(newDocID))
-		}
-		api.destroy(source)
+		docIDs = append(docIDs, mapped...)
 	}
 	if err := adder.Flush(); err != nil {
-		return zapxtext.VectorPayload{}, err
+		return segment.VectorPayload{}, err
 	}
 	data, err := serializeUSearchIndex(api, target)
 	if err != nil {
-		return zapxtext.VectorPayload{}, fmt.Errorf("serialize merged embedded field %q: %w", field, err)
+		return segment.VectorPayload{}, fmt.Errorf("serialize merged embedded field %q: %w", field, err)
 	}
-	return zapxtext.VectorPayload{
+	return segment.VectorPayload{
 		Backend:    b.Name(),
 		Dimensions: first.Dimensions,
 		Similarity: string(similarity),
 		DocIDs:     docIDs,
 		Data:       data,
 	}, nil
+}
+
+func mergeUSearchInput(api usearchNativeAPI, adder *usearchBatchAdder,
+	input segment.VectorMergeInput, dimensions int, key *uint64) ([]uint32, error) {
+	source := api.openBuffer(input.Payload.Data)
+	if source == nil {
+		return nil, errors.New("open vector payload failed")
+	}
+	defer api.destroy(source)
+	docIDs := make([]uint32, 0, len(input.Payload.DocIDs))
+	vector := make([]float32, dimensions)
+	for sourceKey := range uint64(len(input.Payload.DocIDs)) {
+		newDocID := input.NewDocNums[input.Payload.DocIDs[sourceKey]]
+		if newDocID == math.MaxUint64 {
+			continue
+		}
+		if status := api.get(source, sourceKey+1, vector); status != 0 {
+			return nil, usearchNativeStatus(api, source, status, "get merge")
+		}
+		if err := adder.Add(*key, vector); err != nil {
+			return nil, err
+		}
+		*key++
+		docIDs = append(docIDs, uint32(newDocID))
+	}
+	return docIDs, nil
 }
 
 func serializeUSearchIndex(api usearchNativeAPI, handle unsafe.Pointer) ([]byte, error) {
@@ -246,10 +186,18 @@ type embeddedUSearchVectorIndex struct {
 type embeddedUSearchSegment struct {
 	api           usearchNativeAPI
 	handle        unsafe.Pointer
-	payload       zapxtext.VectorPayload
+	payload       segment.VectorPayload
 	offset        uint64
 	documentCount uint64
 	deleted       *roaring.Bitmap
+}
+
+type vectorSegmentUnwrapper interface {
+	UnderlyingSegment() segment.Segment
+}
+
+type vectorPayloadReader interface {
+	VectorPayload(string) (segment.VectorPayload, error)
 }
 
 type snapshotSegmentAccess interface {
@@ -257,74 +205,73 @@ type snapshotSegmentAccess interface {
 	Deleted() *roaring.Bitmap
 }
 
-func (b *EmbeddedUSearchVectorBackend) OpenSnapshot(snapshot *index.Snapshot) (VectorIndex, error) {
-	if snapshot == nil {
-		return nil, errors.New("embedded usearch backend requires an index snapshot")
+func visitVectorPayloads(snapshot *index.Snapshot,
+	visit func(segment.Segment, *roaring.Bitmap, uint64, string, segment.VectorPayload) error) error {
+	var offset uint64
+	for _, candidate := range snapshot.Segments() {
+		access := candidate.(snapshotSegmentAccess)
+		inner := access.Segment()
+		if unwrap, ok := inner.(vectorSegmentUnwrapper); ok {
+			inner = unwrap.UnderlyingSegment()
+		}
+		reader, ok := inner.(vectorPayloadReader)
+		if ok {
+			for _, field := range inner.Fields() {
+				payload, err := reader.VectorPayload(field)
+				if errors.Is(err, zapxtext.ErrVectorPayloadNotFound) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				if err := visit(inner, access.Deleted(), offset, field, payload); err != nil {
+					return err
+				}
+			}
+		}
+		offset += inner.Count()
 	}
+	return nil
+}
+
+func (b *EmbeddedUSearchVectorBackend) VectorFieldSpecs(snapshot *index.Snapshot) (map[string]VectorFieldSpec, error) {
+	fields := make(map[string]VectorFieldSpec)
+	err := visitVectorPayloads(snapshot,
+		func(_ segment.Segment, _ *roaring.Bitmap, _ uint64, field string, payload segment.VectorPayload) error {
+			spec := VectorFieldSpec{Name: field, Dims: int(payload.Dimensions), Similarity: VectorSimilarity(payload.Similarity)}
+			if previous, exists := fields[field]; exists && previous != spec {
+				return fmt.Errorf("inconsistent vector field %q", field)
+			}
+			fields[field] = spec
+			return nil
+		})
+	return fields, err
+}
+
+func (b *EmbeddedUSearchVectorBackend) OpenSnapshot(snapshot *index.Snapshot) (VectorIndex, error) {
 	api, err := loadUSearchAPI(b.libraryPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrVectorUnsupported, err)
 	}
-	rv := &embeddedUSearchVectorIndex{
-		snapshot: snapshot,
-		fields:   make(map[string][]embeddedUSearchSegment),
-	}
-	offset := uint64(0)
-	for _, candidate := range snapshot.Segments() {
-		access, ok := candidate.(snapshotSegmentAccess)
-		if !ok {
-			return nil, fmt.Errorf("index snapshot does not expose segment access")
-		}
-		inner := access.Segment()
-		if unwrap, ok := inner.(interface {
-			UnderlyingSegment() segment.Segment
-		}); ok {
-			inner = unwrap.UnderlyingSegment()
-		}
-		if inner == nil {
-			return nil, fmt.Errorf("index snapshot contains a nil segment")
-		}
-		payloadReader, ok := inner.(interface {
-			VectorPayload(string) (zapxtext.VectorPayload, error)
-		})
-		if !ok {
-			offset += inner.Count()
-			continue
-		}
-		for _, field := range inner.Fields() {
-			payload, payloadErr := payloadReader.VectorPayload(field)
-			if errors.Is(payloadErr, zapxtext.ErrVectorPayloadNotFound) {
-				continue
-			}
-			if payloadErr != nil {
-				_ = rv.Close()
-				return nil, payloadErr
-			}
+	rv := &embeddedUSearchVectorIndex{snapshot: snapshot, fields: make(map[string][]embeddedUSearchSegment)}
+	err = visitVectorPayloads(snapshot,
+		func(inner segment.Segment, deleted *roaring.Bitmap, offset uint64, field string, payload segment.VectorPayload) error {
 			if payload.Backend != b.Name() {
-				_ = rv.Close()
-				return nil, fmt.Errorf("unsupported embedded vector backend %q", payload.Backend)
-			}
-			if !sort.SliceIsSorted(payload.DocIDs, func(i, j int) bool {
-				return payload.DocIDs[i] < payload.DocIDs[j]
-			}) {
-				_ = rv.Close()
-				return nil, fmt.Errorf("embedded vector field %q has unsorted document mapping", field)
+				return fmt.Errorf("unsupported embedded vector backend %q", payload.Backend)
 			}
 			handle := api.openBuffer(payload.Data)
 			if handle == nil {
-				_ = rv.Close()
-				return nil, fmt.Errorf("open embedded vector field %q failed", field)
+				return fmt.Errorf("open embedded vector field %q failed", field)
 			}
 			rv.fields[field] = append(rv.fields[field], embeddedUSearchSegment{
-				api:           api,
-				handle:        handle,
-				payload:       payload,
-				offset:        offset,
-				documentCount: inner.Count(),
-				deleted:       access.Deleted(),
+				api: api, handle: handle, payload: payload, offset: offset,
+				documentCount: inner.Count(), deleted: deleted,
 			})
-		}
-		offset += inner.Count()
+			return nil
+		})
+	if err != nil {
+		_ = rv.Close()
+		return nil, err
 	}
 	return rv, nil
 }
@@ -350,10 +297,18 @@ func (e *embeddedUSearchVectorIndex) Search(field string, query []float32, k int
 	if filter != nil {
 		return nil, ErrVectorFilterUnsupported
 	}
-	return e.searchCandidates(field, query, k, nil, nil)
+	return e.SearchCandidates(field, query, k, nil)
 }
 
 func (e *embeddedUSearchVectorIndex) SearchCandidates(field string, query []float32,
+	k int, allowed map[Identifier]struct{}) ([]VectorHit, error) {
+	if err := validateVectorQuery(query, k); err != nil {
+		return nil, err
+	}
+	return e.searchVectorCandidates(field, query, k, allowed)
+}
+
+func (e *embeddedUSearchVectorIndex) searchVectorCandidates(field string, query []float32,
 	k int, allowed map[Identifier]struct{}) ([]VectorHit, error) {
 	return e.searchCandidates(field, query, k, allowed, nil)
 }
@@ -363,10 +318,7 @@ func (e *embeddedUSearchVectorIndex) searchDocumentCandidates(field string, quer
 	return e.searchCandidates(field, query, k, nil, allowed)
 }
 
-// embeddedVectorCandidate is an intermediate search result. The stored
-// identifier is resolved only when the global ranking actually needs it, so a
-// search does not pay for the identifiers of candidates that the global
-// truncation discards.
+// Stored IDs are resolved only for filtering and candidates that can survive ranking.
 type embeddedVectorCandidate struct {
 	globalDoc uint64
 	score     float64
@@ -376,17 +328,6 @@ type embeddedVectorCandidate struct {
 
 func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []float32,
 	k int, allowedIDs map[Identifier]struct{}, allowedDocs []uint64) ([]VectorHit, error) {
-	if k <= 0 {
-		return nil, ErrVectorInvalidK
-	}
-	if len(query) == 0 {
-		return nil, ErrVectorInvalidDimension
-	}
-	for _, value := range query {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return nil, ErrVectorInvalidValue
-		}
-	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.closed {
@@ -396,11 +337,8 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 	if len(segments) == 0 {
 		return nil, fmt.Errorf("%w: %q", ErrVectorFieldNotFound, field)
 	}
-	for _, segment := range segments {
-		if int(segment.payload.Dimensions) != len(query) {
-			return nil, fmt.Errorf("%w: field %q has %d dimensions, got %d",
-				ErrVectorInvalidDimension, field, segment.payload.Dimensions, len(query))
-		}
+	if int(segments[0].payload.Dimensions) != len(query) {
+		return nil, fmt.Errorf("%w: field %q", ErrVectorInvalidDimension, field)
 	}
 	if (allowedIDs != nil && len(allowedIDs) == 0) ||
 		(allowedDocs != nil && len(allowedDocs) == 0) {
@@ -413,105 +351,70 @@ func (e *embeddedUSearchVectorIndex) searchCandidates(field string, query []floa
 	return e.rankCandidates(candidates, k)
 }
 
-// collectCandidates runs the per-segment native search. Every segment
-// contributes its own top-k, which is enough for the union to contain the
-// global top-k. Identifiers are resolved here only when the filter itself is
-// expressed in terms of identifiers.
 func (e *embeddedUSearchVectorIndex) collectCandidates(segments []embeddedUSearchSegment,
 	query []float32, k int, allowedIDs map[Identifier]struct{},
 	allowedDocs []uint64) ([]embeddedVectorCandidate, error) {
 	candidates := make([]embeddedVectorCandidate, 0, len(segments)*k)
 	for _, segment := range segments {
-		count := k
-		if allowedIDs != nil {
-			count = len(segment.payload.DocIDs)
-		}
-		if count == 0 {
-			continue
-		}
 		allowedKeys, filtered := segment.allowedKeys(allowedDocs)
+		if allowedIDs != nil {
+			var err error
+			allowedKeys, err = e.allowedIDKeys(segment, allowedKeys, filtered, allowedIDs)
+			if err != nil {
+				return nil, err
+			}
+			filtered = true
+		}
 		if filtered && len(allowedKeys) == 0 {
 			continue
 		}
-		keys := make([]uint64, count)
-		distances := make([]float32, count)
-		var status int32
-		var resultCount int
-		if filtered {
-			status, resultCount = segment.api.searchFiltered(segment.handle, query, count,
-				allowedKeys, keys, distances)
-		} else {
-			status, resultCount = segment.api.search(segment.handle, query, count, keys, distances)
-		}
-		if err := usearchNativeStatus(segment.api, segment.handle, status, "search"); err != nil {
+		keys, distances, err := searchUSearch(segment.api, segment.handle, query, k, allowedKeys)
+		if err != nil {
 			return nil, err
 		}
-		if resultCount < 0 || resultCount > len(keys) || resultCount > len(distances) {
-			return nil, fmt.Errorf("embedded usearch returned invalid result count %d", resultCount)
-		}
 		similarity := VectorSimilarity(segment.payload.Similarity)
-		for i := 0; i < resultCount; i++ {
-			if keys[i] == 0 || keys[i]-1 >= uint64(len(segment.payload.DocIDs)) {
-				return nil, fmt.Errorf("embedded usearch returned invalid key %d", keys[i])
-			}
-			localDoc := segment.payload.DocIDs[keys[i]-1]
-			if segment.deleted != nil && segment.deleted.Contains(localDoc) {
-				continue
-			}
-			candidate := embeddedVectorCandidate{
+		for i, key := range keys {
+			localDoc := segment.payload.DocIDs[key-1]
+			candidates = append(candidates, embeddedVectorCandidate{
 				globalDoc: segment.offset + uint64(localDoc),
 				score:     usearchScore(similarity, float64(distances[i])),
-			}
-			if allowedIDs != nil {
-				id, err := embeddedDocumentID(e.snapshot, candidate.globalDoc)
-				if err != nil {
-					return nil, err
-				}
-				if _, ok := allowedIDs[id]; !ok {
-					continue
-				}
-				candidate.id = id
-				candidate.idSet = true
-			}
-			candidates = append(candidates, candidate)
+			})
 		}
 	}
 	return candidates, nil
 }
 
-// rankCandidates reproduces the documented ordering (score descending, then
-// identifier ascending) while resolving as few stored identifiers as possible.
-//
-// When more candidates arrive than k, the k-th score decides everything:
-// candidates scoring above it are returned whatever their identifiers are,
-// candidates scoring exactly it compete for the remaining slots, and
-// candidates scoring below it can never reach the result. Ordering by score
-// alone needs no identifier, so the split is computed before any identifier is
-// read and the candidates below the cutoff are dropped unread.
-//
-// The identifier comparison inside the tied group is the documented one.
-// Document numbers cannot stand in for identifiers there.
-//
-// The sorts are not stable, which is safe here: two candidates only compare
-// equal when they carry the same score and the same identifier, and such
-// candidates produce indistinguishable VectorHit entries. Candidates sharing a
-// score but differing in identifier are ordered by identifier, and the split
-// by score does not depend on the order inside a score group.
+func (e *embeddedUSearchVectorIndex) allowedIDKeys(s embeddedUSearchSegment, keys []uint64,
+	filtered bool, allowed map[Identifier]struct{}) ([]uint64, error) {
+	if !filtered {
+		keys = make([]uint64, len(s.payload.DocIDs))
+		for i := range uint64(len(keys)) {
+			keys[i] = i + 1
+		}
+	}
+	selected := keys[:0]
+	for _, key := range keys {
+		id, err := embeddedDocumentID(e.snapshot, s.offset+uint64(s.payload.DocIDs[key-1]))
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := allowed[id]; ok {
+			selected = append(selected, key)
+		}
+	}
+	return selected, nil
+}
+
+// Ties use stored IDs; candidates below the score cutoff need no stored-field reads.
 func (e *embeddedUSearchVectorIndex) rankCandidates(candidates []embeddedVectorCandidate,
 	k int) ([]VectorHit, error) {
 	if len(candidates) <= k {
-		// No candidate can be dropped, so there is no split to compute and
-		// every candidate needs its identifier. This is the single-segment
-		// shape of a search.
 		if err := e.resolveCandidateIDs(candidates); err != nil {
 			return nil, err
 		}
 		slices.SortFunc(candidates, compareScoreThenID)
 		return vectorHits(candidates, nil), nil
 	}
-	// The k-th score decides everything: candidates above it are returned
-	// whatever their identifiers are, candidates on it compete for the
-	// remaining slots, and candidates below it can never reach the result.
 	slices.SortFunc(candidates, func(a, b embeddedVectorCandidate) int {
 		return cmp.Compare(b.score, a.score)
 	})
@@ -529,18 +432,11 @@ func (e *embeddedUSearchVectorIndex) rankCandidates(candidates []embeddedVectorC
 	if err := e.resolveCandidateIDs(tied); err != nil {
 		return nil, err
 	}
-	// Candidates after tiedEnd are dropped without an identifier read.
 	slices.SortFunc(selected, compareScoreThenID)
 	slices.SortFunc(tied, func(a, b embeddedVectorCandidate) int {
 		return cmp.Compare(a.id, b.id)
 	})
 	keep := k - len(selected)
-	if keep > len(tied) {
-		keep = len(tied)
-	}
-	if keep < 0 {
-		keep = 0
-	}
 	return vectorHits(selected, tied[:keep]), nil
 }
 
@@ -551,8 +447,6 @@ func compareScoreThenID(a, b embeddedVectorCandidate) int {
 	return cmp.Compare(a.id, b.id)
 }
 
-// vectorHits converts candidate groups that are already in result order into
-// the returned hits. tail is empty when nothing was truncated.
 func vectorHits(head, tail []embeddedVectorCandidate) []VectorHit {
 	hits := make([]VectorHit, 0, len(head)+len(tail))
 	for _, candidate := range head {
@@ -586,9 +480,9 @@ func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, boo
 			return nil, false
 		}
 		keys := make([]uint64, 0, len(s.payload.DocIDs))
-		for key, localDoc := range s.payload.DocIDs {
-			if !s.deleted.Contains(localDoc) {
-				keys = append(keys, uint64(key+1))
+		for key := range uint64(len(s.payload.DocIDs)) {
+			if !s.deleted.Contains(s.payload.DocIDs[key]) {
+				keys = append(keys, key+1)
 			}
 		}
 		return keys, true
@@ -604,9 +498,6 @@ func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, boo
 	keys := make([]uint64, 0, last-first)
 	for _, globalDoc := range allowedDocs[first:last] {
 		localOffset := globalDoc - s.offset
-		if localOffset > math.MaxUint32 {
-			continue
-		}
 		localDoc := uint32(localOffset)
 		if s.deleted != nil && s.deleted.Contains(localDoc) {
 			continue
@@ -616,7 +507,7 @@ func (s embeddedUSearchSegment) allowedKeys(allowedDocs []uint64) ([]uint64, boo
 		})
 		for key < len(s.payload.DocIDs) && s.payload.DocIDs[key] == localDoc {
 			// sort.Search returns a non-negative slice index.
-			keys = append(keys, uint64(key+1)) //nolint:gosec
+			keys = append(keys, uint64(key+1))
 			key++
 		}
 	}
@@ -635,13 +526,10 @@ func embeddedDocumentID(snapshot *index.Snapshot, globalDoc uint64) (Identifier,
 	}); err != nil {
 		return "", err
 	}
-	if id == "" {
-		return "", fmt.Errorf("embedded vector result has no stored identifier")
-	}
 	return id, nil
 }
 
 var _ VectorBackend = (*EmbeddedUSearchVectorBackend)(nil)
-var _ zapxtext.VectorSegmentBackend = (*EmbeddedUSearchVectorBackend)(nil)
+var _ segment.VectorSegmentBackend = (*EmbeddedUSearchVectorBackend)(nil)
 var _ VectorCandidateSearcher = (*embeddedUSearchVectorIndex)(nil)
 var _ vectorDocumentCandidateSearcher = (*embeddedUSearchVectorIndex)(nil)

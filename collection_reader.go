@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"sync"
 
@@ -15,14 +14,11 @@ import (
 	"github.com/fy0/bluge/search"
 )
 
-// CollectionReader pins a text snapshot and the published generations of all
-// selected spaces. Native indices and revision filters are loaded lazily.
-// Search iterators must be consumed before closing the reader.
+// Search iterators borrow this reader and must be consumed before Close.
 type CollectionReader struct {
 	mu        sync.RWMutex
 	cacheMu   sync.Mutex
 	config    CollectionConfig
-	corpus    string
 	text      *Reader
 	spaces    map[string]collectionSpace
 	views     map[string]*Reader
@@ -33,7 +29,6 @@ type CollectionReader struct {
 	leases    []lock.LockedFile
 }
 
-// OpenCollectionReader opens only the named spaces, or all spaces if none are named.
 func OpenCollectionReader(config CollectionConfig, spaceIDs ...string) (*CollectionReader, error) {
 	config, err := config.normalized()
 	if err != nil {
@@ -56,10 +51,10 @@ func OpenCollectionReader(config CollectionConfig, spaceIDs ...string) (*Collect
 	if err != nil {
 		return nil, err
 	}
-	return newCollectionReader(config, manifest.CorpusID, r, spaces)
+	return newCollectionReader(config, r, spaces)
 }
 
-func newCollectionReader(config CollectionConfig, corpus string, text *Reader,
+func newCollectionReader(config CollectionConfig, text *Reader,
 	spaces map[string]collectionSpace) (*CollectionReader, error) {
 	leases, err := pinCollectionSpaces(config, spaces)
 	if err != nil {
@@ -69,8 +64,48 @@ func newCollectionReader(config CollectionConfig, corpus string, text *Reader,
 	for id, space := range spaces {
 		copySpaces[id] = space
 	}
-	return &CollectionReader{config: config, corpus: corpus, text: text, spaces: copySpaces,
-		views: make(map[string]*Reader), metadata: make(map[string]*collectionVectorMetadata), leases: leases}, nil
+	return &CollectionReader{config: config, text: text, spaces: copySpaces,
+		views: make(map[string]*Reader), metadata: make(map[string]*collectionVectorMetadata),
+		leases: leases}, nil
+}
+
+func collectionRevisions(ctx context.Context, text *Reader) (map[Identifier]string, error) {
+	iterator, err := text.reader.PostingsIterator(nil, "", false, false, false)
+	if err != nil {
+		return nil, err
+	}
+	defer iterator.Close()
+	revisions := make(map[Identifier]string, iterator.Count())
+	for {
+		if err := collectionContextError(ctx); err != nil {
+			return nil, err
+		}
+		match, err := iterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		if match == nil {
+			return revisions, nil
+		}
+		var id Identifier
+		var revision string
+		err = text.VisitStoredFields(match.Number(), func(name string, value []byte) bool {
+			switch name {
+			case _idField:
+				id = Identifier(value)
+			case collectionRevisionField:
+				revision = string(value)
+			}
+			return id == "" || revision == ""
+		})
+		if err != nil {
+			return nil, err
+		}
+		if id == "" || revision == "" {
+			return nil, fmt.Errorf("%w: missing document identity or revision", ErrCollectionCorrupt)
+		}
+		revisions[id] = revision
+	}
 }
 
 func (r *CollectionReader) Search(ctx context.Context, request SearchRequest) (search.DocumentMatchIterator, error) {
@@ -176,11 +211,8 @@ func (r *CollectionReader) vectorReader(ctx context.Context, spaceID string) (*R
 	if view := r.views[spaceID]; view != nil {
 		return view, nil
 	}
-	m, err := r.vectorMetadata(spaceID)
+	m, err := r.vectorMetadata(ctx, spaceID)
 	if err != nil {
-		return nil, err
-	}
-	if err := r.loadRevisions(ctx); err != nil {
 		return nil, err
 	}
 	var allowed map[Identifier]struct{}
@@ -210,10 +242,17 @@ func (r *CollectionReader) vectorReader(ctx context.Context, spaceID string) (*R
 	return view, nil
 }
 
-func (r *CollectionReader) vectorMetadata(spaceID string) (*collectionVectorMetadata, error) {
+func (r *CollectionReader) vectorMetadata(ctx context.Context, spaceID string) (*collectionVectorMetadata, error) {
 	space, ok := r.spaces[spaceID]
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrVectorSpaceNotFound, spaceID)
+	}
+	if r.revisions == nil {
+		var err error
+		r.revisions, err = collectionRevisions(ctx, r.text)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if m := r.metadata[spaceID]; m != nil {
 		return m, nil
@@ -226,21 +265,7 @@ func (r *CollectionReader) vectorMetadata(spaceID string) (*collectionVectorMeta
 	return m, nil
 }
 
-func (r *CollectionReader) loadRevisions(ctx context.Context) error {
-	if r.revisions != nil {
-		return nil
-	}
-	revisions, err := collectionRevisions(ctx, r.text, r.corpus)
-	if err != nil {
-		return err
-	}
-	r.revisions = revisions
-	return nil
-}
-
-// PendingVectors returns missing or stale embeddings ordered by chunk ID. Pass
-// the last returned ID as after for the next page on this same reader. An empty
-// page ends the scan. A new reader is required to discover later text changes.
+// Pagination is bound to this reader's revision snapshot.
 func (r *CollectionReader) PendingVectors(ctx context.Context, spaceID string, after Identifier, limit int) ([]DocumentRevision, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -255,15 +280,10 @@ func (r *CollectionReader) PendingVectors(ctx context.Context, spaceID string, a
 	}
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
-	m, err := r.vectorMetadata(spaceID)
+	m, err := r.vectorMetadata(ctx, spaceID)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.loadRevisions(ctx); err != nil {
-		return nil, err
-	}
-	// Only pagination needs ordered IDs. Ordinary searches and status queries
-	// should not allocate and sort the entire text corpus.
 	if r.ids == nil {
 		r.ids = make([]Identifier, 0, len(r.revisions))
 		for id := range r.revisions {
@@ -308,11 +328,8 @@ func (r *CollectionReader) VectorStatus(ctx context.Context, spaceID string) (Ve
 	}
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
-	m, err := r.vectorMetadata(spaceID)
+	m, err := r.vectorMetadata(ctx, spaceID)
 	if err != nil {
-		return status, err
-	}
-	if err := r.loadRevisions(ctx); err != nil {
 		return status, err
 	}
 	status.Spec, status.Generation, status.Documents = m.Spec, m.Generation, len(r.revisions)
@@ -341,51 +358,6 @@ func (r *CollectionReader) Close() error {
 	return errors.Join(err, r.text.Close(), closeCollectionLeases(r.leases))
 }
 
-func collectionRevisions(ctx context.Context, reader *Reader, corpus string) (map[Identifier]string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	iterator, err := reader.Search(ctx, NewAllMatches(NewMatchAllQuery()))
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[Identifier]string)
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		match, err := iterator.Next()
-		if err != nil {
-			return nil, err
-		}
-		if match == nil {
-			return result, nil
-		}
-		var id Identifier
-		var revision, corpusID string
-		if err := match.VisitStoredFields(func(field string, value []byte) bool {
-			switch field {
-			case _idField:
-				id = Identifier(string(value))
-			case collectionRevisionField:
-				revision = string(value)
-			case collectionCorpusField:
-				corpusID = string(value)
-			}
-			return true
-		}); err != nil {
-			return nil, err
-		}
-		if id == "" || revision == "" || corpusID != corpus || result[id] != "" {
-			return nil, fmt.Errorf("%w: missing revision, duplicate ID or foreign corpus for %q", ErrCollectionCorrupt, id)
-		}
-		result[id] = revision
-	}
-}
-
 func collectionContextError(ctx context.Context) error {
 	if ctx == nil {
 		return nil
@@ -410,19 +382,16 @@ func (v *collectionVectorView) Search(field string, query []float32, k int, filt
 
 func (v *collectionVectorView) SearchCandidates(field string, query []float32, k int,
 	candidates map[Identifier]struct{}) ([]VectorHit, error) {
+	if err := validateVectorQuery(query, k); err != nil {
+		return nil, err
+	}
+	return v.searchVectorCandidates(field, query, k, candidates)
+}
+
+func (v *collectionVectorView) searchVectorCandidates(field string, query []float32, k int,
+	candidates map[Identifier]struct{}) ([]VectorHit, error) {
 	if field != v.spec.Field {
 		return nil, ErrVectorFieldNotFound
-	}
-	if k <= 0 {
-		return nil, ErrVectorInvalidK
-	}
-	if len(query) != v.spec.Dims {
-		return nil, ErrVectorInvalidDimension
-	}
-	for _, value := range query {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return nil, ErrVectorInvalidValue
-		}
 	}
 	allowed := v.allowed
 	if allowed == nil {
@@ -435,8 +404,11 @@ func (v *collectionVectorView) SearchCandidates(field string, query []float32, k
 			}
 		}
 	}
-	if (allowed != nil && len(allowed) == 0) || v.raw == nil {
+	if v.raw == nil {
+		if len(query) != v.spec.Dims {
+			return nil, ErrVectorInvalidDimension
+		}
 		return []VectorHit{}, nil
 	}
-	return v.raw.(VectorCandidateSearcher).SearchCandidates(field, query, k, allowed)
+	return searchVectorCandidates(v.raw, field, query, k, allowed)
 }

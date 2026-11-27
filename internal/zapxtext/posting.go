@@ -18,59 +18,20 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"reflect"
+	"unsafe"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	segment "github.com/blevesearch/scorch_segment_api/v2"
+
 	blugeseg "github.com/fy0/bluge/segment"
 )
 
-var reflectStaticSizePostingsList int
-var reflectStaticSizePostingsIterator int
-var reflectStaticSizePosting int
-var reflectStaticSizeLocation int
-
-func init() {
-	var pl PostingsList
-	reflectStaticSizePostingsList = int(reflect.TypeOf(pl).Size())
-	var pi PostingsIterator
-	reflectStaticSizePostingsIterator = int(reflect.TypeOf(pi).Size())
-	var p Posting
-	reflectStaticSizePosting = int(reflect.TypeOf(p).Size())
-	var l Location
-	reflectStaticSizeLocation = int(reflect.TypeOf(l).Size())
-}
-
-// FST or vellum value (uint64) encoding is determined by the top two
-// highest-order or most significant bits...
-//
-//  encoding  : MSB
-//  name      : 63  62  61...to...bit #0 (LSB)
-//  ----------+---+---+---------------------------------------------------
-//   general  : 0 | 0 | 62-bits of postingsOffset.
-//   ~        : 0 | 1 | reserved for future.
-//   1-hit    : 1 | 0 | 31-bits of positive float31 norm | 31-bits docNum.
-//   ~        : 1 | 1 | reserved for future.
-//
-// Encoding "general" is able to handle all cases, where the
-// postingsOffset points to more information about the postings for
-// the term.
-//
-// Encoding "1-hit" is used to optimize a commonly seen case when a
-// term has only a single hit.  For example, a term in the _id field
-// will have only 1 hit.  The "1-hit" encoding is used for a term
-// in a field when...
-//
-// - term vector info is disabled for that field;
-// - and, the term appears in only a single doc for that field;
-// - and, the term's freq is exactly 1 in that single doc for that field;
-// - and, the docNum must fit into 31-bits;
-//
-// Otherwise, the "general" encoding is used instead.
-//
-// In the "1-hit" encoding, the field in that single doc may have
-// other terms, which is supported in the "1-hit" encoding by the
-// positive float31 norm.
+const (
+	reflectStaticSizePostingsList     = int(unsafe.Sizeof(PostingsList{}))
+	reflectStaticSizePostingsIterator = int(unsafe.Sizeof(PostingsIterator{}))
+	reflectStaticSizePosting          = int(unsafe.Sizeof(Posting{}))
+	reflectStaticSizeLocation         = int(unsafe.Sizeof(Location{}))
+)
 
 const FSTValEncodingMask = uint64(0xc000000000000000)
 const FSTValEncodingGeneral = uint64(0x0000000000000000)
@@ -94,7 +55,6 @@ const DocNum1HitFinished = math.MaxUint64
 
 var NormBits1Hit = uint64(1)
 
-// PostingsList is an in-memory representation of a postings list
 type PostingsList struct {
 	sb             *SegmentBase
 	postingsOffset uint64
@@ -104,17 +64,14 @@ type PostingsList struct {
 	postings       *roaring.Bitmap
 	except         *roaring.Bitmap
 
-	// when normBits1Hit != 0, then this postings list came from a
-	// 1-hit encoding, and only the docNum1Hit & normBits1Hit apply
 	docNum1Hit   uint64
 	normBits1Hit uint64
 
-	chunkSize uint64
+	chunkSize uint32
 
 	bytesRead uint64
 }
 
-// represents an immutable, empty postings list
 var emptyPostingsList = &PostingsList{}
 
 func (p *PostingsList) Size() int {
@@ -138,7 +95,6 @@ func (p *PostingsList) OrInto(receiver *roaring.Bitmap) {
 	}
 }
 
-// Iterator returns an iterator for this postings list
 func (p *PostingsList) Iterator(includeFreq, includeNorm, includeLocs bool,
 	prealloc segment.PostingsIterator) segment.PostingsIterator {
 	if p.normBits1Hit == 0 && p.postings == nil {
@@ -199,7 +155,6 @@ func (p *PostingsList) iterator(includeFreq, includeNorm, includeLocs bool,
 	rv.includeLocs = includeLocs
 
 	if p.normBits1Hit != 0 {
-		// "1-hit" encoding
 		rv.docNum1Hit = p.docNum1Hit
 		rv.normBits1Hit = p.normBits1Hit
 
@@ -210,20 +165,17 @@ func (p *PostingsList) iterator(includeFreq, includeNorm, includeLocs bool,
 		return rv
 	}
 
-	// "general" encoding, check if empty
 	if p.postings == nil {
 		return rv
 	}
 
-	// initialize freq chunk reader
 	if rv.includeFreqNorm {
-		rv.freqNormReader = newChunkedIntDecoder(p.sb.mem, p.freqOffset, rv.freqNormReader, p.sb.fileReader)
+		rv.freqNormReader = newChunkedIntDecoder(p.sb.mem, p.freqOffset, rv.freqNormReader)
 		rv.incrementBytesRead(rv.freqNormReader.getBytesRead())
 	}
 
-	// initialize the loc chunk reader
 	if rv.includeLocs {
-		rv.locReader = newChunkedIntDecoder(p.sb.mem, p.locOffset, rv.locReader, p.sb.fileReader)
+		rv.locReader = newChunkedIntDecoder(p.sb.mem, p.locOffset, rv.locReader)
 		rv.incrementBytesRead(rv.locReader.getBytesRead())
 	}
 
@@ -239,7 +191,6 @@ func (p *PostingsList) iterator(includeFreq, includeNorm, includeLocs bool,
 	return rv
 }
 
-// Count returns the number of items on this postings list
 func (p *PostingsList) Count() uint64 {
 	var n, e uint64
 	if p.normBits1Hit != 0 {
@@ -256,10 +207,6 @@ func (p *PostingsList) Count() uint64 {
 	return n - e
 }
 
-// Implements the segment.DiskStatsReporter interface
-// The purpose of this implementation is to get
-// the bytes read from the postings lists stored
-// on disk, while querying
 func (p *PostingsList) ResetBytesRead(val uint64) {
 	p.bytesRead = val
 }
@@ -279,12 +226,10 @@ func (p *PostingsList) BytesWritten() uint64 {
 func (rv *PostingsList) read(postingsOffset uint64, d *Dictionary) error {
 	rv.postingsOffset = postingsOffset
 
-	// handle "1-hit" encoding special case
 	if rv.postingsOffset&FSTValEncodingMask == FSTValEncoding1Hit {
 		return rv.init1Hit(postingsOffset)
 	}
 
-	// read the location of the freq/norm details
 	var n uint64
 	var read int
 
@@ -301,17 +246,14 @@ func (rv *PostingsList) read(postingsOffset uint64, d *Dictionary) error {
 	postingsLen, read = binary.Uvarint(d.sb.mem[postingsOffset+n : postingsOffset+n+binary.MaxVarintLen64])
 	n += uint64(read)
 
-	roaringBytes, err := d.sb.fileReader.process(d.sb.mem[postingsOffset+n : postingsOffset+n+postingsLen])
-	if err != nil {
-		return err
-	}
+	roaringBytes := d.sb.mem[postingsOffset+n : postingsOffset+n+postingsLen]
 
 	rv.incrementBytesRead(n + postingsLen)
 
 	if rv.postings == nil {
 		rv.postings = roaring.NewBitmap()
 	}
-	_, err = rv.postings.FromBuffer(roaringBytes)
+	_, err := rv.postings.FromBuffer(roaringBytes)
 	if err != nil {
 		return fmt.Errorf("error loading roaring bitmap: %v", err)
 	}
@@ -322,7 +264,7 @@ func (rv *PostingsList) read(postingsOffset uint64, d *Dictionary) error {
 		return fmt.Errorf("failed to get chunk size: %v", err)
 	}
 
-	rv.chunkSize = chunkSize
+	rv.chunkSize = uint32(chunkSize)
 
 	return nil
 }
@@ -336,7 +278,6 @@ func (rv *PostingsList) init1Hit(fstVal uint64) error {
 	return nil
 }
 
-// PostingsIterator provides a way to iterate through the postings list
 type PostingsIterator struct {
 	postings *PostingsList
 	all      roaring.IntPeekable
@@ -369,7 +310,6 @@ var emptyPostingsIterator = &PostingsIterator{}
 func (i *PostingsIterator) Size() int {
 	sizeInBytes := reflectStaticSizePostingsIterator + SizeOfPtr +
 		i.next.Size()
-	// account for freqNormReader, locReader if we start using this.
 	for _, entry := range i.nextLocs {
 		sizeInBytes += entry.Size()
 	}
@@ -377,11 +317,6 @@ func (i *PostingsIterator) Size() int {
 	return sizeInBytes
 }
 
-// Implements the segment.DiskStatsReporter interface
-// The purpose of this implementation is to get
-// the bytes read from the disk which includes
-// the freqNorm and location specific information
-// of a hit
 func (i *PostingsIterator) ResetBytesRead(val uint64) {
 	i.bytesRead = val
 }
@@ -398,13 +333,10 @@ func (i *PostingsIterator) BytesWritten() uint64 {
 	return 0
 }
 
-// HasImpacts reports whether this term has v2 block impact metadata.
 func (i *PostingsIterator) HasImpacts() bool {
 	return i != nil && i.postings != nil && i.postings.impactOffset != 0
 }
 
-// AdvanceShallow advances only the block metadata cursor.  It does not consume
-// the postings iterator, so callers can skip the block with Advance(blockEnd+1).
 func (i *PostingsIterator) AdvanceShallow(docNum uint64) (
 	uint64, []blugeseg.Impact, bool, error) {
 	if !i.HasImpacts() {
@@ -428,12 +360,9 @@ func (i *PostingsIterator) AdvanceShallow(docNum uint64) (
 			return 0, nil, false, fmt.Errorf("impact length %d out of bounds", length)
 		}
 		encoded := mem[start : start+length]
-		data, err := i.postings.sb.fileReader.process(encoded)
-		if err != nil {
-			return 0, nil, false, fmt.Errorf("process impacts: %w", err)
-		}
+
 		i.incrementBytesRead(uint64(n) + length)
-		if err := i.impactDecoder.reset(data); err != nil {
+		if err := i.impactDecoder.reset(encoded); err != nil {
 			return 0, nil, false, err
 		}
 	}
@@ -447,10 +376,6 @@ func (i *PostingsIterator) loadChunk(chunk int) error {
 			return err
 		}
 
-		// assign the bytes read at this point, since
-		// the postingsIterator is tracking only the chunk loaded
-		// and the cumulation is tracked correctly in the downstream
-		// intDecoder
 		i.ResetBytesRead(i.freqNormReader.getBytesRead())
 	}
 
@@ -523,30 +448,23 @@ func decodeFreqHasLocs(freqHasLocs uint64) (uint64, bool) {
 	return freq, hasLocs
 }
 
-// readLocation processes all the integers on the stream representing a single
-// location.
 func (i *PostingsIterator) readLocation(l *Location) error {
-	// read off field
 	fieldID, err := i.locReader.readUvarint()
 	if err != nil {
 		return fmt.Errorf("error reading location field: %v", err)
 	}
-	// read off pos
 	pos, err := i.locReader.readUvarint()
 	if err != nil {
 		return fmt.Errorf("error reading location pos: %v", err)
 	}
-	// read off start
 	start, err := i.locReader.readUvarint()
 	if err != nil {
 		return fmt.Errorf("error reading location start: %v", err)
 	}
-	// read off end
 	end, err := i.locReader.readUvarint()
 	if err != nil {
 		return fmt.Errorf("error reading location end: %v", err)
 	}
-	// read off num array pos
 	numArrayPos, err := i.locReader.readUvarint()
 	if err != nil {
 		return fmt.Errorf("error reading location num array pos: %v", err)
@@ -557,14 +475,13 @@ func (i *PostingsIterator) readLocation(l *Location) error {
 	l.start = start
 	l.end = end
 
-	if cap(l.ap) < int(numArrayPos) {
-		l.ap = make([]uint64, int(numArrayPos))
+	if uint64(cap(l.ap)) < numArrayPos {
+		l.ap = make([]uint64, numArrayPos)
 	} else {
-		l.ap = l.ap[:int(numArrayPos)]
+		l.ap = l.ap[:numArrayPos]
 	}
 
-	// read off array positions
-	for k := 0; k < int(numArrayPos); k++ {
+	for k := range l.ap {
 		ap, err := i.locReader.readUvarint()
 		if err != nil {
 			return fmt.Errorf("error reading array position: %v", err)
@@ -576,18 +493,14 @@ func (i *PostingsIterator) readLocation(l *Location) error {
 	return nil
 }
 
-// Next returns the next posting on the postings list, or nil at the end
 func (i *PostingsIterator) Next() (segment.Posting, error) {
 	return i.nextAtOrAfter(0)
 }
 
-// Advance returns the posting at the specified docNum or it is not present
-// the next posting, or if the end is reached, nil
 func (i *PostingsIterator) Advance(docNum uint64) (segment.Posting, error) {
 	return i.nextAtOrAfter(docNum)
 }
 
-// Next returns the next posting on the postings list, or nil at the end
 func (i *PostingsIterator) nextAtOrAfter(atOrAfter uint64) (segment.Posting, error) {
 	docNum, exists, err := i.nextDocNumAtOrAfter(atOrAfter)
 	if err != nil || !exists {
@@ -613,17 +526,13 @@ func (i *PostingsIterator) nextAtOrAfter(atOrAfter uint64) (segment.Posting, err
 	rv.norm = math.Float32frombits(uint32(normBits))
 
 	if i.includeLocs && hasLocs {
-		// prepare locations into reused slices, where we assume
-		// rv.freq >= "number of locs", since in a composite field,
-		// some component fields might have their IncludeTermVector
-		// flags disabled while other component fields are enabled
 		if rv.freq > 0 {
-			if cap(i.nextLocs) >= int(rv.freq) {
+			if uint64(cap(i.nextLocs)) >= rv.freq {
 				i.nextLocs = i.nextLocs[0:rv.freq]
 			} else {
 				i.nextLocs = make([]Location, rv.freq, rv.freq*2)
 			}
-			if cap(i.nextSegmentLocs) < int(rv.freq) {
+			if uint64(cap(i.nextSegmentLocs)) < rv.freq {
 				i.nextSegmentLocs = make([]segment.Location, rv.freq, rv.freq*2)
 			}
 			rv.locs = i.nextSegmentLocs[:0]
@@ -657,21 +566,21 @@ func (i *PostingsIterator) nextAtOrAfter(atOrAfter uint64) (segment.Posting, err
 	return rv, nil
 }
 
-// nextDocNum returns the next docNum on the postings list, and also
-// sets up the currChunk / loc related fields of the iterator.
+func (i *PostingsIterator) nextSingleHit(atOrAfter uint64) (uint64, bool, error) {
+	if i.docNum1Hit == DocNum1HitFinished {
+		return 0, false, nil
+	}
+	docNum := i.docNum1Hit
+	i.docNum1Hit = DocNum1HitFinished
+	if docNum < atOrAfter {
+		return 0, false, nil
+	}
+	return docNum, true, nil
+}
+
 func (i *PostingsIterator) nextDocNumAtOrAfter(atOrAfter uint64) (uint64, bool, error) {
 	if i.normBits1Hit != 0 {
-		if i.docNum1Hit == DocNum1HitFinished {
-			return 0, false, nil
-		}
-		if i.docNum1Hit < atOrAfter {
-			// advanced past our 1-hit
-			i.docNum1Hit = DocNum1HitFinished // consume our 1-hit docNum
-			return 0, false, nil
-		}
-		docNum := i.docNum1Hit
-		i.docNum1Hit = DocNum1HitFinished // consume our 1-hit docNum
-		return docNum, true, nil
+		return i.nextSingleHit(atOrAfter)
 	}
 
 	if i.Actual == nil || !i.Actual.HasNext() {
@@ -679,7 +588,6 @@ func (i *PostingsIterator) nextDocNumAtOrAfter(atOrAfter uint64) (uint64, bool, 
 	}
 
 	if i.postings == nil || i.postings == emptyPostingsList {
-		// couldn't find anything
 		return 0, false, nil
 	}
 
@@ -694,22 +602,16 @@ func (i *PostingsIterator) nextDocNumAtOrAfter(atOrAfter uint64) (uint64, bool, 
 	i.Actual.AdvanceIfNeeded(uint32(atOrAfter))
 
 	if !i.Actual.HasNext() || !i.all.HasNext() {
-		// couldn't find anything
 		return 0, false, nil
 	}
 
 	n := i.Actual.Next()
 	allN := i.all.Next()
-	nChunk := n / uint32(i.postings.chunkSize)
+	nChunk := n / i.postings.chunkSize
 
-	// when allN becomes >= to here, then allN is in the same chunk as nChunk.
-	allNReachesNChunk := nChunk * uint32(i.postings.chunkSize)
+	allNReachesNChunk := nChunk * i.postings.chunkSize
 
-	// n is the next actual hit (excluding some postings), and
-	// allN is the next hit in the full postings, and
-	// if they don't match, move 'all' forwards until they do
 	for allN != n {
-		// we've reached same chunk, so move the freq/norm/loc decoders forward
 		if i.includeFreqNorm && allN >= allNReachesNChunk {
 			err := i.currChunkNext(nChunk)
 			if err != nil {
@@ -736,8 +638,6 @@ func (i *PostingsIterator) nextDocNumAtOrAfter(atOrAfter uint64) (uint64, bool, 
 
 var freqHasLocs1Hit = encodeFreqHasLocs(1, false)
 
-// nextBytes returns the docNum and the encoded freq & loc bytes for
-// the next posting
 func (i *PostingsIterator) nextBytes() (
 	docNumOut uint64, freq uint64, normBits uint64,
 	bytesFreqNorm []byte, bytesLoc []byte, err error) {
@@ -776,7 +676,6 @@ func (i *PostingsIterator) nextBytes() (
 				fmt.Errorf("error reading location nextBytes numLocs: %v", err)
 		}
 
-		// skip over all the location bytes
 		i.locReader.SkipBytes(int(numLocsBytes))
 
 		endLoc := i.locReader.remainingLen()
@@ -786,8 +685,6 @@ func (i *PostingsIterator) nextBytes() (
 	return docNum, freq, normBits, bytesFreqNorm, bytesLoc, nil
 }
 
-// optimization when the postings list is "clean" (e.g., no updates &
-// no deletions) where the all bitmap is the same as the actual bitmap
 func (i *PostingsIterator) nextDocNumAtOrAfterClean(
 	atOrAfter uint64) (uint64, bool, error) {
 	if !i.includeFreqNorm {
@@ -804,10 +701,8 @@ func (i *PostingsIterator) nextDocNumAtOrAfterClean(
 		return 0, false, ErrChunkSizeZero
 	}
 	if atOrAfter == 0 {
-		// Next and merge's nextBytes already advance the freq/norm decoder in
-		// lockstep. Re-seeking here would rank and replay the chunk per posting.
 		n := i.Actual.Next()
-		nChunk := n / uint32(i.postings.chunkSize)
+		nChunk := n / i.postings.chunkSize
 		if i.currChunk != nChunk || i.freqNormReader.isNil() {
 			if err := i.loadChunk(int(nChunk)); err != nil {
 				return 0, false, fmt.Errorf("load sequential freq-norm chunk: %v", err)
@@ -825,12 +720,12 @@ func (i *PostingsIterator) nextDocNumAtOrAfterClean(
 	}
 
 	n := i.Actual.Next()
-	nChunk := n / uint32(i.postings.chunkSize)
+	nChunk := n / i.postings.chunkSize
 	if err := i.loadChunk(int(nChunk)); err != nil {
 		return 0, false, fmt.Errorf("error loading chunk: %v", err)
 	}
 
-	chunkStart := nChunk * uint32(i.postings.chunkSize)
+	chunkStart := nChunk * i.postings.chunkSize
 	var beforeTarget uint64
 	if n > 0 {
 		beforeTarget = i.postings.postings.Rank(n - 1)
@@ -851,12 +746,12 @@ func (i *PostingsIterator) nextDocNumAtOrAfterCleanSparse(
 	atOrAfter uint64) (uint64, bool, error) {
 	sameChunkNexts := 0
 	n := i.Actual.Next()
-	nChunk := n / uint32(i.postings.chunkSize)
+	nChunk := n / i.postings.chunkSize
 
 	for uint64(n) < atOrAfter && i.Actual.HasNext() {
 		n = i.Actual.Next()
 		previousChunk := nChunk
-		nChunk = n / uint32(i.postings.chunkSize)
+		nChunk = n / i.postings.chunkSize
 		if nChunk != previousChunk {
 			sameChunkNexts = 0
 		} else {
@@ -887,7 +782,6 @@ func (i *PostingsIterator) currChunkNext(nChunk uint32) error {
 		}
 	}
 
-	// read off freq/offsets even though we don't care about them
 	hasLocs, err := i.skipFreqNormReadHasLocs()
 	if err != nil {
 		return err
@@ -899,15 +793,12 @@ func (i *PostingsIterator) currChunkNext(nChunk uint32) error {
 			return fmt.Errorf("error reading location numLocsBytes: %v", err)
 		}
 
-		// skip over all the location bytes
 		i.locReader.SkipBytes(int(numLocsBytes))
 	}
 
 	return nil
 }
 
-// DocNum1Hit returns the docNum and true if this is "1-hit" optimized
-// and the docNum is available.
 func (p *PostingsIterator) DocNum1Hit() (uint64, bool) {
 	if p.normBits1Hit != 0 && p.docNum1Hit != DocNum1HitFinished {
 		return p.docNum1Hit, true
@@ -915,21 +806,15 @@ func (p *PostingsIterator) DocNum1Hit() (uint64, bool) {
 	return 0, false
 }
 
-// ActualBitmap returns the underlying actual bitmap
-// which can be used up the stack for optimizations
 func (p *PostingsIterator) ActualBitmap() *roaring.Bitmap {
 	return p.ActualBM
 }
 
-// ReplaceActual replaces the ActualBM with the provided
-// bitmap
 func (p *PostingsIterator) ReplaceActual(abm *roaring.Bitmap) {
 	p.ActualBM = abm
 	p.Actual = abm.Iterator()
 }
 
-// PostingsIteratorFromBitmap constructs a PostingsIterator given an
-// "actual" bitmap.
 func PostingsIteratorFromBitmap(bm *roaring.Bitmap,
 	includeFreqNorm, includeLocs bool) (segment.PostingsIterator, error) {
 	return &PostingsIterator{
@@ -940,8 +825,6 @@ func PostingsIteratorFromBitmap(bm *roaring.Bitmap,
 	}, nil
 }
 
-// PostingsIteratorFrom1Hit constructs a PostingsIterator given a
-// 1-hit docNum.
 func PostingsIteratorFrom1Hit(docNum1Hit uint64,
 	includeFreqNorm, includeLocs bool) (segment.PostingsIterator, error) {
 	return &PostingsIterator{
@@ -952,7 +835,6 @@ func PostingsIteratorFrom1Hit(docNum1Hit uint64,
 	}, nil
 }
 
-// Posting is a single entry in a postings list
 type Posting struct {
 	docNum uint64
 	freq   uint64
@@ -970,32 +852,26 @@ func (p *Posting) Size() int {
 	return sizeInBytes
 }
 
-// Number returns the document number of this posting in this segment
 func (p *Posting) Number() uint64 {
 	return p.docNum
 }
 
-// Frequency returns the frequencies of occurrence of this term in this doc/field
 func (p *Posting) Frequency() uint64 {
 	return p.freq
 }
 
-// Norm returns the normalization factor for this posting
 func (p *Posting) Norm() float64 {
-	return float64(float32(1.0 / math.Sqrt(float64(math.Float32bits(p.norm)))))
+	return float64(p.norm)
 }
 
-// Locations returns the location information for each occurrence
 func (p *Posting) Locations() []segment.Location {
 	return p.locs
 }
 
-// NormUint64 returns the norm value as uint64
 func (p *Posting) NormUint64() uint64 {
 	return uint64(math.Float32bits(p.norm))
 }
 
-// Location represents the location of a single occurrence
 type Location struct {
 	field string
 	pos   uint64
@@ -1010,28 +886,22 @@ func (l *Location) Size() int {
 		len(l.ap)*SizeOfUint64
 }
 
-// Field returns the name of the field (useful in composite fields to know
-// which original field the value came from)
 func (l *Location) Field() string {
 	return l.field
 }
 
-// Start returns the start byte offset of this occurrence
 func (l *Location) Start() uint64 {
 	return l.start
 }
 
-// End returns the end byte offset of this occurrence
 func (l *Location) End() uint64 {
 	return l.end
 }
 
-// Pos returns the 1-based phrase position of this occurrence
 func (l *Location) Pos() uint64 {
 	return l.pos
 }
 
-// ArrayPositions returns the array position vector associated with this occurrence
 func (l *Location) ArrayPositions() []uint64 {
 	return l.ap
 }

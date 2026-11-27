@@ -11,8 +11,6 @@ package zap
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
-	"io"
 	"math/rand"
 	"testing"
 )
@@ -32,13 +30,9 @@ func TestChunkedIntCoderAdaptiveCompression(t *testing.T) {
 		t.Fatalf("expected repetitive chunk to use snappy, got flag %d", flag)
 	}
 
-	fileReader, err := NewFileReader("", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Offset zero is the on-disk sentinel for an absent integer stream.
 	stored := append([]byte{0}, compressed...)
-	decoder := newChunkedIntDecoder(stored, 1, nil, fileReader)
+	decoder := newChunkedIntDecoder(stored, 1, nil)
 	if err := decoder.loadChunk(0); err != nil {
 		t.Fatal(err)
 	}
@@ -92,89 +86,32 @@ func firstIntChunkFlag(t *testing.T, data []byte) byte {
 	return data[pos]
 }
 
-func TestChunkedIntCoderSparseChunksAndCallbacks(t *testing.T) {
+func TestChunkedIntCoderSparseChunks(t *testing.T) {
 	chunks := [][]byte{nil, {1, 2, 3}, nil, bytes.Repeat([]byte{4, 5}, 4096), {6}, nil}
-	for _, mode := range []string{"plain", "file", "append", "in-place", "reused-output"} {
-		t.Run(mode, func(t *testing.T) {
-			coder := newChunkedIntCoder(1, uint64(len(chunks))-1)
-			var output bytes.Buffer
-			var writer io.Writer = &output
-			reader := &FileReader{}
-			calls := 0
-			if mode != "plain" {
-				fw := NewFileWriterEmpty(NewCountHashWriter(&output))
-				writer = fw
-				switch mode {
-				case "append", "reused-output":
-					var scratch []byte
-					fw.processor = func(data []byte) []byte {
-						calls++
-						if mode == "reused-output" {
-							scratch = append(scratch[:0], data...)
-							data = scratch
-						}
-						return append(data, 0xab, 0xcd)
-					}
-					reader.processor = func(data []byte) ([]byte, error) {
-						if len(data) < 2 || !bytes.Equal(data[len(data)-2:], []byte{0xab, 0xcd}) {
-							return nil, errors.New("missing callback trailer")
-						}
-						return data[:len(data)-2], nil
-					}
-				case "in-place":
-					fw.processor = func(data []byte) []byte {
-						calls++
-						for i := range data {
-							data[i] ^= 0xff
-						}
-						return data
-					}
-					reader.processor = func(data []byte) ([]byte, error) {
-						decoded := append([]byte(nil), data...)
-						for i := range decoded {
-							decoded[i] ^= 0xff
-						}
-						return decoded, nil
-					}
-				}
+	coder := newChunkedIntCoder(1, uint64(len(chunks))-1)
+	for _, chunkSize := range []uint64{1, 4, 2} {
+		coder.Reset()
+		coder.SetChunkSize(chunkSize, chunkSize*uint64(len(chunks))-1)
+		for i, chunk := range chunks {
+			if err := coder.AddBytes(uint64(i)*chunkSize, chunk); err != nil {
+				t.Fatal(err)
 			}
-			// Reuse the coder across chunk size changes, including empty chunks.
-			for _, chunkSize := range []uint64{1, 4, 2} {
-				coder.Reset()
-				coder.SetChunkSize(chunkSize, chunkSize*uint64(len(chunks))-1)
-				output.Reset()
-				calls = 0
-				var rawBytes uint64
-				for i := uint64(0); i < uint64(len(chunks)); i++ {
-					chunk := chunks[i]
-					if err := coder.AddBytes(i*chunkSize, chunk); err != nil {
-						t.Fatal(err)
-					}
-					rawBytes += uint64(len(chunk))
-				}
-				coder.Close()
-				if coder.getBytesWritten() != rawBytes {
-					t.Fatal("raw byte accounting changed")
-				}
-				written, err := coder.Write(writer)
-				if err != nil || written != output.Len() {
-					t.Fatalf("Write: bytes=%d, output=%d, error=%v", written, output.Len(), err)
-				}
-				if mode != "plain" && mode != "file" && calls != 3 {
-					t.Fatalf("callback called %d times, want 3 non-empty chunks", calls)
-				}
-				checkIntChunks(t, output.Bytes(), chunks, reader)
-			}
-		})
+		}
+		coder.Close()
+		var output bytes.Buffer
+		if _, err := coder.Write(&output); err != nil {
+			t.Fatal(err)
+		}
+		checkIntChunks(t, output.Bytes(), chunks)
 	}
 }
 
-func checkIntChunks(t *testing.T, data []byte, chunks [][]byte, reader *FileReader) {
+func checkIntChunks(t *testing.T, data []byte, chunks [][]byte) {
 	t.Helper()
 	// Offset zero means absent; pad the tail for the decoder's varint lookahead.
 	stored := append([]byte{0}, data...)
 	stored = append(stored, make([]byte, binary.MaxVarintLen64)...)
-	decoder := newChunkedIntDecoder(stored, 1, nil, reader)
+	decoder := newChunkedIntDecoder(stored, 1, nil)
 	if len(decoder.chunkOffsets) != len(chunks) {
 		t.Fatalf("got %d chunks, want %d", len(decoder.chunkOffsets), len(chunks))
 	}
@@ -211,7 +148,7 @@ func TestChunkedIntCoderReleasesLargeBuffers(t *testing.T) {
 	if _, err := coder.Write(&output); err != nil {
 		t.Fatal(err)
 	}
-	checkIntChunks(t, output.Bytes(), [][]byte{data}, &FileReader{})
+	checkIntChunks(t, output.Bytes(), [][]byte{data})
 	coder.Reset()
 	if cap(coder.final) > maxIntCoderRetainedBytes || coder.chunkBuf.Cap() > maxIntCoderRetainedBytes ||
 		cap(coder.compressed) > maxIntCoderRetainedBytes || cap(coder.buf) > maxIntCoderRetainedBytes {
@@ -225,5 +162,5 @@ func TestChunkedIntCoderReleasesLargeBuffers(t *testing.T) {
 	if _, err := coder.Write(&output); err != nil {
 		t.Fatal(err)
 	}
-	checkIntChunks(t, output.Bytes(), [][]byte{{42}}, &FileReader{})
+	checkIntChunks(t, output.Bytes(), [][]byte{{42}})
 }

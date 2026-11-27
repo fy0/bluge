@@ -3,8 +3,9 @@
 package bluge
 
 import (
-	"golang.org/x/sys/windows"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 func writerMemoryPeakRSS() (uint64, error) {

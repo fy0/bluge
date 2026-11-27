@@ -15,7 +15,6 @@
 package bluge
 
 import (
-	bleveindex "github.com/blevesearch/bleve_index_api"
 	segment "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/internal/blugeidx"
@@ -117,86 +116,6 @@ func (d Document) EachField(vf segment.VisitField) {
 	}
 }
 
-// ToBlugeIndexDocument exports an analyzed document to the native segment
-// build representation.
 func (d Document) ToBlugeIndexDocument() (*blugeidx.Document, error) {
-	fields := make([]*blugeidx.Field, 0, len(d))
-	vectors := make([]*blugeidx.Vector, 0)
-	for _, field := range d {
-		if vectorField, ok := field.(interface{ VectorValue() []float32 }); ok {
-			similarity := VectorCosine
-			if withSimilarity, ok := field.(interface{ VectorSimilarity() VectorSimilarity }); ok {
-				similarity = withSimilarity.VectorSimilarity()
-			}
-			vectors = append(vectors, blugeidx.NewVector(field.Name(),
-				vectorField.VectorValue(), string(similarity)))
-			continue
-		}
-		options := blugeIndexFieldOptions(field)
-		if field.Name() == _idField {
-			options |= bleveindex.IndexField | bleveindex.StoreField
-		}
-		indexField := blugeidx.NewField(
-			field.Name(),
-			field.Value(),
-			options,
-			field.Length(),
-			field.AnalyzedTokenFrequencies(),
-			blugeFieldPlainTextBytes(field),
-		)
-		if termField, ok := field.(*TermField); ok {
-			if _, numeric := termField.analyzer.(*numericAnalyzer); numeric {
-				indexField.SetCanonicalDocValues()
-			}
-		}
-		fields = append(fields, indexField)
-	}
-	doc, err := blugeidx.NewDocument(fields)
-	if err != nil {
-		return nil, err
-	}
-	for _, vector := range vectors {
-		doc.AddVector(vector)
-	}
-	return doc, nil
-}
-
-func blugeIndexFieldOptions(field Field) bleveindex.FieldIndexingOptions {
-	var options bleveindex.FieldIndexingOptions
-	if field.Index() {
-		options |= bleveindex.IndexField
-	}
-	if field.Store() {
-		options |= bleveindex.StoreField
-	}
-	if field.IndexDocValues() {
-		options |= bleveindex.DocValues
-	}
-	if blugeFieldHasLocations(field) {
-		options |= bleveindex.IncludeTermVectors
-	}
-	return options
-}
-
-func blugeFieldPlainTextBytes(field Field) uint64 {
-	if sized, ok := field.(interface{ NumPlainTextBytes() int }); ok {
-		return uint64(sized.NumPlainTextBytes())
-	}
-	return uint64(len(field.Value()))
-}
-
-func blugeFieldHasLocations(field Field) bool {
-	if withLocations, ok := field.(interface{ IncludeLocations() bool }); ok {
-		return withLocations.IncludeLocations()
-	}
-	var found bool
-	field.EachTerm(func(term segment.FieldTerm) {
-		if found {
-			return
-		}
-		term.EachLocation(func(segment.Location) {
-			found = true
-		})
-	})
-	return found
+	return blugeidx.FromSegmentDocument(d)
 }

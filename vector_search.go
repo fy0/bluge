@@ -23,9 +23,6 @@ var (
 	ErrHybridInvalidRequest = errors.New("hybrid search request is invalid")
 )
 
-// VectorSearchRequest is the fluent form of a vector search. The existing
-// Reader.VectorSearch method remains available for callers that do not need
-// candidate tuning.
 type VectorSearchRequest struct {
 	Field      string
 	Vector     []float32
@@ -34,8 +31,6 @@ type VectorSearchRequest struct {
 	Filter     Query
 }
 
-// NewVectorSearchRequest creates a vector request with a default result size
-// of ten. The vector is copied so callers can reuse their input buffer.
 func NewVectorSearchRequest(field string, vector []float32) *VectorSearchRequest {
 	return &VectorSearchRequest{
 		Field:  field,
@@ -45,23 +40,17 @@ func NewVectorSearchRequest(field string, vector []float32) *VectorSearchRequest
 }
 
 func (r *VectorSearchRequest) SetK(k int) *VectorSearchRequest {
-	if r != nil {
-		r.K = k
-	}
+	r.K = k
 	return r
 }
 
 func (r *VectorSearchRequest) SetCandidates(candidates int) *VectorSearchRequest {
-	if r != nil {
-		r.Candidates = candidates
-	}
+	r.Candidates = candidates
 	return r
 }
 
 func (r *VectorSearchRequest) SetFilter(filter Query) *VectorSearchRequest {
-	if r != nil {
-		r.Filter = filter
-	}
+	r.Filter = filter
 	return r
 }
 
@@ -81,9 +70,6 @@ func (r VectorSearchRequest) normalized() (VectorSearchRequest, error) {
 	return r, nil
 }
 
-// SearchVectorRequest executes a vector request and applies the final K after
-// candidate retrieval. Candidates is useful for hybrid search and for ANN
-// recall tuning; zero means exactly K candidates.
 func (r *Reader) SearchVectorRequest(ctx context.Context,
 	request *VectorSearchRequest) ([]VectorHit, error) {
 	if request == nil {
@@ -93,7 +79,10 @@ func (r *Reader) SearchVectorRequest(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	hits, err := r.VectorSearch(ctx, normalized.Field, normalized.Vector,
+	if err := validateVectorValues(normalized.Vector); err != nil {
+		return nil, err
+	}
+	hits, err := r.vectorSearch(ctx, normalized.Field, normalized.Vector,
 		normalized.Candidates, normalized.Filter)
 	if err != nil {
 		return nil, err
@@ -104,21 +93,13 @@ func (r *Reader) SearchVectorRequest(ctx context.Context,
 	return hits, nil
 }
 
-// HybridFusionMode controls how text and vector candidates are combined.
 type HybridFusionMode string
 
 const (
-	// HybridFusionWeighted normalizes each candidate list to [0, 1] and
-	// combines the lists using TextWeight and VectorWeight.
 	HybridFusionWeighted HybridFusionMode = "weighted"
-	// HybridFusionRRF uses reciprocal rank fusion and is robust when text and
-	// vector scores have different distributions.
-	HybridFusionRRF HybridFusionMode = "rrf"
+	HybridFusionRRF      HybridFusionMode = "rrf"
 )
 
-// HybridSearchRequest combines a Bluge Query with a vector request. Either
-// side may be omitted, which makes this type useful for gradual migration from
-// text-only or vector-only search as well as true hybrid search.
 type HybridSearchRequest struct {
 	TextQuery Query
 	Vector    *VectorSearchRequest
@@ -134,9 +115,6 @@ type HybridSearchRequest struct {
 	RRFK         int
 }
 
-// NewHybridSearchRequest creates a hybrid request from the two independent
-// query objects. Both objects are optional, but at least one must be present
-// when the request is executed.
 func NewHybridSearchRequest(text Query, vector *VectorSearchRequest) *HybridSearchRequest {
 	return &HybridSearchRequest{
 		TextQuery:    text,
@@ -150,52 +128,38 @@ func NewHybridSearchRequest(text Query, vector *VectorSearchRequest) *HybridSear
 }
 
 func (r *HybridSearchRequest) SetK(k int) *HybridSearchRequest {
-	if r != nil {
-		r.K = k
-	}
+	r.K = k
 	return r
 }
 
 func (r *HybridSearchRequest) SetFilter(filter Query) *HybridSearchRequest {
-	if r != nil {
-		r.Filter = filter
-	}
+	r.Filter = filter
 	return r
 }
 
 func (r *HybridSearchRequest) SetTextCandidates(candidates int) *HybridSearchRequest {
-	if r != nil {
-		r.TextCandidates = candidates
-	}
+	r.TextCandidates = candidates
 	return r
 }
 
 func (r *HybridSearchRequest) SetVectorCandidates(candidates int) *HybridSearchRequest {
-	if r != nil {
-		r.VectorCandidates = candidates
-	}
+	r.VectorCandidates = candidates
 	return r
 }
 
 func (r *HybridSearchRequest) SetFusion(mode HybridFusionMode) *HybridSearchRequest {
-	if r != nil {
-		r.Fusion = mode
-	}
+	r.Fusion = mode
 	return r
 }
 
 func (r *HybridSearchRequest) SetWeights(text, vector float64) *HybridSearchRequest {
-	if r != nil {
-		r.TextWeight = text
-		r.VectorWeight = vector
-	}
+	r.TextWeight = text
+	r.VectorWeight = vector
 	return r
 }
 
 func (r *HybridSearchRequest) SetRRFK(k int) *HybridSearchRequest {
-	if r != nil {
-		r.RRFK = k
-	}
+	r.RRFK = k
 	return r
 }
 
@@ -215,9 +179,7 @@ func (r HybridSearchRequest) normalized() (HybridSearchRequest, error) {
 	if r.Fusion != HybridFusionWeighted && r.Fusion != HybridFusionRRF {
 		return HybridSearchRequest{}, fmt.Errorf("%w: unsupported fusion mode %q", ErrHybridInvalidRequest, r.Fusion)
 	}
-	if math.IsNaN(r.TextWeight) || math.IsInf(r.TextWeight, 0) || r.TextWeight < 0 ||
-		math.IsNaN(r.VectorWeight) || math.IsInf(r.VectorWeight, 0) || r.VectorWeight < 0 ||
-		r.TextWeight+r.VectorWeight == 0 {
+	if !validHybridWeights(r.TextWeight, r.VectorWeight) {
 		return HybridSearchRequest{}, fmt.Errorf("%w: weights must be finite and at least one must be positive", ErrHybridInvalidRequest)
 	}
 	if r.RRFK <= 0 {
@@ -226,9 +188,6 @@ func (r HybridSearchRequest) normalized() (HybridSearchRequest, error) {
 	return r, nil
 }
 
-// HybridHit contains the raw scores from both branches and the fused score.
-// A rank of zero means that the document was absent from that branch's
-// candidate set.
 type HybridHit struct {
 	ID          Identifier
 	Score       float64
@@ -238,13 +197,9 @@ type HybridHit struct {
 	VectorRank  int
 }
 
-// HybridSearch executes text and vector retrieval independently, then fuses
-// their candidate sets in Go. The native backend is deliberately unaware of
-// Bluge queries and filters.
-func (r *Reader) HybridSearch(ctx context.Context,
-	request *HybridSearchRequest) ([]HybridHit, error) {
+func (r *Reader) HybridSearch(ctx context.Context, request *HybridSearchRequest) ([]HybridHit, error) {
 	if request == nil {
-		return nil, fmt.Errorf("%w: request is nil", ErrHybridInvalidRequest)
+		return nil, fmt.Errorf("%w: nil request", ErrHybridInvalidRequest)
 	}
 	normalized, err := request.normalized()
 	if err != nil {
@@ -253,131 +208,123 @@ func (r *Reader) HybridSearch(ctx context.Context,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
-	textCandidates := make(map[Identifier]hybridCandidate)
-	if normalized.TextQuery != nil {
-		count := normalized.TextCandidates
-		if count == 0 {
-			count = hybridDefaultCandidates(normalized.K)
-		}
-		textQuery := combineHybridQueries(normalized.TextQuery, normalized.Filter)
-		iterator, searchErr := r.Search(ctx, NewTopNSearch(count, textQuery))
-		if searchErr != nil {
-			return nil, searchErr
-		}
-		for rank := 1; ; rank++ {
-			match, nextErr := iterator.Next()
-			if nextErr != nil {
-				return nil, nextErr
-			}
-			if match == nil {
-				break
-			}
-			id, idErr := documentMatchIdentifier(match)
-			if idErr != nil {
-				return nil, idErr
-			}
-			textCandidates[id] = hybridCandidate{
-				id:        id,
-				textScore: match.Score,
-				textRank:  rank,
-				hasText:   true,
-			}
-		}
+	text, err := r.hybridTextCandidates(ctx, normalized)
+	if err != nil {
+		return nil, err
 	}
-
-	vectorCandidates := make(map[Identifier]hybridCandidate)
-	if normalized.Vector != nil {
-		vectorRequest := *normalized.Vector
-		vectorRequest.Filter = combineHybridQueries(vectorRequest.Filter, normalized.Filter)
-		count := normalized.VectorCandidates
-		if count == 0 {
-			count = vectorRequest.Candidates
-		}
-		if count == 0 {
-			count = hybridDefaultCandidates(normalized.K)
-		}
-		vectorRequest.K = count
-		vectorRequest.Candidates = count
-		hits, searchErr := r.SearchVectorRequest(ctx, &vectorRequest)
-		if searchErr != nil {
-			return nil, searchErr
-		}
-		for rank, hit := range hits {
-			vectorCandidates[hit.ID] = hybridCandidate{
-				id:          hit.ID,
-				vectorScore: hit.Score,
-				vectorRank:  rank + 1,
-				hasVector:   true,
-			}
-		}
+	vector, err := r.hybridVectorCandidates(ctx, normalized)
+	if err != nil {
+		return nil, err
 	}
+	return fuseHybridCandidates(normalized, text, vector), nil
+}
 
-	all := make(map[Identifier]hybridCandidate, len(textCandidates)+len(vectorCandidates))
-	for id, candidate := range textCandidates {
-		all[id] = candidate
+func (r *Reader) hybridTextCandidates(ctx context.Context,
+	request HybridSearchRequest) (map[Identifier]hybridCandidate, error) {
+	candidates := make(map[Identifier]hybridCandidate)
+	if request.TextQuery == nil {
+		return candidates, nil
 	}
-	for id, candidate := range vectorCandidates {
-		merged := all[id]
-		if merged.id == "" {
-			merged.id = id
-		}
-		if candidate.hasVector {
-			merged.vectorScore = candidate.vectorScore
-			merged.vectorRank = candidate.vectorRank
-			merged.hasVector = true
-		}
-		all[id] = merged
+	count := request.TextCandidates
+	if count == 0 {
+		count = hybridDefaultCandidates(request.K)
 	}
+	query := combineHybridQueries(request.TextQuery, request.Filter)
+	iterator, err := r.Search(ctx, NewTopNSearch(count, query))
+	if err != nil {
+		return nil, err
+	}
+	for rank := 1; ; rank++ {
+		match, err := iterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		if match == nil {
+			return candidates, nil
+		}
+		id, err := documentMatchIdentifier(match)
+		if err != nil {
+			return nil, err
+		}
+		candidates[id] = hybridCandidate{textScore: match.Score, textRank: rank}
+	}
+}
 
-	textNormalized := normalizeHybridScores(textCandidates, true)
-	vectorNormalized := normalizeHybridScores(vectorCandidates, false)
-	hits := make([]HybridHit, 0, len(all))
-	for id, candidate := range all {
-		var score float64
-		switch normalized.Fusion {
-		case HybridFusionRRF:
-			if candidate.textRank > 0 {
-				score += normalized.TextWeight /
-					float64(normalized.RRFK+candidate.textRank)
-			}
-			if candidate.vectorRank > 0 {
-				score += normalized.VectorWeight /
-					float64(normalized.RRFK+candidate.vectorRank)
-			}
-		default:
-			score = normalized.TextWeight*textNormalized[id] +
-				normalized.VectorWeight*vectorNormalized[id]
+func (r *Reader) hybridVectorCandidates(ctx context.Context,
+	request HybridSearchRequest) (map[Identifier]hybridCandidate, error) {
+	candidates := make(map[Identifier]hybridCandidate)
+	if request.Vector == nil {
+		return candidates, nil
+	}
+	vector := *request.Vector
+	vector.Filter = combineHybridQueries(vector.Filter, request.Filter)
+	count := request.VectorCandidates
+	if count == 0 {
+		count = vector.Candidates
+	}
+	if count == 0 {
+		count = hybridDefaultCandidates(request.K)
+	}
+	vector.K, vector.Candidates = count, count
+	hits, err := r.SearchVectorRequest(ctx, &vector)
+	if err != nil {
+		return nil, err
+	}
+	for rank, hit := range hits {
+		candidates[hit.ID] = hybridCandidate{vectorScore: hit.Score, vectorRank: rank + 1}
+	}
+	return candidates, nil
+}
+
+func fuseHybridCandidates(request HybridSearchRequest,
+	text, vector map[Identifier]hybridCandidate) []HybridHit {
+	var textScores, vectorScores map[Identifier]float64
+	if request.Fusion == HybridFusionWeighted {
+		textScores = normalizeHybridScores(text, true)
+		vectorScores = normalizeHybridScores(vector, false)
+	}
+	for id, candidate := range vector {
+		merged := text[id]
+		merged.vectorScore, merged.vectorRank = candidate.vectorScore, candidate.vectorRank
+		text[id] = merged
+	}
+	hits := make([]HybridHit, 0, len(text))
+	for id, candidate := range text {
+		score := request.TextWeight*textScores[id] + request.VectorWeight*vectorScores[id]
+		if request.Fusion == HybridFusionRRF {
+			score = hybridRRFScore(request, candidate)
 		}
 		hits = append(hits, HybridHit{
-			ID:          id,
-			Score:       score,
-			TextScore:   candidate.textScore,
-			VectorScore: candidate.vectorScore,
-			TextRank:    candidate.textRank,
-			VectorRank:  candidate.vectorRank,
+			ID: id, Score: score,
+			TextScore: candidate.textScore, VectorScore: candidate.vectorScore,
+			TextRank: candidate.textRank, VectorRank: candidate.vectorRank,
 		})
 	}
-	sort.SliceStable(hits, func(i, j int) bool {
+	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].Score == hits[j].Score {
 			return hits[i].ID < hits[j].ID
 		}
 		return hits[i].Score > hits[j].Score
 	})
-	if len(hits) > normalized.K {
-		hits = hits[:normalized.K]
+	return hits[:min(len(hits), request.K)]
+}
+
+func hybridRRFScore(request HybridSearchRequest, candidate hybridCandidate) float64 {
+	var score float64
+	if candidate.textRank > 0 {
+		score += request.TextWeight / float64(request.RRFK+candidate.textRank)
 	}
-	return hits, nil
+	if candidate.vectorRank > 0 {
+		score += request.VectorWeight / float64(request.RRFK+candidate.vectorRank)
+	}
+	return score
 }
 
 type hybridCandidate struct {
-	id          Identifier
 	textScore   float64
 	vectorScore float64
 	textRank    int
 	vectorRank  int
-	hasText     bool
-	hasVector   bool
 }
 
 func hybridDefaultCandidates(k int) int {
@@ -452,4 +399,9 @@ func normalizeHybridScores(candidates map[Identifier]hybridCandidate,
 		result[id] = (score - minScore) / (maxScore - minScore)
 	}
 	return result
+}
+
+func validHybridWeights(text, vector float64) bool {
+	return !math.IsNaN(text) && !math.IsInf(text, 0) && text >= 0 &&
+		!math.IsNaN(vector) && !math.IsInf(vector, 0) && vector >= 0 && text+vector > 0
 }

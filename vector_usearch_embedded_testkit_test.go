@@ -80,7 +80,7 @@ func deterministicVector(seed uint64, out []float32) []float32 {
 	state := seed*6364136223846793005 + 1442695040888963407
 	for i := range out {
 		state = state*6364136223846793005 + 1442695040888963407
-		out[i] = float32(int64(state>>11))/float32(int64(1)<<52) - 1
+		out[i] = float32(state>>11)/(1<<52) - 1
 	}
 	return out
 }
@@ -112,7 +112,7 @@ func buildEmbeddedCorpus(tb testing.TB, spec embeddedCorpusSpec) *embeddedCorpus
 	if spec.VectorOf == nil {
 		dims := spec.Dimensions
 		spec.VectorOf = func(i int) []float32 {
-			return deterministicVector(uint64(i)+1, make([]float32, dims)) //nolint:gosec // document indices are non-negative
+			return deterministicVector(uint64(i)+1, make([]float32, dims))
 		}
 	}
 	if spec.GroupOf == nil {

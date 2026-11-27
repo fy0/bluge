@@ -16,6 +16,7 @@ package aggregations
 
 import (
 	"github.com/axiomhq/hyperloglog"
+
 	"github.com/fy0/bluge/search"
 )
 

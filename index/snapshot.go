@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	segment "github.com/fy0/bluge/segment"
 )
 
@@ -44,7 +45,7 @@ type Snapshot struct {
 	segment []*segmentSnapshot
 	offsets []uint64
 	epoch   uint64
-	size    uint64
+	size    int
 	creator string
 
 	m    sync.Mutex // Protects the fields that follow.
@@ -90,13 +91,13 @@ func (i *Snapshot) Close() error {
 }
 
 func (i *Snapshot) Size() int {
-	return int(i.size)
+	return i.size
 }
 
 func (i *Snapshot) updateSize() {
-	i.size += uint64(reflectStaticSizeIndexSnapshot)
+	i.size += reflectStaticSizeIndexSnapshot
 	for _, s := range i.segment {
-		i.size += uint64(s.Size())
+		i.size += s.Size()
 	}
 }
 
@@ -213,7 +214,7 @@ func (c *collectionStats) Merge(other segment.CollectionStats) {
 	c.totalDocCount += other.TotalDocumentCount()
 	c.docCount += other.DocumentCount()
 	c.sumTotalTermFreq += other.SumTotalTermFrequency()
-	if extended, ok := other.(interface{ UniqueTermCount() uint64 }); ok {
+	if extended, ok := other.(segment.UniqueTermStats); ok {
 		c.uniqueTermCount += extended.UniqueTermCount()
 	}
 }
@@ -618,7 +619,7 @@ func (i *Snapshot) readFromVersion1(br *bufio.Reader) (int64, error) {
 	}
 	bytesRead += int64(sz)
 
-	for j := 0; j < int(numSegments); j++ {
+	for j := uint64(0); j < numSegments; j++ {
 		segmentBytesRead, ss, err := i.readSegmentSnapshot(br)
 		if err != nil {
 			return bytesRead, err
@@ -681,7 +682,7 @@ func (i *Snapshot) readSegmentSnapshot(br *bufio.Reader) (bytesRead int64, ss *s
 	bytesRead += int64(sz)
 
 	if delLen > 0 {
-		deletedBytes := make([]byte, int(delLen))
+		deletedBytes := make([]byte, delLen)
 		sz, err = io.ReadFull(br, deletedBytes)
 		if err != nil {
 			return bytesRead, nil, fmt.Errorf("error reading snapshot %d: %w", i.epoch, err)

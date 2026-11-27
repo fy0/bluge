@@ -30,7 +30,6 @@ type bm25Mode uint8
 
 const (
 	bm25Standard bm25Mode = iota
-	bm25Legacy
 	bm25Bleve
 )
 
@@ -49,18 +48,6 @@ func NewBM25SimilarityBK1(b, k1 float64) *BM25Similarity {
 	return &BM25Similarity{b: b, k1: k1, mode: bm25Standard}
 }
 
-// NewLegacyBM25Similarity preserves Bluge's historical BM25 score formula.
-func NewLegacyBM25Similarity() *BM25Similarity {
-	return NewLegacyBM25SimilarityBK1(defaultB, defaultK1)
-}
-
-func NewLegacyBM25SimilarityBK1(b, k1 float64) *BM25Similarity {
-	return &BM25Similarity{b: b, k1: k1, mode: bm25Legacy}
-}
-
-// NewBleveBM25Similarity approximates the ranking behavior of Bleve v2.5.7.
-// It intentionally retains Bluge's norm encoding so an index can be searched
-// with any of the built-in BM25 modes without rebuilding it.
 func NewBleveBM25Similarity() *BM25Similarity {
 	return &BM25Similarity{b: defaultB, k1: defaultK1, mode: bm25Bleve}
 }
@@ -109,7 +96,7 @@ func (b *BM25Similarity) AverageFieldLength(stats segment.CollectionStats) float
 	if b.mode == bm25Bleve {
 		// Bleve v2.5.7 calls the per-segment term dictionary cardinality
 		// "field cardinality" and uses it as the avgdl numerator.
-		if extended, ok := stats.(interface{ UniqueTermCount() uint64 }); ok {
+		if extended, ok := stats.(segment.UniqueTermStats); ok {
 			totalTerms = extended.UniqueTermCount()
 		}
 		return math.Ceil(float64(totalTerms) / float64(docCount))
@@ -186,9 +173,6 @@ func (b *BM25Scorer) score(freq int, docLen float64) float64 {
 	}
 
 	switch b.mode {
-	case bm25Legacy:
-		normInverse := 1 / (b.k1 * ((1 - b.b) + b.b*docLen/b.avgDocLen))
-		return b.weight - b.weight/(1+tf*normInverse)
 	case bm25Bleve:
 		return b.idf.Value * tf * b.k1 / denominator * b.queryWeight
 	default:
@@ -241,8 +225,6 @@ func (b *BM25Scorer) tfExplanation(freq int, docLen float64) *search.Explanation
 
 func (b *BM25Scorer) modeName() string {
 	switch b.mode {
-	case bm25Legacy:
-		return "legacy-bluge"
 	case bm25Bleve:
 		return "bleve-v2.5.7"
 	default:

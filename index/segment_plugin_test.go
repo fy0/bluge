@@ -14,8 +14,8 @@ import (
 	"testing"
 )
 
-func TestDefaultIndexSegmentsAreZapxBlugeV2(t *testing.T) {
-	cfg, cleanup := CreateConfig("TestDefaultIndexSegmentsAreZapxBlugeV2")
+func TestDefaultIndexSegmentsAreZapxBluge(t *testing.T) {
+	cfg, cleanup := CreateConfig("TestDefaultIndexSegmentsAreZapxBluge")
 	defer func() {
 		err := cleanup()
 		if err != nil {
@@ -63,8 +63,8 @@ func TestDefaultIndexSegmentsAreZapxBlugeV2(t *testing.T) {
 	if seg.Type() != "zapx-bluge" {
 		t.Fatalf("expected segment type zapx-bluge, got %s", seg.Type())
 	}
-	if seg.Version() != 2 {
-		t.Fatalf("expected segment version 2, got %d", seg.Version())
+	if seg.Version() != 3 {
+		t.Fatalf("expected segment version 3, got %d", seg.Version())
 	}
 }
 
@@ -189,26 +189,6 @@ func TestZapxBlugePersistsCustomNorm(t *testing.T) {
 	}
 	if got, want := posting.Norm(), 30.0; got != want {
 		t.Fatalf("persisted norm: got %v want %v", got, want)
-	}
-}
-
-func TestLegacyIceSegmentPluginError(t *testing.T) {
-	_, err := loadSegmentPlugin(defaultConfig().supportedSegmentPlugins, "ice", 1)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), `unsupported legacy segment type "ice"; migrate the index offline`) {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestExperimentalZapSegmentPluginError(t *testing.T) {
-	_, err := loadSegmentPlugin(defaultConfig().supportedSegmentPlugins, "zap", 17)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), `unsupported experimental segment type "zap" version 17; rebuild the index with zapx-bluge`) {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

@@ -23,7 +23,7 @@ func storedBlockCount(numDocs uint64) uint64 {
 }
 
 type storedBlockWriter struct {
-	w *FileWriter
+	w *CountHashWriter
 
 	blockOffsets []uint64
 	recordEnds   []uint64
@@ -35,7 +35,7 @@ type storedBlockWriter struct {
 	bytesWritten uint64
 }
 
-func newStoredBlockWriter(w *FileWriter, numDocs uint64) *storedBlockWriter {
+func newStoredBlockWriter(w *CountHashWriter, numDocs uint64) *storedBlockWriter {
 	return &storedBlockWriter{
 		w:            w,
 		blockOffsets: make([]uint64, 0, storedBlockCount(numDocs)),
@@ -76,9 +76,8 @@ func (w *storedBlockWriter) flush() error {
 	_, _ = w.block.Write(w.records.Bytes())
 
 	w.compressed = snappy.Encode(w.compressed[:cap(w.compressed)], w.block.Bytes())
-	processed := w.w.process(w.compressed)
-	w.blockOffsets = append(w.blockOffsets, uint64(w.w.Count()))
-	written, err := w.w.Write(processed)
+	w.blockOffsets = append(w.blockOffsets, w.w.Count())
+	written, err := w.w.Write(w.compressed)
 	w.bytesWritten += uint64(written)
 	if err != nil {
 		return err
@@ -94,7 +93,7 @@ func (w *storedBlockWriter) Close() (uint64, error) {
 		return 0, err
 	}
 
-	storedIndexOffset := uint64(w.w.Count())
+	storedIndexOffset := w.w.Count()
 	for _, blockOffset := range w.blockOffsets {
 		if err := binary.Write(w.w, binary.BigEndian, blockOffset); err != nil {
 			return 0, err
@@ -117,11 +116,7 @@ func (sb *SegmentBase) getDocStoredMetaAndData(vdc *visitDocumentCtx, docNum uin
 	blockNum := docNum / storedBlockSize
 	if vdc.segment != sb || vdc.blockNum != blockNum {
 		start, end := sb.storedBlockBounds(blockNum)
-		compressed, err := sb.fileReader.process(sb.mem[start:end])
-		if err != nil {
-			return nil, nil, err
-		}
-		decoded, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], compressed)
+		decoded, err := snappy.Decode(vdc.buf[:cap(vdc.buf)], sb.mem[start:end])
 		if err != nil {
 			return nil, nil, err
 		}

@@ -19,26 +19,27 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
+
 	blugeseg "github.com/fy0/bluge/segment"
 )
 
-func TestV2ImpactPostingsRoundTrip(t *testing.T) {
+func TestSegmentImpactPostingsRoundTrip(t *testing.T) {
 	documents := makeImpactTestDocuments(130)
 	segment := newStatsTestSegment(t, documents...)
 
 	var encoded bytes.Buffer
-	if _, err := segment.(*SegmentBase).WriteTo(&encoded); err != nil {
+	if _, err := segment.WriteTo(&encoded); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := LoadBytes(encoded.Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded.(*SegmentBase).FormatVersion(); got != Version {
+	if got := loaded.FormatVersion(); got != Version {
 		t.Fatalf("format version: got %d want %d", got, Version)
 	}
 
-	iterator := impactTestIterator(t, loaded.(*SegmentBase), "alpha")
+	iterator := impactTestIterator(t, loaded)
 	if !iterator.HasImpacts() {
 		t.Fatal("expected block impacts for high-cardinality term")
 	}
@@ -60,18 +61,18 @@ func TestV2ImpactPostingsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestV2PersistedSegmentFormatVersionAndImpacts(t *testing.T) {
+func TestSegmentPersistedSegmentFormatVersionAndImpacts(t *testing.T) {
 	segment := newStatsTestSegment(t, makeImpactTestDocuments(130)...)
 	path := filepath.Join(t.TempDir(), "segment.zap")
-	if err := segment.(*SegmentBase).Persist(path); err != nil {
+	if err := segment.Persist(path); err != nil {
 		t.Fatal(err)
 	}
 
-	loaded, err := new(ZapPlugin).Open(path)
+	loaded, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	persisted := loaded.(*Segment)
+	persisted := loaded
 	defer func() {
 		if err := persisted.Close(); err != nil {
 			t.Errorf("close persisted segment: %v", err)
@@ -84,14 +85,14 @@ func TestV2PersistedSegmentFormatVersionAndImpacts(t *testing.T) {
 	if got := persisted.Version(); got != Version {
 		t.Fatalf("footer version: got %d want %d", got, Version)
 	}
-	if iterator := impactTestIterator(t, &persisted.SegmentBase, "alpha"); !iterator.HasImpacts() {
+	if iterator := impactTestIterator(t, &persisted.SegmentBase); !iterator.HasImpacts() {
 		t.Fatal("persisted high-cardinality term lost impacts")
 	}
 }
 
-func TestV2RareTermDoesNotCarryImpacts(t *testing.T) {
+func TestSegmentRareTermDoesNotCarryImpacts(t *testing.T) {
 	segment := newStatsTestSegment(t, makeImpactTestDocuments(impactMinPostings-1)...)
-	iterator := impactTestIterator(t, segment.(*SegmentBase), "alpha")
+	iterator := impactTestIterator(t, segment)
 	if iterator.HasImpacts() {
 		t.Fatal("rare term unexpectedly has impact metadata")
 	}
@@ -101,16 +102,16 @@ func TestV2RareTermDoesNotCarryImpacts(t *testing.T) {
 	}
 }
 
-func TestV2RejectsV1Segment(t *testing.T) {
+func TestSegmentRejectsV1Segment(t *testing.T) {
 	segment := newStatsTestSegment(t, newStatsTestDocument("1", "alpha"))
 	var encoded bytes.Buffer
-	if _, err := segment.(*SegmentBase).WriteTo(&encoded); err != nil {
+	if _, err := segment.WriteTo(&encoded); err != nil {
 		t.Fatal(err)
 	}
 	data := encoded.Bytes()
 	binary.BigEndian.PutUint32(data[len(data)-8:len(data)-4], 1)
 	_, err := LoadBytes(data)
-	if err == nil || !strings.Contains(err.Error(), "unsupported version 1 != 2") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported segment version 1") {
 		t.Fatalf("unexpected v1 load result: %v", err)
 	}
 
@@ -118,18 +119,18 @@ func TestV2RejectsV1Segment(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = new(ZapPlugin).Open(path)
-	if err == nil || !strings.Contains(err.Error(), "unsupported version 1 != 2") {
+	_, err = Open(path)
+	if err == nil || !strings.Contains(err.Error(), "unsupported segment version 1") {
 		t.Fatalf("unexpected persisted v1 load result: %v", err)
 	}
 }
 
-func TestV2ImpactPostingsSurviveMergeAndDrops(t *testing.T) {
+func TestSegmentImpactPostingsSurviveMergeAndDrops(t *testing.T) {
 	first := newStatsTestSegment(t, makeImpactTestDocuments(130)...)
 	second := newStatsTestSegment(t, makeImpactTestDocuments(130)...)
 	var encoded bytes.Buffer
-	_, _, err := MergeToWriter([]scorchseg.Segment{first, second},
-		[]*roaring.Bitmap{roaring.BitmapOf(0, 64), nil}, &encoded, make(chan struct{}))
+	_, _, err := MergeToWriter([]*SegmentBase{first, second},
+		[]*roaring.Bitmap{roaring.BitmapOf(0, 64), nil}, &encoded, make(chan struct{}), blugeseg.BuildOptions{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +138,8 @@ func TestV2ImpactPostingsSurviveMergeAndDrops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	segment := merged.(*SegmentBase)
-	shallow := impactTestIterator(t, segment, "alpha")
+	segment := merged
+	shallow := impactTestIterator(t, segment)
 	if !shallow.HasImpacts() {
 		t.Fatal("merged high-cardinality term lost impacts")
 	}
@@ -162,9 +163,9 @@ func TestV2ImpactPostingsSurviveMergeAndDrops(t *testing.T) {
 	}
 }
 
-func TestV2DensePostingsSequentialCursorAfterAdvance(t *testing.T) {
-	segment := newStatsTestSegment(t, makeImpactTestDocuments(256)...).(*SegmentBase)
-	iterator := impactTestIterator(t, segment, "alpha")
+func TestSegmentDensePostingsSequentialCursorAfterAdvance(t *testing.T) {
+	segment := newStatsTestSegment(t, makeImpactTestDocuments(256)...)
+	iterator := impactTestIterator(t, segment)
 
 	posting, err := iterator.Advance(130)
 	if err != nil {
@@ -213,13 +214,13 @@ func makeImpactTestDocuments(count int) []blugeseg.Document {
 	return documents
 }
 
-func impactTestIterator(t *testing.T, segment *SegmentBase, term string) *PostingsIterator {
+func impactTestIterator(t *testing.T, segment *SegmentBase) *PostingsIterator {
 	t.Helper()
 	dictionary, err := segment.dictionary("body")
 	if err != nil {
 		t.Fatal(err)
 	}
-	postings, err := dictionary.postingsList([]byte(term), nil, nil)
+	postings, err := dictionary.postingsList([]byte("alpha"), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +263,7 @@ func assertExactImpactFrontier(t *testing.T, impacts []blugeseg.Impact, start, e
 func assertImpactFrontierBoundsPostings(t *testing.T, segment *SegmentBase,
 	start, end uint64, impacts []blugeseg.Impact) {
 	t.Helper()
-	iterator := impactTestIterator(t, segment, "alpha")
+	iterator := impactTestIterator(t, segment)
 	posting, err := iterator.Advance(start)
 	if err != nil {
 		t.Fatal(err)

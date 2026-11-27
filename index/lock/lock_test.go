@@ -15,7 +15,6 @@
 package lock
 
 import (
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +76,7 @@ func TestOpenExclusiveThenOpenShared(t *testing.T) {
 	defer f.Close()
 
 	// invoke another process to get an shared lock on this path (expect error)
+	// #nosec G702 -- This reexecutes the current test binary.
 	cmd := exec.Command(os.Args[0], "-test.run", "TestSubProcessHelper")
 	cmd.Env = append(os.Environ(),
 		pathEnv+"="+testPath,
@@ -112,6 +112,7 @@ func TestOpenSharedThenOpenShared(t *testing.T) {
 	}
 
 	// invoke another process to get an shared lock on this path
+	// #nosec G702 -- This reexecutes the current test binary.
 	cmd := exec.Command(os.Args[0], "-test.run", "TestSubProcessHelper")
 	cmd.Env = append(os.Environ(),
 		pathEnv+"="+testPath)
@@ -150,6 +151,7 @@ func TestOpenExclusiveThenOpenExclusive(t *testing.T) {
 	}
 
 	// invoke another process to get an exclusive lock on this path
+	// #nosec G702 -- This reexecutes the current test binary.
 	cmd := exec.Command(os.Args[0], "-test.run", "TestSubProcessHelper")
 	cmd.Env = append(
 		os.Environ(),
@@ -188,12 +190,12 @@ func TestOpenExclusiveThenOpenExclusive(t *testing.T) {
 
 func createTestPath(t *testing.T) (path string, cleanup func()) {
 	// create a path to test
-	tmpDir, err := ioutil.TempDir("", "lock-test")
+	tmpDir, err := os.MkdirTemp("", "lock-test")
 	if err != nil {
 		t.Fatalf("error creating temp dir: %v", err)
 	}
 	path = filepath.Join(tmpDir, "file")
-	err = ioutil.WriteFile(path, []byte("file"), 0600)
+	err = os.WriteFile(path, []byte("file"), 0600)
 	if err != nil {
 		t.Fatalf("error creatig temp file '%s': %v", path, err)
 	}

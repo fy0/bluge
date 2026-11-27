@@ -15,6 +15,7 @@
 package searcher
 
 import (
+	"math"
 	"testing"
 
 	"github.com/fy0/bluge/search/similarity"
@@ -44,14 +45,14 @@ func TestRegexpStringSearchScorch(t *testing.T) {
 		{
 			searcher: regexpSearcher,
 			num2score: map[uint64]float64{
-				baseTestIndexReaderDirect.docNumByID("1"): 0.6301338005090412,
+				baseTestIndexReaderDirect.docNumByID("1"): 1.386294361119891,
 			},
 		},
 		{
 			searcher: regexpSearcherCo,
 			num2score: map[uint64]float64{
-				baseTestIndexReaderDirect.docNumByID("2"): 0.9056194318873657,
-				baseTestIndexReaderDirect.docNumByID("3"): 0.9056194318873657,
+				baseTestIndexReaderDirect.docNumByID("2"): 1.992362750152205,
+				baseTestIndexReaderDirect.docNumByID("3"): 1.992362750152205,
 			},
 		},
 	}
@@ -74,7 +75,7 @@ func TestRegexpStringSearchScorch(t *testing.T) {
 				t.Errorf("test %d, found unexpected number = %d, next = %#v", testIndex, next.Number, next)
 			} else {
 				score := test.num2score[next.Number]
-				if next.Score != score {
+				if math.Abs(next.Score-score) > 1e-12 {
 					t.Errorf("test %d, expected result %d to have score %v got %v,next: %#v",
 						testIndex, i, score, next.Score, next)
 					t.Logf("scoring explanation: %s", next.Explanation)

@@ -63,12 +63,6 @@ func TestBM25SimilarityModes(t *testing.T) {
 		t.Fatalf("standard score: got %v want %v", standardScore, wantStandard)
 	}
 
-	legacy := NewLegacyBM25SimilarityBK1(defaultB, defaultK1)
-	legacyScore := legacy.Scorer(boost, stats, termStats).Score(freq, float64(legacy.ComputeNorm(docLen)))
-	if math.Abs(standardScore-legacyScore*(defaultK1+1)) > 1e-12 {
-		t.Fatalf("legacy score %v is not the historical scale of standard score %v", legacyScore, standardScore)
-	}
-
 	bleve := NewBleveBM25Similarity()
 	if got, want := bleve.AverageFieldLength(stats), 3.0; got != want {
 		t.Fatalf("Bleve avgdl: got %v want %v", got, want)
@@ -85,7 +79,7 @@ func TestBM25SimilarityModes(t *testing.T) {
 
 func TestBM25SimilarityEmptyStatsAreFinite(t *testing.T) {
 	for _, sim := range []*BM25Similarity{
-		NewBM25Similarity(), NewLegacyBM25Similarity(), NewBleveBM25Similarity(),
+		NewBM25Similarity(), NewBleveBM25Similarity(),
 	} {
 		scorer := sim.Scorer(1, &testCollectionStats{}, testTermStats(0))
 		score := scorer.Score(1, float64(sim.ComputeNorm(1)))

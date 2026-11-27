@@ -149,7 +149,7 @@ func TestUSearchVectorIndexBatchesAndCoalescesMutations(t *testing.T) {
 		t.Fatalf("used scalar native mutations: add=%d remove=%d",
 			api.singleAddCalls, api.singleRemoveCalls)
 	}
-	if !reflect.DeepEqual(api.removeBatchKeys, [][]uint64{{1, 2}}) {
+	if len(api.removeBatchKeys) != 0 {
 		t.Fatalf("unexpected removal batches: %v", api.removeBatchKeys)
 	}
 	if !reflect.DeepEqual(api.addBatchKeys, [][]uint64{{1}}) {
@@ -158,13 +158,30 @@ func TestUSearchVectorIndexBatchesAndCoalescesMutations(t *testing.T) {
 	if !reflect.DeepEqual(api.reserveCapacity, []int{1}) {
 		t.Fatalf("unexpected reserve calls: %v", api.reserveCapacity)
 	}
-	if api.compactCalls != 1 || api.saveCalls != 1 {
-		t.Fatalf("compact/save calls were %d/%d, expected 1/1",
+	if api.compactCalls != 0 || api.saveCalls != 1 {
+		t.Fatalf("compact/save calls were %d/%d, expected 0/1",
 			api.compactCalls, api.saveCalls)
 	}
 	handle := (*fakeUSearchHandle)(vectorIndex.indices["embedding"])
 	if !reflect.DeepEqual(handle.vectors, map[uint64][]float32{1: {0.25, 0.75}}) {
 		t.Fatalf("unexpected final native vectors: %v", handle.vectors)
+	}
+	if err := vectorIndex.ApplyVectorChanges([]VectorChange{
+		{ID: "three", Field: "embedding", Vector: []float32{1, 0}, Similarity: VectorCosine},
+		{ID: "three", Field: "embedding", Vector: []float32{0, 1}, Similarity: VectorCosine},
+		{ID: "four", Field: "embedding", Vector: []float32{1, 0}, Similarity: VectorCosine},
+		{ID: "four", Delete: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.removeBatchKeys) != 0 || api.compactCalls != 0 {
+		t.Fatalf("new key caused removals %v and %d compactions", api.removeBatchKeys, api.compactCalls)
+	}
+	if err := vectorIndex.ApplyVectorChanges([]VectorChange{{ID: "one", Delete: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(api.removeBatchKeys, [][]uint64{{1}}) || api.compactCalls != 1 {
+		t.Fatalf("existing key removal batches %v, compactions %d", api.removeBatchKeys, api.compactCalls)
 	}
 }
 

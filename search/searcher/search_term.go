@@ -56,7 +56,7 @@ func NewTermSearcher(indexReader search.Reader, term, field string, boost float6
 
 func NewTermSearcherBytes(indexReader search.Reader, term []byte, field string, boost float64, scorer search.Scorer,
 	options search.SearcherOptions) (*TermSearcher, error) {
-	needFreqNorm := options.Score != "none"
+	needFreqNorm := options.Score != optionScoringNone
 	reader, err := indexReader.PostingsIterator(term, field, needFreqNorm, needFreqNorm, options.IncludeTermVectors)
 	if err != nil {
 		return nil, err
@@ -166,85 +166,72 @@ func (s *TermSearcher) DocumentMatchPoolSize() int {
 
 func (s *TermSearcher) RawTopN(ctx context.Context, searchContext *search.Context,
 	size int) (search.RawTopNResult, bool, error) {
-	result := search.RawTopNResult{TotalCandidates: s.reader.Count()}
+	state := rawTopNState{result: search.RawTopNResult{TotalCandidates: s.reader.Count()},
+		context: searchContext, size: size}
 	blockReader, ok := s.reader.(segment.ImpactPostingsIterator)
 	blockScorer, scorerOK := s.scorer.(impactScorer)
 	if !ok || !scorerOK || !blockReader.HasImpacts() || s.options.Explain ||
-		s.options.IncludeTermVectors || s.options.Score == "none" {
-		return result, false, nil
+		s.options.IncludeTermVectors || s.options.Score == optionScoringNone {
+		return state.result, false, nil
 	}
 	if size <= 0 {
-		return result, true, nil
+		return state.result, true, nil
 	}
-
-	matches := make(rawTopNHeap, 0, size)
+	state.matches = make(rawTopNHeap, 0, size)
 	var posting segment.Posting
-	var target uint64
-	var blocksVisited uint64
+	var target, visited uint64
 	for {
-		blocksVisited++
-		if blocksVisited&1023 == 0 {
-			select {
-			case <-ctx.Done():
-				return result, true, ctx.Err()
-			default:
-			}
+		visited++
+		if err := rawTopNContext(ctx, visited); err != nil {
+			return state.result, true, err
 		}
-		blockEnd, impacts, exists, err := blockReader.AdvanceShallow(target)
+		end, impacts, exists, err := blockReader.AdvanceShallow(target)
 		if err != nil {
-			return result, true, err
+			return state.result, true, err
 		}
 		if !exists {
 			break
 		}
-		if len(impacts) > 0 && len(matches) == size &&
-			blockScorer.ScoreImpactUpperBound(impacts) <= matches[0].Score {
-			if blockEnd == math.MaxUint64 {
+		if len(impacts) > 0 && len(state.matches) == size &&
+			blockScorer.ScoreImpactUpperBound(impacts) <= state.matches[0].Score {
+			if end == math.MaxUint64 {
 				break
 			}
-			posting = nil
-			target = blockEnd + 1
+			posting, target = nil, end+1
 			continue
 		}
-
-		if posting == nil {
-			posting, err = s.reader.Advance(target)
-			if err != nil {
-				return result, true, err
-			}
-		}
-		for posting != nil && posting.Number() <= blockEnd {
-			if result.ScoredCandidates&1023 == 0 {
-				select {
-				case <-ctx.Done():
-					return result, true, ctx.Err()
-				default:
-				}
-			}
-			score := s.scorePosting(posting)
-			result.ScoredCandidates++
-			if len(matches) < size || rawTopNBetter(score, posting.Number(), matches[0]) {
-				match := searchContext.DocumentMatchPool.Get()
-				match.SetReader(s.indexReader)
-				match.Number = posting.Number()
-				match.Score = score
-				match.HitNumber = int(match.Number) + 1
-				if removed := rawTopNAdd(&matches, size, match); removed != nil {
-					searchContext.DocumentMatchPool.Put(removed)
-				}
-			}
-			posting, err = s.reader.Next()
-			if err != nil {
-				return result, true, err
-			}
+		posting, err = s.collectRawBlock(ctx, &state, posting, target, end)
+		if err != nil {
+			return state.result, true, err
 		}
 		if posting == nil {
 			break
 		}
 		target = posting.Number()
 	}
-	result.Matches = rawTopNSorted(matches)
-	return result, true, nil
+	return state.finish(), true, nil
+}
+
+func (s *TermSearcher) collectRawBlock(ctx context.Context, state *rawTopNState,
+	posting segment.Posting, target, end uint64) (segment.Posting, error) {
+	var err error
+	if posting == nil {
+		posting, err = s.reader.Advance(target)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for posting != nil && posting.Number() <= end {
+		if err := rawTopNContext(ctx, state.result.ScoredCandidates); err != nil {
+			return nil, err
+		}
+		state.collect(s.indexReader, posting.Number(), s.scorePosting(posting))
+		posting, err = s.reader.Next()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return posting, nil
 }
 
 func (s *TermSearcher) scorePosting(posting segment.Posting) float64 {

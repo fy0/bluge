@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
-	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
+
 	blugeseg "github.com/fy0/bluge/segment"
 
 	"github.com/fy0/bluge/internal/blugeidx"
@@ -50,8 +50,8 @@ func TestFieldStatsSurviveMerge(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
-			_, _, err := MergeToWriter([]scorchseg.Segment{first, second}, test.drops,
-				&output, make(chan struct{}))
+			_, _, err := MergeToWriter([]*SegmentBase{first, second}, test.drops,
+				&output, make(chan struct{}), blugeseg.BuildOptions{}, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -59,10 +59,7 @@ func TestFieldStatsSurviveMerge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			statsProvider := merged.(interface {
-				FieldStats(string) (uint64, uint64, bool)
-			})
-			documentCount, sumTotalTermFrequency, ok := statsProvider.FieldStats("body")
+			documentCount, sumTotalTermFrequency, ok := merged.FieldStats("body")
 			if !ok {
 				t.Fatal("expected body field statistics")
 			}
@@ -74,10 +71,10 @@ func TestFieldStatsSurviveMerge(t *testing.T) {
 	}
 }
 
-func newStatsTestSegment(t *testing.T, documents ...blugeseg.Document) scorchseg.Segment {
+func newStatsTestSegment(t *testing.T, documents ...blugeseg.Document) *SegmentBase {
 	t.Helper()
 	buildDocuments := newStatsTestBuildDocuments(t, documents...)
-	result, _, err := New(buildDocuments)
+	result, _, err := New(buildDocuments, nil, blugeseg.BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

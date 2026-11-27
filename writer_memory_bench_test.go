@@ -241,7 +241,7 @@ func TestWriterMemoryExperiment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		hits := 0
+		var hits uint64
 		for {
 			match, err := it.Next()
 			if err != nil {
@@ -252,7 +252,7 @@ func TestWriterMemoryExperiment(t *testing.T) {
 			}
 			hits++
 		}
-		maxHits := int(min(expected, 10))
+		maxHits := min(expected, 10)
 		minHits := maxHits
 		// A short final text chunk may end before its first "common" token.
 		if *writerMemoryCase == "stream" && expected <= 10 && minHits > 0 {

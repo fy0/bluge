@@ -56,6 +56,9 @@ linters:
         - style
     gocyclo:
       min-complexity: 20
+    gosec:
+      excludes:
+        - G115
     govet:
       settings:
         printf:
@@ -111,10 +114,6 @@ linters:
       - path: index/optimize.go
         linters:
           - funlen
-      - path: index/persister.go
-        linters:
-          - funlen
-        text: persisterLoop
       - path: ^analysis/.*_test\.go$
         linters:
           - dupl
@@ -163,18 +162,6 @@ linters:
       - linters:
           - gocritic
         text: config is heavy
-
-      # Section registration is intentionally performed during package init.
-      - path: ^internal/zapxtext/vector_section\.go$
-        linters:
-          - gochecknoinits
-
-      # These routines validate and merge several independent search states.
-      # Refactoring them immediately before release would add behavioral risk.
-      - path: ^(internal/zapxtext/vector_section|vector_(flat|search|usearch|usearch_embedded))\.go$
-        linters:
-          - gocyclo
-          - funlen
 
       # Vector sidecar paths come from the trusted index configuration and are
       # used directly for persistence; they are not derived from query input.

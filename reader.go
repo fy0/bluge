@@ -18,7 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"sync/atomic"
 
 	"github.com/fy0/bluge/index"
@@ -29,15 +29,11 @@ import (
 )
 
 type Reader struct {
-	config Config
-	reader *index.Snapshot
-	vector VectorIndex
-	// A vector view borrows its parent's text snapshot until the parent closes it.
+	config           Config
+	reader           *index.Snapshot
+	vector           VectorIndex
 	borrowedSnapshot bool
 
-	// closed is set by Close so lifetime-bound objects such as
-	// PreparedVectorFilter can reject use after the reader is gone. It is
-	// atomic because it is written by Close while searches may read it.
 	closed atomic.Bool
 }
 
@@ -50,7 +46,7 @@ func OpenReader(config Config) (*Reader, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error opening index: %w", err)
 	}
-	rv.vector, err = openVectorIndexForSnapshot(config, rv.reader)
+	rv.vector, err = newVectorState(config).snapshot(rv.reader)
 	if err != nil {
 		_ = rv.reader.Close()
 		return nil, err
@@ -97,19 +93,26 @@ func (r *Reader) Search(ctx context.Context, req SearchRequest) (search.Document
 		return nil, err
 	}
 
-	// FIXME search stats on reader?
-
 	return dmItr, nil
 }
 
-// VectorSearch returns the nearest vectors for a field. A non-nil filter is
-// evaluated by Bluge first, then applied to the vector candidates.
 func (r *Reader) VectorSearch(ctx context.Context, field string, query []float32,
+	k int, filter Query) ([]VectorHit, error) {
+	if err := validateVectorQuery(query, k); err != nil {
+		return nil, err
+	}
+	return r.vectorSearch(ctx, field, query, k, filter)
+}
+
+func (r *Reader) vectorSearch(ctx context.Context, field string, query []float32,
 	k int, filter Query) ([]VectorHit, error) {
 	if r.vector == nil {
 		return nil, ErrVectorUnsupported
 	}
 	if filter == nil {
+		if _, ok := r.vector.(VectorCandidateSearcher); ok {
+			return searchVectorCandidates(r.vector, field, query, k, nil)
+		}
 		return r.vector.Search(field, query, k, nil)
 	}
 	if candidateSearcher, ok := r.vector.(vectorDocumentCandidateSearcher); ok {
@@ -119,21 +122,14 @@ func (r *Reader) VectorSearch(ctx context.Context, field string, query []float32
 		}
 		return candidateSearcher.searchDocumentCandidates(field, query, k, allowed)
 	}
-	if candidateSearcher, ok := r.vector.(VectorCandidateSearcher); ok {
+	if _, ok := r.vector.(VectorCandidateSearcher); ok {
 		allowed, err := r.vectorFilterIDs(ctx, filter)
 		if err != nil {
 			return nil, err
 		}
-		return candidateSearcher.SearchCandidates(field, query, k, allowed)
+		return searchVectorCandidates(r.vector, field, query, k, allowed)
 	}
 	return r.vector.Search(field, query, k, filter)
-}
-
-// SearchVector is kept as a discoverable alias for callers that use verb-first
-// naming alongside Reader.Search.
-func (r *Reader) SearchVector(ctx context.Context, field string, query []float32,
-	k int, filter Query) ([]VectorHit, error) {
-	return r.VectorSearch(ctx, field, query, k, filter)
 }
 
 func (r *Reader) vectorFilterDocumentNumbers(ctx context.Context, filter Query) ([]uint64, error) {
@@ -151,7 +147,7 @@ func (r *Reader) vectorFilterDocumentNumbers(ctx context.Context, filter Query) 
 			return nil, err
 		}
 		if match == nil {
-			sort.Slice(allowed, func(i, j int) bool { return allowed[i] < allowed[j] })
+			slices.Sort(allowed)
 			return allowed, nil
 		}
 		allowed = append(allowed, match.Number)
@@ -213,42 +209,14 @@ func (r *Reader) vectorView(vector VectorIndex) *Reader {
 	return &Reader{config: r.config, reader: r.reader, vector: vector, borrowedSnapshot: true}
 }
 
-// PreparedVectorFilter is a filter Query that was evaluated once against one
-// Reader, so several vector searches can reuse the outcome instead of
-// re-running the text search for every query.
-//
-// A prepared filter is bound to the Reader that created it. Using it with a
-// different Reader, after it was closed, or after its Reader was closed is
-// rejected with ErrVectorPreparedFilter. It is read-only once created and can
-// be shared by concurrent searches on its own Reader.
-//
-// The filter is resolved into whatever its backend consumes at preparation
-// time - allowed document numbers, or the allowed identifier set - so the
-// Query object is not consulted again and mutating it afterwards cannot change
-// the results. The unfiltered case (a nil Query) is represented distinctly
-// from a filter that matches no documents, so an empty match set yields no
-// results instead of turning into an unfiltered search.
+// A prepared filter borrows one reader snapshot; nil and empty candidate sets differ.
 type PreparedVectorFilter struct {
-	reader *Reader
-	// docs is the sorted set of allowed global document numbers, or nil when
-	// the filter was nil or when the backend filters by identifier instead. It
-	// is never exposed directly: callers must not be able to hold document
-	// numbers without the lifetime check.
-	docs []uint64
-	// allowedIDs is the allowed identifier set for backends that cannot
-	// consume document numbers, or nil when the filter was nil or when the
-	// backend filters by document number instead.
+	reader     *Reader
+	docs       []uint64
 	allowedIDs map[Identifier]struct{}
 	closed     atomic.Bool
 }
 
-// PrepareVectorFilter evaluates filter once and returns a reusable filter for
-// VectorSearchPrepared. A nil filter prepares the unfiltered case.
-//
-// A non-nil filter requires a backend that can actually apply filters: the
-// outcome is frozen into the form that backend consumes, and a backend that
-// supports neither document numbers nor identifier sets returns
-// ErrVectorFilterUnsupported rather than deferring the failure to search time.
 func (r *Reader) PrepareVectorFilter(ctx context.Context, filter Query) (*PreparedVectorFilter, error) {
 	if r.closed.Load() {
 		return nil, fmt.Errorf("%w: reader is closed", ErrVectorPreparedFilter)
@@ -276,14 +244,7 @@ func (r *Reader) PrepareVectorFilter(ctx context.Context, filter Query) (*Prepar
 	return nil, ErrVectorFilterUnsupported
 }
 
-// Close releases the prepared filter. Later searches that use it fail instead
-// of silently searching without a filter. The resolved document numbers or
-// identifiers are left untouched so that closing cannot race with a search
-// that already passed the lifetime check.
 func (f *PreparedVectorFilter) Close() error {
-	if f == nil {
-		return nil
-	}
 	f.closed.Store(true)
 	return nil
 }
@@ -304,32 +265,29 @@ func (f *PreparedVectorFilter) validFor(r *Reader) error {
 	return nil
 }
 
-// VectorSearchPrepared runs a vector search with a filter prepared by
-// PrepareVectorFilter. It has the same result semantics as VectorSearch with
-// the equivalent filter, but it reuses the filter outcome instead of
-// evaluating the query again.
 func (r *Reader) VectorSearchPrepared(ctx context.Context, field string, query []float32,
 	k int, prepared *PreparedVectorFilter) ([]VectorHit, error) {
+	if err := validateVectorQuery(query, k); err != nil {
+		return nil, err
+	}
 	if err := prepared.validFor(r); err != nil {
 		return nil, err
 	}
 	if r.vector == nil {
 		return nil, ErrVectorUnsupported
 	}
-	// The representation stored by PrepareVectorFilter is the one this
-	// reader's backend consumes, so exactly one of these branches applies.
 	if prepared.docs != nil {
 		if candidateSearcher, ok := r.vector.(vectorDocumentCandidateSearcher); ok {
 			return candidateSearcher.searchDocumentCandidates(field, query, k, prepared.docs)
 		}
 	}
 	if prepared.allowedIDs != nil {
-		if candidateSearcher, ok := r.vector.(VectorCandidateSearcher); ok {
-			return candidateSearcher.SearchCandidates(field, query, k, prepared.allowedIDs)
+		if _, ok := r.vector.(VectorCandidateSearcher); ok {
+			return searchVectorCandidates(r.vector, field, query, k, prepared.allowedIDs)
 		}
 	}
 	if prepared.docs == nil && prepared.allowedIDs == nil {
-		return r.vector.Search(field, query, k, nil)
+		return r.vectorSearch(ctx, field, query, k, nil)
 	}
 	return nil, fmt.Errorf("%w: filter was prepared for a different vector backend",
 		ErrVectorPreparedFilter)

@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -17,22 +16,9 @@ import (
 
 const usearchLibraryPathEnv = "BLUGE_USEARCH_LIBRARY_PATH"
 
-// The adapter negotiates an ABI version range so newer Go builds keep working
-// with older native libraries. ABI 3 is the baseline contract; ABI 4 adds
-// bluge_usearch_index_reserve_threads.
-const (
-	usearchMinABIVersion            = 3
-	usearchABIVersionReserveThreads = 4
-	usearchMaxABIVersion            = usearchABIVersionReserveThreads
-)
+const usearchABIVersion = 4
 
-// usearchSearchThreads bounds in-flight native calls per index handle on
-// ABI >= 4 libraries, matching the size the search context pool is grown to.
-// Every USearch context carries a visited set proportional to the segment
-// size plus a per-thread cast buffer, so the value trades scratch memory for
-// parallelism: 64 keeps one segment searchable from every core on wide
-// machines while bounding scratch to a few megabytes per million-vector
-// segment.
+// USearch keeps one search context per concurrent call.
 const usearchSearchThreads = 64
 
 var (
@@ -40,23 +26,9 @@ var (
 	usearchLibraries = make(map[string]*puregoUSearchAPI)
 )
 
-// puregoUSearchAPI mirrors the narrow C ABI exported by vector_engine. The
-// platform-specific files only open and close the native library; purego owns
-// symbol resolution and C calling-convention adaptation on every platform.
 type puregoUSearchAPI struct {
 	handle uintptr
 
-	// abiVersion is the version reported by bluge_usearch_abi_version at load
-	// time. It gates entry points introduced after ABI 3.
-	abiVersion uint32
-
-	// USearch allocates a pool of search contexts per index. Concurrent calls
-	// beyond the pool size fail with "Reserve capacity ahead of searches!".
-	// ABI 3 libraries size the pool to hardware_concurrency at create/load
-	// time and cannot grow it; ABI 4 libraries grow it to
-	// usearchSearchThreads when the handle is prepared. Either way every
-	// handle gets a semaphore sized to its pool so excess callers wait
-	// instead of failing.
 	handleGates sync.Map // unsafe.Pointer -> *usearchHandleGate
 
 	abiVersionFunc                  func() uint32
@@ -84,8 +56,6 @@ type puregoUSearchAPI struct {
 		unsafe.Pointer, uintptr, unsafe.Pointer, unsafe.Pointer, *uintptr) int32
 	indexLastError func(unsafe.Pointer, unsafe.Pointer, uintptr) uintptr
 
-	// indexReserveThreads exists only on ABI >= 4 libraries. Nil on older
-	// artifacts, where the context pool keeps its default size.
 	indexReserveThreads func(unsafe.Pointer, uintptr, uintptr) bool
 }
 
@@ -116,17 +86,10 @@ func loadUSearchAPI(path string) (usearchNativeAPI, error) {
 			continue
 		}
 		version := api.abiVersionFunc()
-		if version < usearchMinABIVersion || version > usearchMaxABIVersion {
+		if version != usearchABIVersion {
 			_ = closeUSearchLibrary(handle)
 			attempts = append(attempts, fmt.Sprintf("%s: unsupported ABI version %d", candidate, version))
 			continue
-		}
-		api.abiVersion = version
-		if version >= usearchABIVersionReserveThreads {
-			// ABI 4 libraries always export reserve_threads; a missing symbol
-			// degrades to the default pool size rather than a load failure.
-			registerOptionalUSearchFunc(&api.indexReserveThreads, handle,
-				"bluge_usearch_index_reserve_threads")
 		}
 		usearchLibraries[key] = api
 		return api, nil
@@ -170,18 +133,10 @@ func (l *puregoUSearchAPI) register() (err error) {
 	register(&l.indexSearchFiltered, "bluge_usearch_index_search_filtered")
 	register(&l.indexLastError, "bluge_usearch_index_last_error")
 
-	registerOptionalUSearchFunc(&l.hardwareAccelerationCompiledFn, l.handle,
-		"bluge_usearch_hardware_acceleration_compiled")
-	registerOptionalUSearchFunc(&l.hardwareAccelerationAvailableFn, l.handle,
-		"bluge_usearch_hardware_acceleration_available")
+	register(&l.indexReserveThreads, "bluge_usearch_index_reserve_threads")
+	register(&l.hardwareAccelerationCompiledFn, "bluge_usearch_hardware_acceleration_compiled")
+	register(&l.hardwareAccelerationAvailableFn, "bluge_usearch_hardware_acceleration_available")
 	return nil
-}
-
-func registerOptionalUSearchFunc(function any, handle uintptr, name string) {
-	defer func() {
-		_ = recover()
-	}()
-	purego.RegisterLibFunc(function, handle, name)
 }
 
 func usearchLibraryCandidates(explicit string) []string {
@@ -233,19 +188,11 @@ func uint64Pointer(values []uint64) unsafe.Pointer {
 
 func (l *puregoUSearchAPI) create(dimensions uintptr, metric uint32, connectivity,
 	expansionAdd, expansionSearch uintptr) unsafe.Pointer {
-	handle := l.indexCreate(dimensions, metric, connectivity, expansionAdd, expansionSearch)
-	if handle != nil {
-		l.prepareHandle(handle)
-	}
-	return handle
+	return l.prepareHandle(l.indexCreate(dimensions, metric, connectivity, expansionAdd, expansionSearch))
 }
 
 func (l *puregoUSearchAPI) open(path string) unsafe.Pointer {
-	handle := l.indexOpen(path)
-	if handle != nil {
-		l.prepareHandle(handle)
-	}
-	return handle
+	return l.prepareHandle(l.indexOpen(path))
 }
 
 func (l *puregoUSearchAPI) openBuffer(data []byte) unsafe.Pointer {
@@ -254,102 +201,47 @@ func (l *puregoUSearchAPI) openBuffer(data []byte) unsafe.Pointer {
 	}
 	handle := l.indexOpenBuffer(bytePointer(data), uintptr(len(data)))
 	runtime.KeepAlive(data)
-	if handle != nil {
-		l.prepareHandle(handle)
+	return l.prepareHandle(handle)
+}
+
+func (l *puregoUSearchAPI) prepareHandle(handle unsafe.Pointer) unsafe.Pointer {
+	if handle == nil {
+		return nil
 	}
+	if !l.indexReserveThreads(handle, l.indexSize(handle), usearchSearchThreads) {
+		l.indexDestroy(handle)
+		return nil
+	}
+	l.handleGates.Store(handle, newUsearchHandleGate(usearchSearchThreads))
 	return handle
 }
 
-// prepareHandle grows the native context pool on ABI >= 4 libraries and
-// installs the handle's concurrency gate. The handle is not shared yet, so
-// the reservation needs no permit. When the library cannot grow the pool the
-// gate keeps the default pool size, so the bound is never looser than the
-// pool itself.
-func (l *puregoUSearchAPI) prepareHandle(handle unsafe.Pointer) {
-	limit := fallbackUsearchConcurrency()
-	if l.indexReserveThreads != nil &&
-		l.indexReserveThreads(handle, l.indexSize(handle), usearchSearchThreads) {
-		limit = usearchSearchThreads
-	}
-	l.handleGates.Store(handle, newUsearchHandleGate(limit))
-}
-
-// fallbackUsearchConcurrency mirrors the default USearch context pool, which
-// is sized to std::thread::hardware_concurrency when an index is created or
-// loaded without an explicit thread count.
-func fallbackUsearchConcurrency() int {
-	if cpus := runtime.NumCPU(); cpus > 0 {
-		return cpus
-	}
-	return 1
-}
-
-// usearchHandleGate bounds in-flight native calls on one index handle to the
-// size of its USearch context pool. Ordinary operations take a single permit;
-// operations that reallocate the pool or the stored vectors (reserve,
-// compact, save, destroy) take every permit so they never overlap an
-// in-flight call. exclusive serializes all-permit acquisitions against each
-// other: two concurrent drains could otherwise each hold a subset of the
-// permits and deadlock. inFlight and peak count in-flight calls for tests.
+// Exclusive operations acquire every permit; the mutex prevents partial-drain deadlocks.
 type usearchHandleGate struct {
 	slots     chan struct{}
 	exclusive sync.Mutex
-	inFlight  atomic.Int32
-	peak      atomic.Int32
 }
 
 func newUsearchHandleGate(limit int) *usearchHandleGate {
-	if limit < 1 {
-		limit = 1
-	}
 	return &usearchHandleGate{slots: make(chan struct{}, limit)}
 }
 
-func (g *usearchHandleGate) trackAcquire() {
-	inFlight := g.inFlight.Add(1)
-	for {
-		peak := g.peak.Load()
-		if inFlight <= peak || g.peak.CompareAndSwap(peak, inFlight) {
-			return
-		}
-	}
-}
-
-// gateFor returns the concurrency gate for handle, installing a
-// default-sized one when the handle predates gate tracking. The fallback is
-// capped by the smallest pool the handle could have: hardware_concurrency on
-// ABI 3, or a successfully grown pool on ABI 4.
 func (l *puregoUSearchAPI) gateFor(handle unsafe.Pointer) *usearchHandleGate {
-	if gate, ok := l.handleGates.Load(handle); ok {
-		return gate.(*usearchHandleGate)
-	}
-	limit := fallbackUsearchConcurrency()
-	if l.indexReserveThreads != nil && limit > usearchSearchThreads {
-		limit = usearchSearchThreads
-	}
-	gate, _ := l.handleGates.LoadOrStore(handle, newUsearchHandleGate(limit))
+	gate, _ := l.handleGates.Load(handle)
 	return gate.(*usearchHandleGate)
 }
 
-// acquire takes one context permit for the next native call on handle and
-// returns the release function.
 func (l *puregoUSearchAPI) acquire(handle unsafe.Pointer) func() {
 	if handle == nil {
 		return func() {}
 	}
 	gate := l.gateFor(handle)
 	gate.slots <- struct{}{}
-	gate.trackAcquire()
 	return func() {
-		gate.inFlight.Add(-1)
 		<-gate.slots
 	}
 }
 
-// acquireExclusive takes every context permit so the next native call on
-// handle cannot overlap any in-flight call. Reserve, compaction,
-// serialization, and destruction use it because they reallocate the
-// structures the other calls read.
 func (l *puregoUSearchAPI) acquireExclusive(handle unsafe.Pointer) func() {
 	if handle == nil {
 		return func() {}
@@ -359,24 +251,12 @@ func (l *puregoUSearchAPI) acquireExclusive(handle unsafe.Pointer) func() {
 	for i := 0; i < cap(gate.slots); i++ {
 		gate.slots <- struct{}{}
 	}
-	gate.trackAcquire()
 	return func() {
-		gate.inFlight.Add(-1)
 		for i := 0; i < cap(gate.slots); i++ {
 			<-gate.slots
 		}
 		gate.exclusive.Unlock()
 	}
-}
-
-// handlePeakInFlight reports the largest observed number of concurrent native
-// calls on the handle. It exists so tests can prove the bounded-parallelism
-// contract.
-func (l *puregoUSearchAPI) handlePeakInFlight(handle unsafe.Pointer) int32 {
-	if gate, ok := l.handleGates.Load(handle); ok {
-		return gate.(*usearchHandleGate).peak.Load()
-	}
-	return 0
 }
 
 func (l *puregoUSearchAPI) destroy(handle unsafe.Pointer) {
@@ -417,16 +297,10 @@ func (l *puregoUSearchAPI) saveBuffer(handle unsafe.Pointer, output []byte) int3
 func (l *puregoUSearchAPI) reserve(handle unsafe.Pointer, capacity int) int32 {
 	release := l.acquireExclusive(handle)
 	defer release()
-	if l.indexReserveThreads != nil {
-		// A members-only reserve would reset the context pool to the
-		// hardware default, so growth goes through reserve_threads to keep
-		// the negotiated pool size.
-		if l.indexReserveThreads(handle, uintptr(capacity), usearchSearchThreads) {
-			return 0
-		}
-		return -1
+	if l.indexReserveThreads(handle, uintptr(capacity), usearchSearchThreads) {
+		return 0
 	}
-	return l.indexReserve(handle, uintptr(capacity))
+	return -1
 }
 
 func (l *puregoUSearchAPI) add(handle unsafe.Pointer, key uint64, vector []float32) int32 {
@@ -454,15 +328,10 @@ func (l *puregoUSearchAPI) get(handle unsafe.Pointer, key uint64, vector []float
 	var resultCount uintptr
 	status := l.indexGet(handle, key, vectorPointer(vector), uintptr(len(vector)), &resultCount)
 	runtime.KeepAlive(vector)
-	if status != 0 {
-		return status
-	}
-	// USearch returns the number of vectors written, not scalar values. This
-	// call requests exactly one vector regardless of its dimensions.
-	if resultCount != 1 {
+	if status == 0 && resultCount != 1 {
 		return -1
 	}
-	return 0
+	return status
 }
 
 func (l *puregoUSearchAPI) remove(handle unsafe.Pointer, key uint64) int32 {
@@ -482,7 +351,13 @@ func (l *puregoUSearchAPI) removeBatch(handle unsafe.Pointer, keys []uint64) int
 func (l *puregoUSearchAPI) compact(handle unsafe.Pointer) int32 {
 	release := l.acquireExclusive(handle)
 	defer release()
-	return l.indexCompact(handle)
+	if status := l.indexCompact(handle); status != 0 {
+		return status
+	}
+	if l.indexReserveThreads(handle, l.indexSize(handle), usearchSearchThreads) {
+		return 0
+	}
+	return -1
 }
 
 func (l *puregoUSearchAPI) save(handle unsafe.Pointer, path string) int32 {
@@ -541,16 +416,10 @@ func (l *puregoUSearchAPI) errorMessageInto(handle unsafe.Pointer, buffer []byte
 }
 
 func (l *puregoUSearchAPI) hardwareAccelerationCompiled() string {
-	if l.hardwareAccelerationCompiledFn == nil {
-		return ""
-	}
 	return l.hardwareAccelerationCompiledFn()
 }
 
 func (l *puregoUSearchAPI) hardwareAccelerationAvailable() string {
-	if l.hardwareAccelerationAvailableFn == nil {
-		return ""
-	}
 	return l.hardwareAccelerationAvailableFn()
 }
 

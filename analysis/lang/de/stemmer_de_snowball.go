@@ -17,6 +17,7 @@ package de
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/german"
+
 	"github.com/fy0/bluge/analysis"
 )
 

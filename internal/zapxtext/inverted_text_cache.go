@@ -22,86 +22,41 @@ import (
 	"github.com/blevesearch/vellum"
 )
 
-func newInvertedIndexCache() *invertedIndexCache {
-	return &invertedIndexCache{
-		cache: make(map[uint16]*invertedCacheEntry),
-	}
-}
-
 type invertedIndexCache struct {
-	m sync.RWMutex
-
-	cache map[uint16]*invertedCacheEntry
+	m     sync.RWMutex
+	cache map[uint16]*vellum.FST
 }
 
-func (sc *invertedIndexCache) Clear() {
-	sc.m.Lock()
-	sc.cache = nil
-	sc.m.Unlock()
+func newInvertedIndexCache() *invertedIndexCache {
+	return &invertedIndexCache{cache: make(map[uint16]*vellum.FST)}
 }
 
-// loadOrCreate loads the inverted index cache for the specified fieldID if it is already present,
-// or creates it if not. The inverted index cache for a fieldID consists of an FST (Finite State Transducer):
-// - A Vellum FST (Finite State Transducer) representing the TermDictionary.
-// This function returns the loaded or newly created FST, and the number of bytes read from the provided memory slice,
-// if the cache was created.
-func (sc *invertedIndexCache) loadOrCreate(fieldID uint16, mem []byte, fr *FileReader) (*vellum.FST, uint64, error) {
-	sc.m.RLock()
-	entry, ok := sc.cache[fieldID]
-	if ok {
-		sc.m.RUnlock()
-		return entry.load()
-	}
-
-	sc.m.RUnlock()
-
-	sc.m.Lock()
-	defer sc.m.Unlock()
-
-	entry, ok = sc.cache[fieldID]
-	if ok {
-		return entry.load()
-	}
-
-	return sc.createAndCacheLOCKED(fieldID, mem, fr)
+func (c *invertedIndexCache) Clear() {
+	c.m.Lock()
+	c.cache = nil
+	c.m.Unlock()
 }
 
-// createAndCacheLOCKED creates the inverted index cache for the specified fieldID and caches it.
-func (sc *invertedIndexCache) createAndCacheLOCKED(fieldID uint16, mem []byte, fr *FileReader) (*vellum.FST, uint64, error) {
-	var pos uint64
-	vellumLen, read := binary.Uvarint(mem[pos : pos+binary.MaxVarintLen64])
-	if vellumLen == 0 || read <= 0 {
-		return nil, 0, fmt.Errorf("vellum length is 0")
+func (c *invertedIndexCache) loadOrCreate(fieldID uint16, mem []byte) (*vellum.FST, uint64, error) {
+	c.m.RLock()
+	fst := c.cache[fieldID]
+	c.m.RUnlock()
+	if fst != nil {
+		return fst, 0, nil
 	}
-	pos += uint64(read)
-	fstBytes, err := fr.process(mem[pos : pos+vellumLen])
+	c.m.Lock()
+	defer c.m.Unlock()
+	if fst := c.cache[fieldID]; fst != nil {
+		return fst, 0, nil
+	}
+	length, n := binary.Uvarint(mem)
+	if n <= 0 || length == 0 || length > uint64(len(mem[n:])) {
+		return nil, 0, fmt.Errorf("invalid dictionary length")
+	}
+	fst, err := vellum.Load(mem[n : uint64(n)+length])
 	if err != nil {
-		return nil, 0, fmt.Errorf("error processing vellum bytes: %v", err)
+		return nil, 0, err
 	}
-	fst, err := vellum.Load(fstBytes)
-	if err != nil {
-		return nil, 0, fmt.Errorf("vellum err: %v", err)
-	}
-	pos += vellumLen
-	sc.insertLOCKED(fieldID, fst)
-	return fst, pos, nil
-}
-
-// insertLOCKED inserts the vellum FST into the cache for the specified fieldID.
-func (sc *invertedIndexCache) insertLOCKED(fieldID uint16, fst *vellum.FST) {
-	_, ok := sc.cache[fieldID]
-	if !ok {
-		sc.cache[fieldID] = &invertedCacheEntry{
-			fst: fst,
-		}
-	}
-}
-
-// invertedCacheEntry is the vellum FST and is the value stored in the invertedIndexCache cache, for a given fieldID.
-type invertedCacheEntry struct {
-	fst *vellum.FST
-}
-
-func (ce *invertedCacheEntry) load() (*vellum.FST, uint64, error) {
-	return ce.fst, 0, nil
+	c.cache[fieldID] = fst
+	return fst, uint64(n) + length, nil
 }

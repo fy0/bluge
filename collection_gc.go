@@ -14,24 +14,17 @@ import (
 	"time"
 
 	"github.com/fy0/bluge/index/lock"
+	"github.com/fy0/bluge/internal/fsatomic"
 )
 
-// CollectionMaintenance reports completed removals, including partial progress
-// when an error is returned. Bytes are logical file sizes, not allocated blocks.
+// Counts include completed removals when maintenance returns an error.
 type CollectionMaintenance struct {
-	// RemovedGenerations counts retired commits. On error, payload deletion may
-	// still be pending; RemovedBytes only counts completed file removals.
 	RemovedGenerations int
-	// PinnedGenerations counts reader-held generations older than the current one.
-	PinnedGenerations int
-	RemovedFiles      int
-	RemovedBytes      int64
+	PinnedGenerations  int
+	RemovedFiles       int
+	RemovedBytes       int64
 }
 
-// Maintain keeps the current generation and generations held by readers, and
-// removes abandoned publication files. No names selects all spaces.
-// It checks catalogs and file presence; use VerifyCollection to check contents.
-// A failed pass is safe to retry. It never repairs corrupt commits.
 func (c *Collection) Maintain(ctx context.Context, spaceIDs ...string) (CollectionMaintenance, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -43,16 +36,13 @@ func (c *Collection) Maintain(ctx context.Context, spaceIDs ...string) (Collecti
 	return result, err
 }
 
-// LastMaintenanceError reports the last automatic or explicit maintenance error.
-// UpsertVectors returns success once committed, even if subsequent cleanup fails.
+// A committed generation remains successful when its later cleanup fails.
 func (c *Collection) LastMaintenanceError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.maintenanceErr
 }
 
-// MaintainCollection is the offline maintenance entry point. It requires the
-// collection writer lock; use Collection.Maintain when a writer is already open.
 func MaintainCollection(ctx context.Context, config CollectionConfig, spaceIDs ...string) (CollectionMaintenance, error) {
 	config, err := config.normalized()
 	if err != nil {
@@ -70,9 +60,6 @@ func MaintainCollection(ctx context.Context, config CollectionConfig, spaceIDs .
 	return maintainCollection(ctx, config, m.CorpusID, spaceIDs...)
 }
 
-// VerifyCollection checks checksums and metadata for every retained generation in
-// the named spaces, or all spaces if none are named. It does not modify data.
-// The coordinator prevents publication and reclamation while verification runs.
 func VerifyCollection(ctx context.Context, config CollectionConfig, spaceIDs ...string) error {
 	config, err := config.normalized()
 	if err != nil {
@@ -105,16 +92,15 @@ func VerifyCollection(ctx context.Context, config CollectionConfig, spaceIDs ...
 	return nil
 }
 
-// The coordinator inode is permanent. Hold it from discovery until all reader
-// leases are acquired, and throughout retirement. A lease inode may only be
-// removed under this coordinator after an exclusive lease was acquired.
+// The coordinator inode is permanent and covers discovery, pinning and retirement.
+// Removing a lease inode requires the coordinator and an exclusive lease.
 func lockCollectionCoordinator(ctx context.Context, root string) (lock.LockedFile, error) {
 	for {
 		if err := collectionContextError(ctx); err != nil {
 			return nil, err
 		}
 		l, err := lock.OpenExclusive(filepath.Join(root, "generations.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-		if err == nil || !collectionLockBusy(err) {
+		if err == nil || !fsatomic.LockBusy(err) {
 			return l, err
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -152,12 +138,10 @@ func closeCollectionLeases(leases []lock.LockedFile) error {
 func collectionFileGeneration(name string) (uint64, bool, error) {
 	var raw string
 	switch {
-	case strings.HasPrefix(name, "commit-") && strings.HasSuffix(name, ".json"):
-		raw = strings.TrimSuffix(strings.TrimPrefix(name, "commit-"), ".json")
 	case strings.HasPrefix(name, "metadata-") && strings.HasSuffix(name, ".json"):
 		raw = strings.TrimSuffix(strings.TrimPrefix(name, "metadata-"), ".json")
-	case strings.HasPrefix(name, "index-") && (strings.HasSuffix(name, ".flat") || strings.HasSuffix(name, ".usearch")):
-		raw = strings.TrimSuffix(strings.TrimPrefix(name, "index-"), filepath.Ext(name))
+	case strings.HasPrefix(name, "index-"):
+		raw = strings.TrimPrefix(name, "index-")
 	case strings.HasPrefix(name, "lease-") && strings.HasSuffix(name, ".lock"):
 		raw = strings.TrimSuffix(strings.TrimPrefix(name, "lease-"), ".lock")
 	default:
@@ -188,19 +172,6 @@ func maintainCollection(ctx context.Context, config CollectionConfig, corpus str
 	if err != nil {
 		return result, err
 	}
-	// Check publication records before changing any selected space. Hashing large
-	// payloads belongs to explicit verification and lazy loading, not reclamation.
-	for _, space := range spaces {
-		for _, n := range space.Generations {
-			if err := collectionContextError(ctx); err != nil {
-				return result, err
-			}
-			space.Generation = n
-			if _, err := readCollectionCommit(config, space); err != nil {
-				return result, err
-			}
-		}
-	}
 	for _, spec := range sortedCollectionSpecs(spaces) {
 		space := spaces[spec.ID]
 		if err := retireCollectionGenerations(ctx, config, &space, &result); err != nil {
@@ -214,8 +185,7 @@ func maintainCollection(ctx context.Context, config CollectionConfig, corpus str
 
 func sweepCollectionFiles(ctx context.Context, root string, spaces map[string]collectionSpace,
 	selected bool, result *CollectionMaintenance) error {
-	// The writer lock excludes active staging writes. The coordinator excludes new
-	// readers. Retirements are durable before deleting now-uncommitted payloads.
+	// The writer and coordinator locks exclude staging writes and reader discovery.
 	var dirs []string
 	if selected {
 		for id := range spaces {
@@ -262,7 +232,7 @@ func retireCollectionGenerations(ctx context.Context, config CollectionConfig,
 			return err
 		}
 		lease, err := lock.OpenExclusive(collectionLeasePath(dir, n), os.O_CREATE|os.O_RDWR, 0o600)
-		if collectionLockBusy(err) {
+		if fsatomic.LockBusy(err) {
 			result.PinnedGenerations++
 			continue
 		}
@@ -282,22 +252,10 @@ func retireCollectionGenerations(ctx context.Context, config CollectionConfig,
 			space.Generations = append(space.Generations, n)
 		}
 	}
-	// This durable catalog replacement is the retirement point. Any files
-	// left behind afterwards are unreferenced, including old commit files.
 	if err := writeCollectionSpace(dir, space); err != nil {
 		return err
 	}
 	result.RemovedGenerations += len(retire)
-	for _, n := range generations {
-		if !retire[n] {
-			continue
-		}
-		_, _, commit := collectionGenerationFiles(dir, config.VectorStorage, n)
-		retired := filepath.Join(dir, ".retired-"+filepath.Base(commit))
-		if err := publishCollectionFile(commit, retired); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -313,7 +271,7 @@ func checkCollectionOrphanLeases(dir string, entries []os.DirEntry, committed ma
 		if recognized && !committed[n] && !checked[n] {
 			checked[n] = true
 			lease, err := lock.OpenExclusive(collectionLeasePath(dir, n), os.O_RDWR, 0)
-			if collectionLockBusy(err) {
+			if fsatomic.LockBusy(err) {
 				return fmt.Errorf("%w: reader holds unreferenced generation %d", ErrCollectionCorrupt, n)
 			}
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -330,7 +288,7 @@ func checkCollectionOrphanLeases(dir string, entries []os.DirEntry, committed ma
 }
 
 func sweepCollectionDirectory(ctx context.Context, dir string, committed map[uint64]bool, result *CollectionMaintenance) error {
-	if err := syncCollectionDirectory(dir); err != nil {
+	if err := fsatomic.SyncDir(dir); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(dir)
@@ -345,7 +303,7 @@ func sweepCollectionDirectory(ctx context.Context, dir string, committed map[uin
 			return err
 		}
 		n, recognized, _ := collectionFileGeneration(e.Name())
-		if (!recognized || committed[n]) && !strings.HasPrefix(e.Name(), ".pending-") && !strings.HasPrefix(e.Name(), ".retired-") {
+		if (!recognized || committed[n]) && !strings.HasPrefix(e.Name(), ".pending-") {
 			continue
 		}
 		path := filepath.Join(dir, e.Name())
@@ -374,5 +332,5 @@ func sweepCollectionDirectory(ctx context.Context, dir string, committed map[uin
 		result.RemovedFiles += count
 		result.RemovedBytes += size
 	}
-	return syncCollectionDirectory(dir)
+	return fsatomic.SyncDir(dir)
 }

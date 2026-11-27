@@ -17,6 +17,7 @@ package fi
 import (
 	"github.com/blevesearch/snowballstem"
 	"github.com/blevesearch/snowballstem/finnish"
+
 	"github.com/fy0/bluge/analysis"
 )
 

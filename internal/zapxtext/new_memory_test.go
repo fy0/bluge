@@ -8,6 +8,7 @@ import (
 	bleveindex "github.com/blevesearch/bleve_index_api"
 
 	"github.com/fy0/bluge/internal/blugeidx"
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
 func TestSmallBatchesDoNotOverallocateAfterLargeDocuments(t *testing.T) {
@@ -23,7 +24,7 @@ func TestSmallBatchesDoNotOverallocateAfterLargeDocuments(t *testing.T) {
 	// Reuse the pooled builder after a large stored-only document. The old
 	// estimate reserved roughly 25 MiB for each following 256 KiB document.
 	for i := 0; i < 8; i++ {
-		seg, _, err := New([]*blugeidx.Document{doc})
+		seg, _, err := New([]*blugeidx.Document{doc}, nil, blugeseg.BuildOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -31,7 +32,7 @@ func TestSmallBatchesDoNotOverallocateAfterLargeDocuments(t *testing.T) {
 			t.Fatalf("one 256 KiB document retained %d bytes", seg.Size())
 		}
 		var stored []byte
-		err = seg.(*SegmentBase).VisitStoredFields(0, func(name string, _ byte, value []byte, _ []uint64) bool {
+		err = seg.VisitStoredFields(0, func(name string, _ byte, value []byte, _ []uint64) bool {
 			if name == "body" {
 				stored = append([]byte(nil), value...)
 			}

@@ -19,7 +19,8 @@ import (
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
-	scorchseg "github.com/blevesearch/scorch_segment_api/v2"
+
+	blugeseg "github.com/fy0/bluge/segment"
 )
 
 func postingsListFor(t *testing.T, sb *SegmentBase, field, term string) *PostingsList {
@@ -83,26 +84,23 @@ func TestMergeOneHitNormGuard(t *testing.T) {
 			// output; "shared" stays general in every variant.
 			docs := newStatsTestBuildDocuments(t,
 				newStatsTestDocument("a", "alpha shared"))
-			var segA scorchseg.Segment
-			var err error
-			if tc.normCalc == nil {
-				segA, _, err = New(docs)
-			} else {
-				segA, _, err = NewWithNormCalc(docs, tc.normCalc)
-			}
+			segA, _, err := New(docs, tc.normCalc, blugeseg.BuildOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			src := onlyPosting(t, segA.(*SegmentBase), "body", "alpha")
+			src := onlyPosting(t, segA, "body", "alpha")
 			if src == nil || src.Frequency() != 1 {
 				t.Fatalf("source alpha posting: %v", src)
 			}
 			wantNorm := src.NormUint64()
+			if got := postingsListFor(t, segA, "body", "alpha").normBits1Hit != 0; got != tc.want1Hit {
+				t.Fatalf("new segment 1-hit: got %v want %v", got, tc.want1Hit)
+			}
 
 			segB := newStatsTestSegment(t, newStatsTestDocument("b", "shared"))
 			var buf bytes.Buffer
-			_, _, err = MergeToWriter([]scorchseg.Segment{segA, segB},
-				[]*roaring.Bitmap{nil, nil}, &buf, make(chan struct{}))
+			_, _, err = MergeToWriter([]*SegmentBase{segA, segB},
+				[]*roaring.Bitmap{nil, nil}, &buf, make(chan struct{}), blugeseg.BuildOptions{}, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,7 +108,7 @@ func TestMergeOneHitNormGuard(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sb := merged.(*SegmentBase)
+			sb := merged
 
 			pl := postingsListFor(t, sb, "body", "alpha")
 			if is1Hit := pl.normBits1Hit != 0; is1Hit != tc.want1Hit {
@@ -128,6 +126,36 @@ func TestMergeOneHitNormGuard(t *testing.T) {
 					p.NormUint64(), wantNorm)
 			}
 		})
+	}
+}
+
+func TestDictionaryCountsAfterOneHit(t *testing.T) {
+	sb := newStatsTestSegment(t,
+		newStatsTestDocument("a", "alpha shared"),
+		newStatsTestDocument("b", "shared"))
+	dict, err := sb.dictionary("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	iterator, err := dict.fst.Iterator(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := DictionaryIterator{d: dict, itr: iterator}
+	for _, want := range []struct {
+		term  string
+		count uint64
+	}{{"alpha", 1}, {"shared", 2}} {
+		entry, err := entries.Next()
+		if err != nil || entry == nil || entry.Term != want.term || entry.Count != want.count {
+			t.Fatalf("entry: got %+v, error %v, want %s/%d", entry, err, want.term, want.count)
+		}
+	}
+	if entry, err := entries.Next(); err != nil || entry != nil {
+		t.Fatalf("unexpected trailing entry: %+v, error %v", entry, err)
+	}
+	if err := iterator.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

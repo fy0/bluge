@@ -12,22 +12,17 @@ import (
 	"fmt"
 
 	"github.com/fy0/bluge/index"
+	"github.com/fy0/bluge/internal/blugeidx"
 	segment "github.com/fy0/bluge/segment"
 )
 
-type vectorFieldValue interface {
-	VectorValue() []float32
-	VectorSimilarity() VectorSimilarity
-}
-
-func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
+func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, error) {
 	if batch == nil {
-		return nil, false, fmt.Errorf("nil batch")
+		return nil, fmt.Errorf("nil batch")
 	}
 
 	var (
 		changes      = make([]VectorChange, 0, batch.OperationCount()*2)
-		hasVector    bool
 		iterationErr error
 	)
 	batch.VisitOperations(func(operation index.BatchOperation) bool {
@@ -45,14 +40,6 @@ func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
 				iterationErr = err
 				return false
 			}
-			if hasDocVectors {
-				hasVector = true
-			}
-			if hasDocVectors && !hasID {
-				iterationErr = fmt.Errorf("vector document is missing %q", _idField)
-				return false
-			}
-
 			if operation.Kind == index.BatchOperationUpdate && operation.ID.Field() == _idField {
 				changes = append(changes, VectorChange{
 					ID:     Identifier(string(operation.ID.Term())),
@@ -78,9 +65,9 @@ func vectorChangesForBatch(batch *index.Batch) ([]VectorChange, bool, error) {
 		return true
 	})
 	if iterationErr != nil {
-		return nil, false, iterationErr
+		return nil, iterationErr
 	}
-	return changes, hasVector, nil
+	return changes, nil
 }
 
 func batchContainsVectors(batch *index.Batch) (bool, error) {
@@ -135,18 +122,14 @@ func documentVectorData(doc segment.Document) (Identifier, bool, []documentVecto
 			id = Identifier(string(field.Value()))
 			hasID = true
 		}
-		vectorField, ok := field.(vectorFieldValue)
+		values, similarity, ok := blugeidx.VectorFromField(field)
 		if !ok {
 			return true
 		}
-		if name == "" {
-			err = ErrVectorInvalidField
-			return false
-		}
 		vectors = append(vectors, documentVector{
 			field:      name,
-			vector:     append([]float32(nil), vectorField.VectorValue()...),
-			similarity: vectorField.VectorSimilarity(),
+			vector:     values,
+			similarity: VectorSimilarity(similarity),
 		})
 		return true
 	})
@@ -166,7 +149,7 @@ func documentHasVectors(doc segment.Document) (bool, error) {
 			err = fmt.Errorf("nil field")
 			return false
 		}
-		if _, ok := field.(vectorFieldValue); ok {
+		if _, ok := field.(segment.VectorFieldValue); ok {
 			found = true
 			return false
 		}
@@ -224,45 +207,6 @@ func visitDocumentFields(doc segment.Document, visitor func(segment.Field) bool)
 			keepVisiting = visitor(field)
 		}
 	})
-	return nil
-}
-
-func applyVectorChanges(vector VectorIndex, changes []VectorChange, hasVectors bool) error {
-	if vector == nil {
-		if hasVectors {
-			return ErrVectorUnsupported
-		}
-		return nil
-	}
-	if len(changes) == 0 {
-		return nil
-	}
-	batcher, ok := vector.(VectorBatcher)
-	if !ok {
-		if hasVectors {
-			return ErrVectorBackendReadOnly
-		}
-		return nil
-	}
-	return batcher.ApplyVectorChanges(changes)
-}
-
-func validateVectorChanges(vector VectorIndex, changes []VectorChange, hasVectors bool) error {
-	if vector == nil {
-		if hasVectors {
-			return ErrVectorUnsupported
-		}
-		return nil
-	}
-	if len(changes) == 0 {
-		return nil
-	}
-	if validator, ok := vector.(VectorBatchValidator); ok {
-		return validator.ValidateVectorChanges(changes)
-	}
-	if _, ok := vector.(VectorBatcher); !ok && hasVectors {
-		return ErrVectorBackendReadOnly
-	}
 	return nil
 }
 

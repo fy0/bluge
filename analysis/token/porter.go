@@ -18,6 +18,7 @@ import (
 	"bytes"
 
 	"github.com/blevesearch/go-porterstemmer"
+
 	"github.com/fy0/bluge/analysis"
 )
 

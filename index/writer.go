@@ -17,13 +17,15 @@ package index
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/fy0/bluge/internal/fsatomic"
 	segment "github.com/fy0/bluge/segment"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -63,14 +65,14 @@ type Writer struct {
 	closeErr  error
 }
 
-func OpenWriter(config Config) (*Writer, error) {
+func validateWriterConfig(config *Config) error {
 	if config.NumAnalysisWorkers < 1 {
-		return nil, fmt.Errorf("number of analysis workers must be at least 1")
+		return fmt.Errorf("number of analysis workers must be at least 1")
 	}
 	if config.MergePlanningByBytes && (config.MergePlanOptions.MaxSegmentSize < 1 ||
 		config.MergePlanOptions.FloorSegmentSize < 1 ||
 		config.MergePlanOptions.FloorSegmentSize > config.MergePlanOptions.MaxSegmentSize) {
-		return nil, fmt.Errorf("byte-based merge planning requires 0 < floor size <= maximum size")
+		return fmt.Errorf("byte-based merge planning requires 0 < floor size <= maximum size")
 	}
 	if config.BackgroundRetryInitialDelay == 0 {
 		config.BackgroundRetryInitialDelay = defaultBackgroundRetryInitialDelay
@@ -79,8 +81,15 @@ func OpenWriter(config Config) (*Writer, error) {
 		config.BackgroundRetryMaxDelay = defaultBackgroundRetryMaxDelay
 	}
 	if config.BackgroundRetryInitialDelay < 0 || config.BackgroundRetryMaxDelay < config.BackgroundRetryInitialDelay {
-		return nil, fmt.Errorf("background retry delays must be positive with maximum >= initial: initial=%s, maximum=%s",
+		return fmt.Errorf("background retry delays must be positive with maximum >= initial: initial=%s, maximum=%s",
 			config.BackgroundRetryInitialDelay, config.BackgroundRetryMaxDelay)
+	}
+	return nil
+}
+
+func OpenWriter(config Config) (*Writer, error) {
+	if err := validateWriterConfig(&config); err != nil {
+		return nil, err
 	}
 
 	rv := &Writer{
@@ -115,10 +124,7 @@ func OpenWriter(config Config) (*Writer, error) {
 		return nil, fmt.Errorf("error getting exclusive access to diretory: %w", err)
 	}
 
-	// initialize nextSegmentID to a safe value; list the segment files
-	// before loading snapshots, so a failure here happens before any
-	// snapshot has been committed to the deletion policy and the cleanup
-	// path cannot remove files whose references are still unknown
+	// Load the file list before snapshots, so a failed open cannot delete untracked files.
 	existingSegments, err := rv.directory.List(ItemKindSegment)
 	if err != nil {
 		rv.abortOpen()
@@ -136,11 +142,7 @@ func OpenWriter(config Config) (*Writer, error) {
 	}
 	atomic.StoreUint64(&rv.stats.LastPersistedEpoch, lastPersistedEpoch)
 
-	// report on-disk segment files to the deletion policy, so files that
-	// are not referenced by any loaded snapshot (leftovers from
-	// interrupted persists or skipped merge introductions) can be
-	// reclaimed by the cleanup below; reaching this point means every
-	// snapshot loaded, so the reference set is complete
+	// All snapshots are loaded, so unreferenced files can now be reclaimed.
 	if tracker, ok := rv.deletionPolicy.(SegmentFileTracker); ok {
 		tracker.TrackSegmentFiles(existingSegments)
 	}
@@ -443,7 +445,7 @@ func (s *Writer) Reader() (*Snapshot, error) {
 func (s *Writer) MemoryUsed() (memUsed uint64) {
 	indexSnapshot := s.currentSnapshot()
 	if indexSnapshot == nil {
-		return
+		return 0
 	}
 
 	defer func() {
@@ -526,22 +528,27 @@ func OpenReader(config Config) (*Snapshot, error) {
 		return nil, err
 	}
 
-	// start with most recent
-	var indexSnapshot *Snapshot
-	for _, snapshotEpoch := range snapshotEpochs {
-		indexSnapshot, err = parent.loadSnapshot(snapshotEpoch)
-		if err != nil {
-			log.Printf("error loading snapshot epoch: %d: %v", snapshotEpoch, err)
-			// but keep going and hope there is another newer snapshot that works
-			continue
-		}
-		break
-	}
-	if indexSnapshot == nil {
+	if len(snapshotEpochs) == 0 {
 		return nil, fmt.Errorf("unable to find a usable snapshot")
 	}
-
-	return indexSnapshot, nil
+	epoch := snapshotEpochs[0]
+	for {
+		snapshot, err := parent.loadSnapshot(epoch)
+		if err == nil {
+			return snapshot, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) && !fsatomic.ReadConflict(err) {
+			return nil, err
+		}
+		current, listErr := parent.directory.List(ItemKindSnapshot)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(current) == 0 || current[0] <= epoch {
+			return nil, err
+		}
+		epoch = current[0]
+	}
 }
 
 func (s *Writer) loadSnapshot(epoch uint64) (*Snapshot, error) {
@@ -556,7 +563,21 @@ func (s *Writer) loadSnapshot(epoch uint64) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Keep the snapshot locked until every referenced segment is pinned.
+	err = s.readSnapshotData(snapshot, data)
+	if err == nil {
+		err = s.loadSnapshotSegments(snapshot)
+	}
+	if closer != nil {
+		err = errors.Join(err, closer.Close())
+	}
+	if err != nil {
+		return nil, errors.Join(err, snapshot.Close())
+	}
+	return snapshot, nil
+}
 
+func (s *Writer) readSnapshotData(snapshot *Snapshot, data *segment.Data) error {
 	// wrap the reader so we never read the last 4 bytes (CRC)
 	dataReader := io.LimitReader(data.Reader(), int64(data.Len()-crcWidth))
 	var crcReader *countHashReader
@@ -565,67 +586,48 @@ func (s *Writer) loadSnapshot(epoch uint64) (*Snapshot, error) {
 		dataReader = crcReader
 	}
 
-	_, err = snapshot.ReadFrom(dataReader)
-	if err != nil {
-		if closer != nil {
-			_ = closer.Close()
-		}
-		return nil, err
+	if _, err := snapshot.ReadFrom(dataReader); err != nil {
+		return err
 	}
 
 	if crcReader != nil {
 		computedCRCBytes := make([]byte, crcWidth)
 		binary.BigEndian.PutUint32(computedCRCBytes, crcReader.Sum32())
-		var fileCRCBytes []byte
-		fileCRCBytes, err = data.Read(data.Len()-crcWidth, data.Len())
+		fileCRCBytes, err := data.Read(data.Len()-crcWidth, data.Len())
 		if err != nil {
-			if closer != nil {
-				_ = closer.Close()
-			}
-			return nil, fmt.Errorf("error reading snapshot CRC: %w", err)
+			return fmt.Errorf("error reading snapshot CRC: %w", err)
 		}
 		if !bytes.Equal(computedCRCBytes, fileCRCBytes) {
-			// format the error before closing: fileCRCBytes points into
-			// the mapping that closer.Close() may unmap
-			err = fmt.Errorf("CRC mismatch loading snapshot %d: computed: %x file: %x",
-				epoch, computedCRCBytes, fileCRCBytes)
-			if closer != nil {
-				_ = closer.Close()
-			}
-			return nil, err
+			return fmt.Errorf("CRC mismatch loading snapshot %d: computed: %x file: %x",
+				snapshot.epoch, computedCRCBytes, fileCRCBytes)
 		}
 	}
-	if closer != nil {
-		err = closer.Close()
-		if err != nil {
-			return nil, err
-		}
-	}
+	return nil
+}
 
+func (s *Writer) loadSnapshotSegments(snapshot *Snapshot) error {
 	var running uint64
 	for _, segSnapshot := range snapshot.segment {
 		segPlugin, err := loadSegmentPlugin(s.config.supportedSegmentPlugins, segSnapshot.segmentType, segSnapshot.segmentVersion)
 		if err != nil {
-			_ = snapshot.Close()
-			return nil, fmt.Errorf("error loading required segment plugin: %v", err)
+			return fmt.Errorf("error loading required segment plugin: %w", err)
 		}
 		segSnapshot.segment, err = s.loadSegment(segSnapshot.id, segPlugin)
 		if err != nil {
-			_ = snapshot.Close()
-			return nil, fmt.Errorf("error opening segment %d: %w", segSnapshot.id, err)
+			return fmt.Errorf("error opening segment %d: %w", segSnapshot.id, err)
 		}
 
 		snapshot.offsets = append(snapshot.offsets, running)
 		running += segSnapshot.segment.Count()
 	}
 
-	return snapshot, nil
+	return nil
 }
 
 func (s *Writer) loadSegment(id uint64, plugin *SegmentPlugin) (*segmentWrapper, error) {
 	data, closer, err := s.directory.Load(ItemKindSegment, id)
 	if err != nil {
-		return nil, fmt.Errorf("error loading segment fromt directory: %v", err)
+		return nil, fmt.Errorf("error loading segment from directory: %w", err)
 	}
 	seg, err := plugin.Load(data)
 	if err != nil {

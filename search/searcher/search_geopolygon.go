@@ -81,8 +81,9 @@ func buildPolygonFilter(dvReader segment.DocumentValueReader, polygon []geo.Poin
 			if err == nil && shift == 0 {
 				i64, err := prefixCoded.Int64()
 				if err == nil {
-					lons = append(lons, geo.MortonUnhashLon(uint64(i64)))
-					lats = append(lats, geo.MortonUnhashLat(uint64(i64)))
+					morton := uint64(i64)
+					lons = append(lons, geo.MortonUnhashLon(morton))
+					lats = append(lats, geo.MortonUnhashLat(morton))
 					found = true
 				}
 			}

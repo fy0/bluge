@@ -37,12 +37,12 @@ func NewTermsAggregation(src search.TextValuesSource, size int) *TermsAggregatio
 		size: size,
 		desc: true,
 		lessFunc: func(a, b *search.Bucket) bool {
-			return a.Aggregations()["count"].(search.MetricCalculator).Value() < b.Aggregations()["count"].(search.MetricCalculator).Value()
+			return a.Aggregations()[countKey].(search.MetricCalculator).Value() < b.Aggregations()[countKey].(search.MetricCalculator).Value()
 		},
 		aggregations: make(map[string]search.Aggregation),
 		sortFunc:     sort.Sort,
 	}
-	rv.aggregations["count"] = CountMatches()
+	rv.aggregations[countKey] = CountMatches()
 	return rv
 }
 
@@ -142,7 +142,7 @@ func (a *TermsCalculator) Finish() {
 
 	var notOther int
 	for _, bucket := range a.bucketsList {
-		notOther += int(bucket.Aggregations()["count"].(search.MetricCalculator).Value())
+		notOther += int(bucket.Aggregations()[countKey].(search.MetricCalculator).Value())
 	}
 	a.other = a.total - notOther
 }
