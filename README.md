@@ -158,7 +158,7 @@ for all workloads, raw results, correctness checks, and reproduction commands.
 
 ### Branch Highlights
 
-* **zapx-bluge v2 segment format** - the default backend is a pure-Go,
+* **zapx-bluge v3 segment format** - the default backend is a pure-Go,
   text-focused adaptation of zapx.  It does not require FAISS or cgo.
 * **Exact Block-Max BM25 WAND** - high-cardinality terms persist 64-posting
   blocks with non-dominated frequency/raw-norm impacts.  Score-descending
@@ -260,9 +260,9 @@ disk space; applications should also limit log and backup retention.
 
 ### Index Compatibility
 
-The on-disk format is **zapx-bluge v2**.  It is intentionally incompatible with
-zapx-bluge v1, the official ice-backed release, and the earlier experimental
-zap v17 format; those indexes must be rebuilt or migrated offline.  The vector
+The on-disk format is **zapx-bluge v3**.  It is intentionally incompatible with
+earlier zapx-bluge versions (v1/v2), the official ice-backed release, and the
+earlier experimental zap v17 format; those indexes must be rebuilt.  The vector
 API and zapx vector section extension points remain available.  The default
 build does not require FAISS or cgo and returns `ErrVectorUnsupported` unless an
 application supplies a vector backend.

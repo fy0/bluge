@@ -116,7 +116,7 @@ if err := writer.InsertMany(chunks); err != nil {
 `Writer.InsertMany` 和 `Writer.UpdateMany` 各自只提交一个 text batch，并把整批
 向量 mutation 交给 backend。首次构建大语料时优先使用
 `OfflineWriter.InsertMany`：它按配置的 batch size 构建 segment，再并行合并。
-USearch 的新增和删除通过 ABI 3 批量传递；新增向量使用 row-major 缓冲区，并按
+USearch 的新增和删除通过 ABI 4 批量传递；新增向量使用 row-major 缓冲区，并按
 约 4 MiB 或最多 4096 行切分单次 FFI 调用。没有配置向量 backend 的传统文本
 `Insert`/`Batch` 路径不会提取 `_id`、复制向量或分配 `VectorChange`，同时仍会
 在提交前拒绝误加的 vector field。
@@ -172,8 +172,9 @@ native backend 不需要理解 Bluge Query。`TextCandidates` 和
 `VectorCandidates` 用于控制召回/延迟折中，默认是 `max(100, 10*K)`。
 
 flat sidecar 的当前格式是 `BLUGEVEC` v1，保存 field spec、document ID 和
-`float32` 数据。USearch sidecar 是 `manifest.json` 加每个 field 的 USearch
-二进制索引；manifest 保存 field spec 和 ID/key 映射。两者都把 L2 分数转成
+`float32` 数据。USearch sidecar 是 `metadata.json` 加每个 field 的 USearch
+二进制索引（`field-<escaped-field>.usearch`）；`metadata.json` 保存 field spec
+和 ID/key 映射。两者都把 L2 分数转成
 负的平方距离，并把 dot/cosine 转成 Bluge 的“分数越高越好”约定。
 
 Embedded USearch 不使用这些旁车文件：每个 segment 的 vector section 保存
@@ -185,8 +186,9 @@ backend 名称、维度、similarity、segment-local docID 映射和 USearch
 过滤仍由 Bluge 先执行，因此 native backend 不需要复制 Bluge Query 语义。
 sidecar backend 把允许的 `_id` 映射成 USearch key；Embedded USearch 直接把
 命中的全局文档号二分映射成 segment-local key，并同时排除删除位图。key 数组
-一次性传入 Rust，由 Rust `HashSet` 驱动 USearch filtered search；native 不会
-回调 Go，Go 也不再为过滤查询取回整个 field 的距离结果。
+按升序去重后一次性传入 Rust，由 Rust 直接在切片上二分查找驱动 USearch filtered
+search（无额外堆分配）；native 不会回调 Go，Go 也不再为过滤查询取回整个 field
+的距离结果。
 
 ## 已知边界
 
@@ -207,8 +209,7 @@ sidecar backend 把允许的 `_id` 映射成 USearch key；Embedded USearch 直�
 - filtered search 属于 ANN 图内过滤；过滤极为稀疏时，召回率和延迟仍受
   `ExpansionSearch` 影响，需要按知识库数据分布测试并调参。文本过滤查询及
   允许 key 集合本身也仍有成本。
-- zapx 原先预留的 `SectionFaissVectorIndex` 槽位现命名为通用的
-  `SectionVectorIndex`，并保留旧名称作为兼容别名。payload 带 backend 标识，
+- zapx 的向量段槽位命名为通用的 `SectionVectorIndex`。payload 带 backend 标识，
   当前由 Embedded USearch 使用，不把 segment 格式绑定到 FAISS 或 USearch。
 
 ## 下一阶段门槛
