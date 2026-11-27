@@ -226,7 +226,7 @@ Windows C API DLL 或 Rust-WASM 对照。USearch 目前是 opt-in，不改变默
 text-only 构建。
 
 native library 统一由 `Vector Engine Native Libraries` GitHub Actions workflow
-验证和打包。每个 OS/64 位架构只有一个产物：Windows 固定 LLVM 20.1.8 和
+验证和打包。每个 OS/64 位架构只有一个产物：Windows 固定 LLVM 22.1.8 和
 MSVC ABI，Linux 固定 GCC 13，macOS 固定 Xcode 16.4，Rust 固定 1.90.0；不发布
 Clang/GCC/Zig 或 baseline/SSE/AVX 的平行变体。
 

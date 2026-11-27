@@ -61,9 +61,9 @@ jobs:
             numkong: true
             linker: lld-link.exe
             linker_env: CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER
-            llvm_asset: LLVM-20.1.8-win64.exe
-            llvm_sha256: 3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b
-            compiler: LLVM 20.1.8 Windows x64 + Rust 1.90.0 MSVC target
+            llvm_asset: LLVM-22.1.8-win64.exe
+            llvm_sha256: 16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c
+            compiler: LLVM 22.1.8 Windows x64 + Rust 1.90.0 MSVC target
             runtime: Microsoft VC 14.x dynamic
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
@@ -74,9 +74,9 @@ jobs:
             numkong: true
             linker: lld-link.exe
             linker_env: CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER
-            llvm_asset: LLVM-20.1.8-woa64.exe
-            llvm_sha256: 7c4ac97eb2ae6b960ca5f9caf3ff6124c8d2a18cc07a7840a4d2ea15537bad8e
-            compiler: LLVM 20.1.8 Windows ARM64 + Rust 1.90.0 MSVC target
+            llvm_asset: LLVM-22.1.8-woa64.exe
+            llvm_sha256: 76f44ef1ba6eeb5a65904e9500f042f588fade49952778ce48f0374daa934396
+            compiler: LLVM 22.1.8 Windows ARM64 + Rust 1.90.0 MSVC target
             runtime: Microsoft VC 14.x dynamic
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -144,9 +144,9 @@ jobs:
         if: matrix.goos == 'windows'
         shell: pwsh
         run: |
-          $installDirectory = Join-Path $env:RUNNER_TEMP "llvm-20.1.8"
+          $installDirectory = Join-Path $env:RUNNER_TEMP "llvm-22.1.8"
           $installer = Join-Path $env:RUNNER_TEMP "${{ matrix.llvm_asset }}"
-          $downloadUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/${{ matrix.llvm_asset }}"
+          $downloadUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/${{ matrix.llvm_asset }}"
           Invoke-WebRequest -Uri $downloadUrl -OutFile $installer
           $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash.ToLowerInvariant()
           if ($actualHash -ne "${{ matrix.llvm_sha256 }}") {
@@ -161,8 +161,8 @@ jobs:
           $llvmDirectory = Join-Path $installDirectory "bin"
           $clangPath = Join-Path $llvmDirectory "clang-cl.exe"
           $versionText = (& $clangPath --version | Out-String)
-          if ($versionText -notmatch "clang version 20\.1\.8(?:\s|$)") {
-            throw "Expected LLVM Clang 20.1.8, got: $versionText"
+          if ($versionText -notmatch "clang version 22\.1\.8(?:\s|$)") {
+            throw "Expected LLVM Clang 22.1.8, got: $versionText"
           }
           foreach ($tool in @("clang-cl.exe", "clang++.exe", "lld-link.exe", "llvm-lib.exe", "llvm-objdump.exe")) {
             if (-not (Test-Path -LiteralPath (Join-Path $llvmDirectory $tool))) {
@@ -288,7 +288,7 @@ jobs:
           if ($cargoExitCode -ne 0) {
             $commandDiagnostics = ($cargoLog |
               Where-Object {
-                $_ -match "running:|CC_|CFLAGS|CXX_|CXXFLAGS|command did not execute|clang-cl|clang\+\+|numkong\.c"
+                $_ -match "error:|fatal error:|STL\d+|running:|CC_|CFLAGS|CXX_|CXXFLAGS|command did not execute|clang-cl|clang\+\+|numkong\.c"
               } |
               Select-Object -Last 80 |
               Out-String).Trim()

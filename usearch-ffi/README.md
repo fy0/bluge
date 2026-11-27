@@ -81,7 +81,7 @@ module in the same release.
 32-bit Windows, 32-bit Linux, and 32-bit ARM are intentionally unsupported.
 
 There is exactly one native library for each OS/architecture pair. Windows is
-built only with the matching official LLVM 20.1.8 Windows package for the MSVC
+built only with the matching official LLVM 22.1.8 Windows package for the MSVC
 ABI, Linux only with GCC 13, and macOS only with the Apple Clang toolchain in
 Xcode 16.4. All targets use Rust 1.90.0. The workflow does not produce
 alternative GCC, Clang, or Zig builds for the same target.
